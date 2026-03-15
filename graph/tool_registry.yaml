@@ -1,0 +1,18 @@
+# Tool registry: all tools and their descriptions for the orchestration LLM.
+# For each tool: list required columns/args, then optional. Add examples so the LLM knows how to call it.
+
+tools:
+  plot_data:
+    description: |
+      Creates a Plotly scatter plot from the CSV. Returns path to the saved HTML plot.
+    parameters_required:
+      - csv_path   # path to the CSV file
+      - x_col      # column name for X axis (must exist in CSV)
+      - y_col      # column name for Y axis (must exist in CSV)
+    parameters_optional:
+      - color_col  # column name for point color; omit or leave empty for no color
+    # session_id is injected by the graph for all tools; do not list in parameters
+    examples:
+      - "plot_data(csv_path='data/file.csv', x_col='date', y_col='sales')"
+      - "plot_data(csv_path='data/file.csv', x_col='date', y_col='revenue', color_col='region')"
+      - "plot_data(csv_path='data/file.csv', x_col='week', y_col='orders', color_col='')"
