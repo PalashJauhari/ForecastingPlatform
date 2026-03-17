@@ -1,6 +1,6 @@
 """
-FastAPI: single endpoint that invokes the forecast graph and returns its output.
-File upload and plot serving are helpers; the core is: invoke graph → yield output.
+FastAPI: single endpoint that invokes the forecast agent and returns its output.
+File upload saves to data/<session_id>/source_files/.
 Loads .env from project root so OPENAI_API_KEY (and optional LANGFUSE_* keys) are set.
 """
 import sys
@@ -17,35 +17,27 @@ load_dotenv(_ROOT / ".env")
 import re
 import uuid
 import shutil
-
 from typing import Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from graph import ForecastGraph
+from graph import AnalysisGraph
 from observability.langfuse_handler import get_langfuse_callbacks
 
-app = FastAPI(title="Forecasting Platform")
+app = FastAPI(title="GaussianBlurr — Forecasting Platform")
 
 DATA_DIR = Path("./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-_session_graphs: Dict[str, ForecastGraph] = {}
+# Single shared agent instance; sessions isolated via thread_id + checkpointer
+_graph = AnalysisGraph()
 
 
 def _session_dir(session_id: str) -> Path:
-    """Return data/session_id dir; session_id sanitized for path safety."""
     safe = re.sub(r"[^\w\-]", "", session_id) or "default"
     d = DATA_DIR / safe
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def _get_graph(session_id: str) -> ForecastGraph:
-    """Get or create ForecastGraph for this session."""
-    if session_id not in _session_graphs:
-        _session_graphs[session_id] = ForecastGraph(session_id=session_id)
-    return _session_graphs[session_id]
 
 
 @app.post("/run")
@@ -56,9 +48,8 @@ async def run(
     session_id: str = Form("default"),
 ):
     """
-    Resolve input (upload or csv_path), set csv_path on graph, invoke graph with session_id and query, return graph output.
+    Resolve input (upload or csv_path), invoke the agent, return output.
     """
-    # Resolve csv path: from upload → data/session_id/source_files/... or from form
     if file is not None:
         session_d = _session_dir(session_id)
         source_dir = session_d / "source_files"
@@ -75,19 +66,18 @@ async def run(
             status_code=400,
         )
 
-    # Invoke graph: set csv_path on graph, then run with session_id and user_query only
-    graph = _get_graph(session_id)
-    graph.set_csv_path(resolved_csv_path)
-    callbacks = get_langfuse_callbacks()
-    config = {"callbacks": callbacks} if callbacks else {}
-    output = graph.run_graph(session_id, query, config=config)
+    _graph.set_csv_path(session_id, resolved_csv_path)
 
-    # Return graph output: generic; any tool’s result is under tool_output
+    callbacks = get_langfuse_callbacks()
+    config: Dict[str, Any] = {"callbacks": callbacks} if callbacks else {}
+
+    output = _graph.run_graph(session_id, query, config=config)
+
     return {
         "session_id": output.get("session_id", session_id),
         "csv_path": output.get("csv_path", resolved_csv_path),
-        "summary": output.get("final_response"),
+        "summary": output.get("summary"),
         "clarification_question": output.get("clarification_question"),
-        "tool_output": output.get("tool_parameter") or {},
+        "tool_output": output.get("tool_output") or {},
         "last_tool_result": output.get("last_tool_result"),
     }

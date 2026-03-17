@@ -1,6 +1,6 @@
 """
 GaussianBlurr-style UI: topbar, upload strip, message bubbles, sticky input.
-Session-based; one ForecastGraph per session.
+Session-based; one AnalysisGraph per session.
 """
 import html
 import uuid
@@ -11,9 +11,9 @@ import streamlit as st
 
 API_URL = "http://localhost:8000"
 
-# Favicon path from project root (same as reference)
+# Favicon path inside ui/ (same folder as this file)
 _UI_DIR = Path(__file__).resolve().parent
-_FAVICON = _UI_DIR.parent / "gaussianblurr_favicon.png"
+_FAVICON = _UI_DIR / "gaussianblurr_favicon.png"
 
 st.set_page_config(
     page_title="GaussianBlurr",

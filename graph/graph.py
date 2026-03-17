@@ -1,261 +1,220 @@
 """
-Forecast graph: orchestration → tool | summarisation | clarification.
+Forecast agent built with create_agent + middleware.
 
-Entry point is orchestration_node (LLM decides next step). Then route to tool_node,
-summarisation_node, or clarification_node. Uses ConversationalMemory and ToolMemory.
+Architecture:
+  create_agent loop: LLM → tool calls → tool execution → LLM → ... → final text response.
+
+Middleware stack (in order):
+  1. SessionContextMiddleware     – sets session_id/csv_path/data_dir context vars for tools
+  2. LLMToolSelectorMiddleware    – picks relevant tools; filesystem tools always included
+  3. ToolCallLimitMiddleware       – caps tool calls per run
+  4. SummarizationMiddleware       – condenses history when tokens grow
+  5. ContextEditingMiddleware      – clears old tool results to save context
+  6. FilesystemMiddleware          – file read/write/edit/ls in session scope
+  7. ShellToolMiddleware           – sandbox code execution (Docker or host fallback)
+  8. CodeSafetyMiddleware          – inspects Python code before sandbox execution
+
+State: AgentState (messages) + session_id, csv_path, data_dir (last-wins reducers).
+Persistence: InMemorySaver, thread_id = session_id.
+Observability: Langfuse callbacks passed via config.
 """
 import json
 import os
+import re
 from pathlib import Path
-from typing import TypedDict, Optional, Dict, Any, List
-import yaml
-from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
+from typing import Annotated, Any, Dict, List, Optional
+
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    AgentState,
+    ClearToolUsesEdit,
+    CodexSandboxExecutionPolicy,
+    ContextEditingMiddleware,
+    LLMToolSelectorMiddleware,
+    ShellToolMiddleware,
+    SummarizationMiddleware,
+    ToolCallLimitMiddleware,
+)
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from typing_extensions import NotRequired
+
+from graph.middleware.code_safety import CodeSafetyMiddleware
+from graph.middleware.session_context import SessionContextMiddleware
+from prompts.graph_prompts import SYSTEM_PROMPT
 from tools.plot_tool import plot_data
-from prompts.graph_prompts import ORCHESTRATION_PROMPT, SUMMARISATION_PROMPT
-from memory.conversation import ConversationalMemory
-from memory.tool_memory import ToolMemory
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+DATA_DIR = Path("./data")
 
 
-class ForecastGraphState(TypedDict):
-    """State passed through the graph. Keys from orchestration JSON plus session/csv/query."""
-
-    session_id: Optional[str]
-    csv_path: str
-    user_query: str
-    # Set by orchestration_node from LLM JSON:
-    should_proceed: Optional[bool]  # True → route to tool_node
-    is_summarisation: Optional[bool]  # True → route to summarisation_node, use final_response
-    is_clarification: Optional[bool]  # True → route to clarification_node
-    tool_name: Optional[str]  # Name of tool to run (must exist in self.tools)
-    tool_parameter: Optional[Dict[str, Any]]  # Kwargs passed to the tool
-    clarification_question: Optional[str]  # Question to ask the user
-    final_response: Optional[str]  # Orchestration/summarisation output text
-    last_tool_result: Optional[Any]  # Return value of the last tool run (generic, for UI/API)
+def _last_wins(a: str, b: str) -> str:
+    """Reducer: newest value wins (used for scalar state fields)."""
+    return b
 
 
-class ForecastGraph:
+def _ensure_session_dir(session_id: str) -> Path:
+    safe = re.sub(r"[^\w\\-]", "", session_id or "default") or "default"
+    d = DATA_DIR / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ── State schema ─────────────────────────────────────────────────────────────
+
+class ForecastAgentState(AgentState):
+    """Extends AgentState with session-scoped fields (last-wins reducers)."""
+    session_id: NotRequired[Annotated[str, _last_wins]]
+    csv_path: NotRequired[Annotated[str, _last_wins]]
+    data_dir: NotRequired[Annotated[str, _last_wins]]
+
+
+# ── AnalysisGraph ────────────────────────────────────────────────────────────
+
+class AnalysisGraph:
     """
-    Builds a LangGraph: orchestration → (tool | summarisation | clarification).
-    Uses one LLM client, conversational memory, tool memory, and a tool registry.
+    Single agent instance shared across sessions.
+    thread_id = session_id provides session isolation via InMemorySaver.
     """
 
-    def __init__(self, session_id: str = "default"):
-        """Create LLM client, conversational memory, tool memory, and load tools from registry."""
-        self.session_id = session_id
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            api_key=os.environ.get("OPENAI_API_KEY", ""),
-            temperature=0,
-            model_kwargs={"response_format": {"type": "json_object"}},
-        )
-        self.conversational_memory = ConversationalMemory()
-        self.tool_memory = ToolMemory()
-        self._csv_path: Optional[str] = None
-        self._init_tools()
-        self.available_tools = self.get_tool_description()
-        self._compiled_graph = self.build_graph()
+    def __init__(self) -> None:
+        self._checkpointer = InMemorySaver()
+        self._session_csv: Dict[str, str] = {}
+        self._agent = self._build_agent()
 
-    def set_csv_path(self, path: str) -> None:
-        """Set the CSV path for this session (call before run_graph when file is uploaded or path is known)."""
-        self._csv_path = path
+    def set_csv_path(self, session_id: str, path: str) -> None:
+        self._session_csv[session_id] = path
 
-    def _init_tools(self) -> None:
-        """
-        Load tool_registry.yaml and set self.tools to a map of tool name → callable.
-        Only names listed in the registry are added; extend the loop when adding new tools.
-        """
-        self.tools: Dict[str, Any] = {}
-        registry_path = Path(__file__).resolve().parent / "tool_registry.yaml"
-        if not registry_path.exists():
-            return
-        with open(registry_path) as f:
-            data = yaml.safe_load(f) or {}
-        for name in data.get("tools") or {}:
-            if name == "plot_data":
-                self.tools["plot_data"] = plot_data
-            # Register more tools here when added to tool_registry.yaml
+    # ── Build agent ──────────────────────────────────────────────────────
 
-    def get_tool_description(self) -> str:
-        """
-        Read tool_registry.yaml and return a single string describing all tools:
-        name, description, required/optional params, and example calls.
-        Used to fill {available_tools} in ORCHESTRATION_PROMPT.
-        """
-        registry_path = Path(__file__).resolve().parent / "tool_registry.yaml"
-        if not registry_path.exists():
-            return "No tools registered."
-        with open(registry_path) as f:
-            data = yaml.safe_load(f) or {}
-        tools = data.get("tools") or {}
-        lines: List[str] = []
-        for name, info in tools.items():
-            if not isinstance(info, dict):
-                continue
-            desc = (info.get("description") or "").strip()
-            req = info.get("parameters_required") or []
-            opt = info.get("parameters_optional") or []
-            examples = info.get("examples") or []
-            lines.append(f"- {name}: {desc}")
-            if req:
-                lines.append(f"  Required: {', '.join(str(p).split()[0] for p in req)}")
-            if opt:
-                lines.append(f"  Optional: {', '.join(str(p).split()[0] for p in opt)}")
-            for ex in examples[:2]:
-                lines.append(f"  Example: {ex}")
-        return "\n".join(lines) if lines else "No tools registered."
+    def _build_agent(self):
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        model_str = f"openai:{model}"
 
-    def orchestration_node(self, state: ForecastGraphState) -> dict:
-        """
-        First node: call LLM with user_input, conversation_memory, tool_history, and available_tools.
-        Parse JSON response and update state (should_proceed, is_summarisation, is_clarification,
-        tool_name, tool_parameter, clarification_question, final_response). Does not add new keys.
-        """
-        user_input = state.get("user_query") or ""
-        conversation_memory = self.conversational_memory.get_conversation() or "(none)"
-        tool_history = self.tool_memory.get_tool_history() or "(none)"
-        prompt = ORCHESTRATION_PROMPT.format(
-            user_input=user_input,
-            conversation_memory=conversation_memory,
-            tool_history=tool_history,
-            available_tools=self.available_tools,
+        tools = [plot_data]
+
+        middleware: List[Any] = [
+            # 1. Session context → sets context vars for tools
+            SessionContextMiddleware(),
+
+            # 2. MODEL middleware (runs around LLM calls)
+            LLMToolSelectorMiddleware(
+                model=model_str,
+                max_tools=5,
+                always_include=["ls", "read_file", "write_file", "edit_file"],
+            ),
+            SummarizationMiddleware(
+                model=model_str,
+                trigger=("tokens", 6000),
+                keep=("messages", 20),
+            ),
+            ContextEditingMiddleware(
+                edits=[
+                    ClearToolUsesEdit(
+                        trigger=100_000,
+                        keep=5,
+                        exclude_tools=["write_file"],
+                    ),
+                ],
+            ),
+
+            # 3. TOOL middleware (runs around tool calls)
+            ToolCallLimitMiddleware(run_limit=15, exit_behavior="continue"),
+            FilesystemMiddleware(
+                system_prompt=(
+                    "Use the filesystem tools to store intermediate analysis results, "
+                    "notes, and long outputs. Files persist within the session."
+                ),
+            ),
+            ShellToolMiddleware(
+                workspace_root=str(DATA_DIR / "sandbox"),
+                execution_policy=CodexSandboxExecutionPolicy(),
+            ),
+            CodeSafetyMiddleware(),
+        ]
+
+        return create_agent(
+            model=model_str,
+            tools=tools,
+            system_prompt=SYSTEM_PROMPT,
+            middleware=middleware,
+            state_schema=ForecastAgentState,
+            checkpointer=self._checkpointer,
+            name="analytics_agent",
         )
 
-        msg = self.llm.invoke(prompt)
-        content = msg.content if hasattr(msg, "content") else str(msg)
-        try:
-            out = json.loads(content)
-        except json.JSONDecodeError:
-            out = {"should_proceed": False, "is_summarisation": False, "clarification_question": "Could not parse response."}
-
-        # Update only orchestration-derived keys; rest of state unchanged
-        state["should_proceed"] = out.get("should_proceed", False)
-        state["is_summarisation"] = out.get("is_summarisation", False)
-        state["is_clarification"] = not state["should_proceed"] and not state["is_summarisation"]
-        state["tool_name"] = out.get("tool_name")
-        state["tool_parameter"] = out.get("tool_parameter")
-        state["clarification_question"] = out.get("clarification_question")
-        state["final_response"] = out.get("final_response")
-        
-        return state
-    
-    def route_after_orchestration(self, state: ForecastGraphState) -> str:
-        """
-        Conditional routing after orchestration_node. Returns node name: "tool", "summarisation", or "clarification".
-        """
-        if state.get("should_proceed"):
-            return "tool"
-        if state.get("is_summarisation"):
-            return "summarisation"
-        if state.get("is_clarification"):
-            return "clarification"
-        return "clarification"
-
-    def tool_node(self, state: ForecastGraphState) -> dict:
-        """
-        Run when route is tool. Looks up tool_name in self.tools; raises ValueError if missing.
-        Injects session_id from state into params so tools (e.g. plot_data) can write under data/session_id/.
-        Executes the underlying Python function with tool_parameter as kwargs, then logs
-        tool_name, params, and result to tool_memory (AIMessage + ToolMessage).
-        """
-        tool_name = state.get("tool_name")
-        params = dict(state.get("tool_parameter") or {})
-        params["session_id"] = state.get("session_id") or "default"
-        if tool_name not in self.tools:
-            raise ValueError(f"Unknown tool: {tool_name}. Available: {list(self.tools.keys())}")
-        tool = self.tools[tool_name]
-        tool_callable = getattr(tool, "func", tool)
-        tool_response = tool_callable(**params)
-        tool_response_str = str(tool_response) if tool_response is not None else ""
-        self.tool_memory.save_tool_responses(tool_name, params, tool_response_str)
-        
-        return state
-
-    def summarisation_node(self, state: ForecastGraphState) -> dict:
-        """
-        Run when route is summarisation. Calls LLM with user_input, conversation_memory, tool_history.
-        Expects JSON with "final_response"; saves that to conversational memory and sets state["final_response"].
-        """
-        user_input = state.get("user_query") or ""
-        conversation_memory = self.conversational_memory.get_conversation() or "(none)"
-        tool_history = self.tool_memory.get_tool_history() or "(none)"
-        prompt = SUMMARISATION_PROMPT.format(
-            user_input=user_input,
-            conversation_memory=conversation_memory,
-            tool_history=tool_history,
-        )
-        msg = self.llm.invoke(prompt)
-        content = msg.content if hasattr(msg, "content") else str(msg)
-        try:
-            out = json.loads(content)
-            final_response = out.get("final_response") or "Done."
-        except json.JSONDecodeError:
-            final_response = content.strip() if content else "Done."
-        self.conversational_memory.save_conversation(user_input, final_response)
-        state["final_response"] = final_response
-        return state
-
-    def clarification_node(self, state: ForecastGraphState) -> dict:
-        """
-        Run when route is clarification. Saves clarification_question (and user query) to conversational
-        memory and returns state unchanged.
-        """
-        query = state.get("user_query") or ""
-        q = state.get("clarification_question") or "?"
-        self.conversational_memory.save_conversation(query, q)
-        return state
-
-    def build_graph(self):
-        """
-        Build the StateGraph: add orchestration, summarisation, clarification, tool nodes;
-        set entry point to orchestration; add conditional edges from orchestration; wire all to END.
-        Returns the compiled graph.
-        """
-        builder = StateGraph(ForecastGraphState)
-        builder.add_node("orchestration", self.orchestration_node)
-        builder.add_node("summarisation", self.summarisation_node)
-        builder.add_node("clarification", self.clarification_node)
-        builder.add_node("tool", self.tool_node)
-        builder.set_entry_point("orchestration")
-        builder.add_conditional_edges(
-            "orchestration",
-            self.route_after_orchestration,
-            {"tool": "tool", "summarisation": "summarisation", "clarification": "clarification"},
-        )
-        builder.add_edge("summarisation", END)
-        builder.add_edge("clarification", END)
-        builder.add_edge("tool", "orchestration")  # loop back so LLM can call more tools or summarise
-        return builder.compile()
+    # ── Run ──────────────────────────────────────────────────────────────
 
     def run_graph(
         self,
         session_id: str,
         user_query: str,
         config: Optional[Dict[str, Any]] = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
+        """
+        Invoke agent. Returns a parsed dict:
+          session_id, csv_path, summary, clarification_question,
+          tool_output, last_tool_result, messages.
+        """
+        csv_path = self._session_csv.get(session_id, "")
+        data_dir = str(_ensure_session_dir(session_id))
 
-        """
-        Invoke the graph. Inputs: session_id, user_query. csv_path must be set via set_csv_path() first.
-        Builds ForecastGraphState inside; returns the final state from the run. Clears tool memory after.
-        """
-        initial_state: ForecastGraphState = {
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query)],
             "session_id": session_id,
-            "csv_path": self._csv_path or "",
-            "user_query": user_query,
-            "should_proceed": True,
-            "is_summarisation": False,
-            "is_clarification": False,
-            "tool_name": "",
-            "tool_parameter": {},
-            "clarification_question": "",
-            "final_response": "",
-            "last_tool_result": "",
+            "csv_path": csv_path,
+            "data_dir": data_dir,
         }
 
-        output = self._compiled_graph.invoke(initial_state, config=config or {})
+        invoke_config: Dict[str, Any] = {
+            "configurable": {"thread_id": session_id},
+        }
+        if config:
+            if "callbacks" in config:
+                invoke_config["callbacks"] = config["callbacks"]
+            for k, v in config.items():
+                if k != "callbacks":
+                    invoke_config[k] = v
 
-        # clear tool history
-        self.tool_memory.clear()
+        result = self._agent.invoke(invoke_input, config=invoke_config)
+        return self._parse_output(result, session_id, csv_path)
 
+    # ── Parse output ─────────────────────────────────────────────────────
 
-        return output
+    @staticmethod
+    def _parse_output(result: Dict[str, Any], session_id: str, csv_path: str) -> Dict[str, Any]:
+        """Extract summary, clarification, tool results from agent output messages."""
+        messages = result.get("messages", [])
+
+        last_ai_content = ""
+        last_tool_result = None
+        tool_output: Dict[str, Any] = {}
+
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and not last_ai_content:
+                last_ai_content = msg.content or ""
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    tc = msg.tool_calls[-1]
+                    tool_output = tc.get("args", {}) if isinstance(tc, dict) else {}
+
+            if hasattr(msg, "type") and getattr(msg, "type", "") == "tool" and last_tool_result is None:
+                content = msg.content or ""
+                try:
+                    last_tool_result = json.loads(content)
+                except Exception:
+                    last_tool_result = content
+
+        summary = last_ai_content if last_ai_content else "Done."
+        is_question = summary.rstrip().endswith("?")
+
+        return {
+            "session_id": session_id,
+            "csv_path": csv_path,
+            "summary": None if is_question else summary,
+            "clarification_question": summary if is_question else None,
+            "tool_output": tool_output,
+            "last_tool_result": last_tool_result,
+            "messages": messages,
+        }
