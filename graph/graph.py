@@ -6,13 +6,12 @@ Architecture:
 
 Middleware stack (in order):
   1. SessionContextMiddleware     – sets session_id/csv_path/data_dir context vars for tools
-  2. LLMToolSelectorMiddleware    – picks relevant tools; filesystem tools always included
+  2. LLMToolSelectorMiddleware    – picks relevant tools; peek_csv, clean_csv, check_ready always included
   3. ToolCallLimitMiddleware       – caps tool calls per run
   4. SummarizationMiddleware       – condenses history when tokens grow
   5. ContextEditingMiddleware      – clears old tool results to save context
   6. FilesystemMiddleware          – file read/write/edit/ls in session scope
-  7. ShellToolMiddleware           – sandbox code execution (Docker or host fallback)
-  8. CodeSafetyMiddleware          – inspects Python code before sandbox execution
+  (ShellToolMiddleware and CodeSafetyMiddleware removed; data cleaning via peek_csv, clean_csv, check_ready, ask_csv)
 
 State: AgentState (messages) + session_id, csv_path, data_dir (last-wins reducers).
 Persistence: InMemorySaver, thread_id = session_id.
@@ -29,10 +28,8 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentState,
     ClearToolUsesEdit,
-    CodexSandboxExecutionPolicy,
     ContextEditingMiddleware,
     LLMToolSelectorMiddleware,
-    ShellToolMiddleware,
     SummarizationMiddleware,
     ToolCallLimitMiddleware,
 )
@@ -40,10 +37,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from typing_extensions import NotRequired
 
-from graph.middleware.code_safety import CodeSafetyMiddleware
 from graph.middleware.session_context import SessionContextMiddleware
 from prompts.graph_prompts import SYSTEM_PROMPT
-from tools.plot_tool import plot_data
+from tools.ask_csv import ask_csv
+from tools.check_ready import check_ready
+from tools.clean_csv import clean_csv
+from tools.peek_csv import peek_csv
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,7 +92,7 @@ class AnalysisGraph:
         model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         model_str = f"openai:{model}"
 
-        tools = [plot_data]
+        tools = [peek_csv, clean_csv, check_ready, ask_csv]
 
         middleware: List[Any] = [
             # 1. Session context → sets context vars for tools
@@ -102,8 +101,8 @@ class AnalysisGraph:
             # 2. MODEL middleware (runs around LLM calls)
             LLMToolSelectorMiddleware(
                 model=model_str,
-                max_tools=5,
-                always_include=["ls", "read_file", "write_file", "edit_file"],
+                max_tools=8,
+                always_include=["peek_csv", "clean_csv", "check_ready"],
             ),
             SummarizationMiddleware(
                 model=model_str,
@@ -128,11 +127,6 @@ class AnalysisGraph:
                     "notes, and long outputs. Files persist within the session."
                 ),
             ),
-            ShellToolMiddleware(
-                workspace_root=str(DATA_DIR / "sandbox"),
-                execution_policy=CodexSandboxExecutionPolicy(),
-            ),
-            CodeSafetyMiddleware(),
         ]
 
         return create_agent(

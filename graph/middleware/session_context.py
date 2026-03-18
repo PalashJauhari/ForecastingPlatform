@@ -18,9 +18,8 @@ class SessionContextMiddleware(AgentMiddleware):
     """Reads session_id / csv_path / data_dir from agent state and sets context vars."""
 
     def before_agent(self, state: AgentState, **kwargs: Any) -> Optional[Dict[str, Any]]:
-
-        session_id_var.set(state.get("session_id", "default"))
+        session_id = state.get("session_id", "default")
+        session_id_var.set(session_id)
         csv_path_var.set(state.get("csv_path", ""))
-        data_dir_var.set(state.get("data_dir", f"data/{sid}"))
-        
+        data_dir_var.set(state.get("data_dir", f"data/{session_id}"))
         return None
