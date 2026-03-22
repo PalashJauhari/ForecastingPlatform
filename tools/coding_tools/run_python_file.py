@@ -1,19 +1,20 @@
 """
-LangChain tool: execute (dummy) a ``.py`` script under ``agent_filesystem``.
+LangChain tool: execute a ``.py`` script under ``agent_filesystem``.
 
-Currently a **dummy executor** -- applies **runtime patch scan** (Layer 3) to
-demonstrate the sandbox mechanism, but does **not** actually run the code.
-Replace the dummy block with real ``exec()`` when ready for production.
+Applies **runtime patch scan** (Layer 3) via same-process ``exec()`` so that
+monkey-patched ``builtins.open``, ``pd.read_csv``, ``pd.read_excel``,
+``df.to_csv``, ``df.to_excel`` are in effect during execution.
 
-Layer 3 (``tools.coding_tools.code_scan.runtime_patch_scan``) monkey-patches
-``builtins.open``, ``pd.read_excel``, ``pd.read_csv``, ``df.to_excel``,
-``df.to_csv`` so that even dynamically constructed paths are confined to
-``agent_filesystem/``.
+Layer 3 (``tools.coding_tools.code_scan.runtime_patch_scan``) confines all
+file I/O to ``agent_filesystem/``.
 """
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 import yaml
 
@@ -27,7 +28,7 @@ from .code_scan.runtime_patch_scan import apply_patches, remove_patches
 
 
 def _agent_fs_root() -> Path:
-    """Resolved absolute path to ``agent_filesystem`` (subprocess ``cwd``)."""
+    """Resolved absolute path to ``agent_filesystem``."""
     return AGENT_FILESYSTEM_ROOT.resolve()
 
 
@@ -61,8 +62,11 @@ class RunPythonFileInput(BaseModel):
 @tool(args_schema=RunPythonFileInput)
 def run_python_file(filename: str) -> str:
     """
-    Dummy executor: validate script location, apply runtime patch scan, print
-    confirmation, and tear down patches.  No code is actually executed.
+    Execute a Python script from agent_filesystem/ with Layer 3 runtime sandbox patches applied.
+
+    The script runs via exec() in the same process with monkey-patched I/O functions
+    that confine all file operations to agent_filesystem/. stdout and stderr are captured
+    and returned.
 
     Returns
         JSON with ``stdout``, ``stderr``, ``returncode``.
@@ -76,24 +80,24 @@ def run_python_file(filename: str) -> str:
         return json.dumps({"error": f"File not found: {script}", "stdout": "", "stderr": "", "returncode": -1})
 
     src = script.read_text(encoding="utf-8")
-    line_count = len(src.splitlines())
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
 
     apply_patches()
     try:
-        print(f"[SANDBOX] Runtime patch scan applied -- dummy mode, no real execution")
-        print(f"[SANDBOX] Script : {script}")
-        print(f"[SANDBOX] Lines  : {line_count}")
+        compiled = compile(src, str(script), "exec")
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            exec(compiled, {"__name__": "__main__", "__file__": str(script)})
+        returncode = 0
+    except Exception as e:
+        stderr_buf.write(f"{type(e).__name__}: {e}\n")
+        returncode = 1
     finally:
         remove_patches()
 
-    return json.dumps(
-        {
-            "stdout": (
-                f"[SANDBOX] Dummy execution complete for {script.name}. "
-                f"{line_count} lines validated. No code was actually run."
-            ),
-            "stderr": "",
-            "returncode": 0,
-        },
-        default=str,
-    )
+    return json.dumps({
+        "stdout": stdout_buf.getvalue(),
+        "stderr": stderr_buf.getvalue(),
+        "returncode": returncode,
+    }, default=str)

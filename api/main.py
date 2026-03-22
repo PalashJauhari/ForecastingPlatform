@@ -2,7 +2,7 @@
 FastAPI HTTP API for the Forecasting Platform agent.
 
 Endpoints:
-    POST /run — multipart form: user ``query``, optional CSV ``file`` upload or ``csv_path``,
+    POST /run — multipart form: user ``query``, optional CSV/Excel ``file`` upload or ``csv_path``,
     ``session_id`` for namespacing uploads under ``agent_filesystem/input/<session>/``.
 
 Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional Langfuse keys.
@@ -35,10 +35,11 @@ _cfg   = yaml.safe_load(open(_ROOT / 'config.yaml'))
 INPUT_DIR = _ROOT / _cfg['paths']['input']
 from observability.langfuse_handler import get_langfuse_callbacks
 
-# Single process-wide agent (config loaded once at import).
+ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
 app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
-    description="Agent API: upload CSV, send a natural-language query, receive summaries or clarifications.",
+    description="Agent API: upload CSV/Excel, send a natural-language query, receive summaries or clarifications.",
 )
 _graph = AnalysisGraph()
 
@@ -63,27 +64,28 @@ async def run(
     session_id: str = Form("default"),
 ):
     """
-    Run the analysis agent on a user query with optional CSV context.
+    Run the analysis agent on a user query with optional file context.
 
     Form fields
         query
             Natural-language instruction; appended with uploaded file path when ``file`` is sent.
         file
-            Optional CSV upload (first message in a flow); stored under ``input/<session>/``.
+            Optional CSV/Excel upload (first message in a flow); stored under ``input/<session>/``.
         csv_path
-            Optional absolute path to an existing CSV (follow-up turns after first upload).
+            Optional path to an existing file (follow-up turns after first upload).
         session_id
             Correlates uploads and LangGraph ``thread_id`` for conversation memory.
 
     Returns
-        JSON: ``session_id``, ``csv_path``, ``summary`` or ``clarification_question``, ``last_tool_result``.
+        JSON: ``session_id``, ``csv_path``, ``summary``, ``last_tool_result``.
     """
     resolved_csv_path = ""
+
     if file is not None:
         ext = Path(file.filename or "").suffix.lower()
-        if ext != ".csv":
+        if ext not in ALLOWED_UPLOAD_EXTENSIONS:
             return JSONResponse(
-                content={"error": f"Only CSV files are accepted. Got: {ext or '(no extension)'}"},
+                content={"error": f"Only CSV and Excel files are accepted. Got: {ext or '(no extension)'}"},
                 status_code=400,
             )
         session_d = _session_input_dir(session_id)
@@ -96,10 +98,7 @@ async def run(
         resolved_csv_path = csv_path
         user_query = query
     else:
-        return JSONResponse(
-            content={"error": "Provide either file (first message) or csv_path (follow-up)."},
-            status_code=400,
-        )
+        user_query = query
 
     callbacks = get_langfuse_callbacks()
     invoke_cfg: Dict[str, Any] = {"callbacks": callbacks} if callbacks else {}
@@ -107,7 +106,6 @@ async def run(
     result = _graph.run_graph(session_id, user_query, config=invoke_cfg)
     messages = result.get("messages", [])
 
-    # Prefer the last assistant text for summary vs clarification heuristic.
     last_ai = ""
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
@@ -121,12 +119,9 @@ async def run(
             last_tool_result = getattr(msg, "content", None)
             break
 
-    is_q = bool(last_ai and last_ai.rstrip().endswith("?"))
     return {
         "session_id": session_id,
         "csv_path": resolved_csv_path or (csv_path or ""),
-        "summary": None if is_q else (last_ai or None),
-        "clarification_question": last_ai if is_q else None,
-        "tool_output": {},
+        "summary": last_ai or None,
         "last_tool_result": last_tool_result,
     }

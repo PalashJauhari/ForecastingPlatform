@@ -7,6 +7,8 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+import yaml
 
 _ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _cfg  = yaml.safe_load(open(_ROOT / 'config.yaml'))
@@ -44,9 +46,6 @@ def _looks_like_path(val: str) -> bool:
 
 
 def _check_status(path_str: str) -> Status:
-    from pathlib import Path
-import yaml
-
     if "dynamic" in path_str:
         prefix = path_str.replace("... (dynamic)", "").strip()
         if prefix.startswith("agent_filesystem"):

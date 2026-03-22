@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional
 import yaml
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
-    AgentState,
     ClearToolUsesEdit,
     ContextEditingMiddleware,
     ToolCallLimitMiddleware,
@@ -86,7 +85,6 @@ class AnalysisGraph:
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
             middleware=middleware,
-            state_schema=AgentState,
             checkpointer=self._checkpointer,
             name="analytics_agent",
         )

@@ -24,5 +24,8 @@ openpyxl>=3.1.0
 numpy>=1.24.0
 pyyaml>=6.0
 
+# Code safety scanning
+semgrep>=1.50.0
+
 # Observability (optional — only needed if using Langfuse)
 langfuse>=2.0.0
