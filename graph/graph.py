@@ -1,131 +1,83 @@
 """
-Forecast agent built with create_agent + middleware.
+LangGraph/LangChain agent construction: ``create_agent`` with tools and middleware.
 
-Architecture:
-  create_agent loop: LLM → tool calls → tool execution → LLM → ... → final text response.
+Loads ``config.yaml`` from the project root for model names and middleware tuning.
+Checkpointing uses :class:`langgraph.checkpoint.memory.InMemorySaver` with ``thread_id`` = session id.
 
 Middleware stack (in order):
-  1. SessionContextMiddleware     – sets session_id/csv_path/data_dir context vars for tools
-  2. LLMToolSelectorMiddleware    – picks relevant tools; peek_csv, clean_csv, check_ready always included
-  3. ToolCallLimitMiddleware       – caps tool calls per run
-  4. SummarizationMiddleware       – condenses history when tokens grow
-  5. ContextEditingMiddleware      – clears old tool results to save context
-  6. FilesystemMiddleware          – file read/write/edit/ls in session scope
-  (ShellToolMiddleware and CodeSafetyMiddleware removed; data cleaning via peek_csv, clean_csv, check_ready, ask_csv)
+    1. ContextEditingMiddleware
+    2. ToolCallLimitMiddleware
 
-State: AgentState (messages) + session_id, csv_path, data_dir (last-wins reducers).
-Persistence: InMemorySaver, thread_id = session_id.
-Observability: Langfuse callbacks passed via config.
+Codegen safety (semgrep + path check on generated source) runs **inside**
+:func:`tools.coding_tools.generate_code.generate_code` using ``tools/coding_tools/code_scan/agent_sandbox.yaml``.
+
+Layer 3 (runtime patch) lives inside ``run_python_file``.
 """
-import json
-import os
-import re
-from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional
 
-from deepagents.middleware.filesystem import FilesystemMiddleware
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentState,
     ClearToolUsesEdit,
     ContextEditingMiddleware,
-    LLMToolSelectorMiddleware,
-    SummarizationMiddleware,
     ToolCallLimitMiddleware,
 )
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from typing_extensions import NotRequired
 
-from graph.middleware.session_context import SessionContextMiddleware
 from prompts.graph_prompts import SYSTEM_PROMPT
-from tools.ask_csv import ask_csv
-from tools.check_ready import check_ready
-from tools.clean_csv import clean_csv
-from tools.peek_csv import peek_csv
+from tools.coding_tools.generate_code import generate_code
+from tools.coding_tools.run_python_file import run_python_file
+from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
+from tools.file_management_tools.read_agent_filesystem_data import read_agent_filesystem_data
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+_ROOT = Path(__file__).resolve().parent.parent
+_cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
 
-DATA_DIR = Path("./data")
-
-
-def _last_wins(a: str, b: str) -> str:
-    """Reducer: newest value wins (used for scalar state fields)."""
-    return b
-
-
-def _ensure_session_dir(session_id: str) -> Path:
-    safe = re.sub(r"[^\w\\-]", "", session_id or "default") or "default"
-    d = DATA_DIR / safe
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-# ── State schema ─────────────────────────────────────────────────────────────
-
-class ForecastAgentState(AgentState):
-    """Extends AgentState with session-scoped fields (last-wins reducers)."""
-    session_id: NotRequired[Annotated[str, _last_wins]]
-    csv_path: NotRequired[Annotated[str, _last_wins]]
-    data_dir: NotRequired[Annotated[str, _last_wins]]
-
-
-# ── AnalysisGraph ────────────────────────────────────────────────────────────
 
 class AnalysisGraph:
     """
-    Single agent instance shared across sessions.
-    thread_id = session_id provides session isolation via InMemorySaver.
+    Thin wrapper around a single LangChain ``create_agent`` instance.
+
+    Notes
+        * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``, OpenAI provider.
+        * **Tools** — list_agent_filesystem_data, read_agent_filesystem_data, generate_code, run_python_file.
+        * **Middleware** — context editing, tool-call limit.
+        * **Codegen safety** — semgrep + path checker inside ``generate_code``.
+        * **Layer 3** (runtime patch) is applied inside ``run_python_file``.
     """
 
     def __init__(self) -> None:
         self._checkpointer = InMemorySaver()
-        self._session_csv: Dict[str, str] = {}
         self._agent = self._build_agent()
 
-    def set_csv_path(self, session_id: str, path: str) -> None:
-        self._session_csv[session_id] = path
+    def _build_agent(self) -> Any:
+        """Construct ``create_agent`` with tools, system prompt, and middleware stack."""
+        model_str = f"openai:{_cfg['models']['orchestrator']}"
+        mw  = _cfg.get("middleware", {})
+        ctx  = mw.get("context_editing", {})
+        tlim = mw.get("tool_call_limit", {})
 
-    # ── Build agent ──────────────────────────────────────────────────────
-
-    def _build_agent(self):
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        model_str = f"openai:{model}"
-
-        tools = [peek_csv, clean_csv, check_ready, ask_csv]
+        tools = [list_agent_filesystem_data, read_agent_filesystem_data, generate_code, run_python_file]
 
         middleware: List[Any] = [
-            # 1. Session context → sets context vars for tools
-            SessionContextMiddleware(),
-
-            # 2. MODEL middleware (runs around LLM calls)
-            LLMToolSelectorMiddleware(
-                model=model_str,
-                max_tools=8,
-                always_include=["peek_csv", "clean_csv", "check_ready"],
-            ),
-            SummarizationMiddleware(
-                model=model_str,
-                trigger=("tokens", 6000),
-                keep=("messages", 20),
-            ),
             ContextEditingMiddleware(
                 edits=[
                     ClearToolUsesEdit(
-                        trigger=100_000,
-                        keep=5,
-                        exclude_tools=["write_file"],
+                        trigger=int(ctx.get("clear_tool_uses_trigger", 100_000)),
+                        keep=int(ctx.get("clear_tool_uses_keep", 5)),
+                        exclude_tools=list(ctx.get("exclude_tools", [])),
                     ),
                 ],
             ),
-
-            # 3. TOOL middleware (runs around tool calls)
-            ToolCallLimitMiddleware(run_limit=15, exit_behavior="continue"),
-            FilesystemMiddleware(
-                system_prompt=(
-                    "Use the filesystem tools to store intermediate analysis results, "
-                    "notes, and long outputs. Files persist within the session."
-                ),
+            ToolCallLimitMiddleware(
+                run_limit=int(tlim.get("run_limit", 15)),
+                exit_behavior="continue",
             ),
         ]
 
@@ -134,12 +86,10 @@ class AnalysisGraph:
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
             middleware=middleware,
-            state_schema=ForecastAgentState,
+            state_schema=AgentState,
             checkpointer=self._checkpointer,
             name="analytics_agent",
         )
-
-    # ── Run ──────────────────────────────────────────────────────────────
 
     def run_graph(
         self,
@@ -148,67 +98,22 @@ class AnalysisGraph:
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Invoke agent. Returns a parsed dict:
-          session_id, csv_path, summary, clarification_question,
-          tool_output, last_tool_result, messages.
+        Invoke the agent with one user message and session-scoped checkpointing.
+
+        Parameters
+            session_id  — ``configurable.thread_id`` (conversation key).
+            user_query  — user text (may include appended upload paths from the API).
+            config      — optional invoke config; ``callbacks`` (e.g. Langfuse) merged in.
+
+        Returns
+            Agent invoke result dict (typically includes ``messages`` list).
         """
-        csv_path = self._session_csv.get(session_id, "")
-        data_dir = str(_ensure_session_dir(session_id))
-
-        invoke_input = {
-            "messages": [HumanMessage(content=user_query)],
-            "session_id": session_id,
-            "csv_path": csv_path,
-            "data_dir": data_dir,
-        }
-
-        invoke_config: Dict[str, Any] = {
-            "configurable": {"thread_id": session_id},
-        }
+        invoke_input = {"messages": [HumanMessage(content=user_query)]}
+        invoke_config: Dict[str, Any] = {"configurable": {"thread_id": session_id}}
         if config:
             if "callbacks" in config:
                 invoke_config["callbacks"] = config["callbacks"]
             for k, v in config.items():
                 if k != "callbacks":
                     invoke_config[k] = v
-
-        result = self._agent.invoke(invoke_input, config=invoke_config)
-        return self._parse_output(result, session_id, csv_path)
-
-    # ── Parse output ─────────────────────────────────────────────────────
-
-    @staticmethod
-    def _parse_output(result: Dict[str, Any], session_id: str, csv_path: str) -> Dict[str, Any]:
-        """Extract summary, clarification, tool results from agent output messages."""
-        messages = result.get("messages", [])
-
-        last_ai_content = ""
-        last_tool_result = None
-        tool_output: Dict[str, Any] = {}
-
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and not last_ai_content:
-                last_ai_content = msg.content or ""
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tc = msg.tool_calls[-1]
-                    tool_output = tc.get("args", {}) if isinstance(tc, dict) else {}
-
-            if hasattr(msg, "type") and getattr(msg, "type", "") == "tool" and last_tool_result is None:
-                content = msg.content or ""
-                try:
-                    last_tool_result = json.loads(content)
-                except Exception:
-                    last_tool_result = content
-
-        summary = last_ai_content if last_ai_content else "Done."
-        is_question = summary.rstrip().endswith("?")
-
-        return {
-            "session_id": session_id,
-            "csv_path": csv_path,
-            "summary": None if is_question else summary,
-            "clarification_question": summary if is_question else None,
-            "tool_output": tool_output,
-            "last_tool_result": last_tool_result,
-            "messages": messages,
-        }
+        return self._agent.invoke(invoke_input, config=invoke_config)

@@ -1,6 +1,9 @@
 """
-GaussianBlurr-style UI: topbar, upload strip, message bubbles, sticky input.
-Session-based; one AnalysisGraph per session.
+Streamlit front-end for GaussianBlurr.
+
+Calls the FastAPI ``POST /run`` endpoint (default ``http://localhost:8000``). Manages
+``session_id``, CSV upload state, and chat history in ``st.session_state``. Layout uses
+custom HTML/CSS for top bar, upload strip, scrollable messages, and input bar.
 """
 import html
 import uuid
@@ -208,12 +211,13 @@ LOGO_SVG = """
 """
 
 
-def _ensure_session_id():
+def _ensure_session_id() -> None:
+    """Assign a UUID ``session_id`` if the current session has none (first load)."""
     if "session_id" not in st.session_state or not st.session_state.session_id:
         st.session_state.session_id = str(uuid.uuid4())
 
 
-def _new_session():
+def _new_session() -> None:
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.csv_path = None
     st.session_state.messages = []
@@ -228,6 +232,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
 
 
 # ── Top bar ───────────────────────────────────────────────────────────────────
@@ -310,7 +316,8 @@ st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
 
 
 # ── Messages ─────────────────────────────────────────────────────────────────
-def _render_messages():
+def _render_messages() -> None:
+    """Render chat history: empty-state placeholder or assistant/user bubbles and optional metadata."""
     if not st.session_state.messages:
         st.markdown("""
         <div class="fp-empty">
@@ -332,9 +339,10 @@ def _render_messages():
         content_escaped = html.escape(content).replace("\n", "<br>")
         if role == "assistant":
             parts = [f'<div class="fp-bubble-ai">{content_escaped}</div>']
-            if msg.get("clarification"):
+            # Avoid duplicate: show clarification/summary only if different from main content
+            if msg.get("clarification") and msg.get("clarification") != msg.get("content"):
                 parts.append(f'<div class="fp-clarification">{html.escape(msg["clarification"])}</div>')
-            if msg.get("summary"):
+            if msg.get("summary") and msg.get("summary") != msg.get("content"):
                 parts.append(f'<div class="fp-summary">{html.escape(msg["summary"])}</div>')
             cols = msg.get("cols") or {}
             if msg.get("plot_saved_path") or cols.get("x_col") or cols.get("y_col"):
@@ -386,7 +394,7 @@ with col_input:
         key="chat_input",
     )
 with col_btn:
-    send = st.button("Send ↗")
+    send = st.button("Send ↗", disabled=st.session_state.is_running)
 
 if send and user_input and user_input.strip():
     if not st.session_state.uploaded_file and not st.session_state.csv_path:
@@ -405,7 +413,8 @@ if send and user_input and user_input.strip():
         "cols": {},
     })
     idx = len(st.session_state.messages) - 1
-
+    resp = None
+    st.session_state.is_running = True
     with st.spinner("Thinking..."):
         try:
             if st.session_state.uploaded_file:
@@ -414,8 +423,8 @@ if send and user_input and user_input.strip():
                     f"{API_URL}/run",
                     files={"file": (name, data, "text/csv")},
                     data={"query": prompt, "session_id": st.session_state.session_id},
+                    timeout=120,
                 )
-                st.session_state.uploaded_file = None
             else:
                 resp = requests.post(
                     f"{API_URL}/run",
@@ -424,7 +433,19 @@ if send and user_input and user_input.strip():
                         "csv_path": st.session_state.csv_path,
                         "session_id": st.session_state.session_id,
                     },
+                    timeout=120,
                 )
+        except requests.exceptions.Timeout:
+            st.session_state.messages[idx] = {
+                "role": "assistant",
+                "content": "Request timed out (2 min). The agent may still be running; try again or use a simpler query.",
+                "clarification": None,
+                "summary": None,
+                "plot_saved_path": None,
+                "cols": {},
+            }
+            st.session_state.is_running = False
+            st.rerun()
         except Exception as e:
             st.session_state.messages[idx] = {
                 "role": "assistant",
@@ -434,8 +455,13 @@ if send and user_input and user_input.strip():
                 "plot_saved_path": None,
                 "cols": {},
             }
+            st.session_state.is_running = False
             st.rerun()
+        finally:
+            st.session_state.is_running = False
 
+    if resp is None:
+        st.rerun()
     if resp.status_code != 200:
         try:
             err = resp.json().get("error", resp.text)
@@ -453,6 +479,9 @@ if send and user_input and user_input.strip():
 
     data = resp.json()
     st.session_state.csv_path = data.get("csv_path") or st.session_state.csv_path
+    # Only clear uploaded file after successful response and csv_path confirmed
+    if resp.status_code == 200 and data.get("csv_path"):
+        st.session_state.uploaded_file = None
     content = data.get("summary") or data.get("clarification_question") or ""
     if data.get("last_tool_result") and isinstance(data.get("last_tool_result"), str) and data["last_tool_result"].endswith(".html"):
         content = content or "Plot saved."

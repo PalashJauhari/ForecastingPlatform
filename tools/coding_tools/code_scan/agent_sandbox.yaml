@@ -1,0 +1,1183 @@
+# agent_sandbox.yaml
+# Complete semgrep rules for LLM generated code sandbox
+# Only allows: pd.read_excel, pd.read_csv, df.to_excel, df.to_csv inside agent_filesystem/
+# Everything else blocked
+
+rules:
+
+  # ── BLOCK OS ──────────────────────────────────────────────────────────────
+
+  - id: block-os
+    pattern-either:
+      - pattern: import os
+      - pattern: from os import $X
+    message: "os not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SUBPROCESS ──────────────────────────────────────────────────────
+
+  - id: block-subprocess
+    pattern-either:
+      - pattern: import subprocess
+      - pattern: from subprocess import $X
+    message: "subprocess not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SHUTIL ──────────────────────────────────────────────────────────
+
+  - id: block-shutil
+    pattern-either:
+      - pattern: import shutil
+      - pattern: from shutil import $X
+    message: "shutil not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PATHLIB ─────────────────────────────────────────────────────────
+
+  - id: block-pathlib
+    pattern-either:
+      - pattern: import pathlib
+      - pattern: from pathlib import $X
+    message: "pathlib not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK IO ──────────────────────────────────────────────────────────────
+
+  - id: block-io
+    pattern-either:
+      - pattern: import io
+      - pattern: from io import $X
+    message: "io not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK GLOB ────────────────────────────────────────────────────────────
+
+  - id: block-glob
+    pattern-either:
+      - pattern: import glob
+      - pattern: from glob import $X
+      - pattern: glob.glob($X, ...)
+      - pattern: glob.iglob($X, ...)
+    message: "glob not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TEMPFILE ────────────────────────────────────────────────────────
+
+  - id: block-tempfile
+    pattern-either:
+      - pattern: import tempfile
+      - pattern: from tempfile import $X
+    message: "tempfile not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SYS ─────────────────────────────────────────────────────────────
+
+  - id: block-sys
+    pattern-either:
+      - pattern: import sys
+      - pattern: from sys import $X
+    message: "sys not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CTYPES / CFFI ───────────────────────────────────────────────────
+
+  - id: block-ctypes-cffi
+    pattern-either:
+      - pattern: import ctypes
+      - pattern: from ctypes import $X
+      - pattern: import cffi
+      - pattern: from cffi import $X
+    message: "ctypes/cffi not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK MMAP ────────────────────────────────────────────────────────────
+
+  - id: block-mmap
+    pattern-either:
+      - pattern: import mmap
+      - pattern: from mmap import $X
+    message: "mmap not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK AST ─────────────────────────────────────────────────────────────
+
+  - id: block-ast
+    pattern-either:
+      - pattern: import ast
+      - pattern: from ast import $X
+    message: "ast not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK INSPECT ─────────────────────────────────────────────────────────
+
+  - id: block-inspect
+    pattern-either:
+      - pattern: import inspect
+      - pattern: from inspect import $X
+    message: "inspect not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK GC ──────────────────────────────────────────────────────────────
+
+  - id: block-gc
+    pattern-either:
+      - pattern: import gc
+      - pattern: from gc import $X
+    message: "gc not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK LINECACHE / TRACEBACK ───────────────────────────────────────────
+
+  - id: block-linecache-traceback
+    pattern-either:
+      - pattern: import linecache
+      - pattern: from linecache import $X
+      - pattern: import traceback
+      - pattern: from traceback import $X
+    message: "linecache/traceback not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SIGNAL / RESOURCE ───────────────────────────────────────────────
+
+  - id: block-signal-resource
+    pattern-either:
+      - pattern: import signal
+      - pattern: from signal import $X
+      - pattern: import resource
+      - pattern: from resource import $X
+    message: "signal/resource not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK WARNINGS ────────────────────────────────────────────────────────
+
+  - id: block-warnings
+    pattern-either:
+      - pattern: import warnings
+      - pattern: warnings.filterwarnings(...)
+      - pattern: warnings.simplefilter(...)
+    message: "warnings not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PLATFORM / SYSCONFIG / SITE ────────────────────────────────────
+
+  - id: block-recon
+    pattern-either:
+      - pattern: import platform
+      - pattern: from platform import $X
+      - pattern: import sysconfig
+      - pattern: from sysconfig import $X
+      - pattern: import site
+      - pattern: from site import $X
+    message: "system recon not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DEBUGGERS ───────────────────────────────────────────────────────
+
+  - id: block-debuggers
+    pattern-either:
+      - pattern: import pdb
+      - pattern: from pdb import $X
+      - pattern: import faulthandler
+      - pattern: from faulthandler import $X
+      - pattern: import code
+      - pattern: from code import $X
+      - pattern: import codeop
+      - pattern: from codeop import $X
+      - pattern: pdb.set_trace()
+      - pattern: breakpoint()
+    message: "debuggers not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TERMINAL ────────────────────────────────────────────────────────
+
+  - id: block-terminal
+    pattern-either:
+      - pattern: import pty
+      - pattern: from pty import $X
+      - pattern: import tty
+      - pattern: from tty import $X
+      - pattern: pty.spawn($X)
+    message: "terminal access not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK NETWORK ─────────────────────────────────────────────────────────
+
+  - id: block-network
+    pattern-either:
+      - pattern: import requests
+      - pattern: from requests import $X
+      - pattern: import urllib
+      - pattern: from urllib import $X
+      - pattern: import socket
+      - pattern: from socket import $X
+      - pattern: import httpx
+      - pattern: from httpx import $X
+      - pattern: import aiohttp
+      - pattern: from aiohttp import $X
+      - pattern: import smtplib
+      - pattern: from smtplib import $X
+      - pattern: import ftplib
+      - pattern: from ftplib import $X
+      - pattern: import paramiko
+      - pattern: from paramiko import $X
+      - pattern: import boto3
+      - pattern: from boto3 import $X
+    message: "network not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK EXTENDED NETWORK ────────────────────────────────────────────────
+
+  - id: block-network-extended
+    pattern-either:
+      - pattern: import http
+      - pattern: from http import $X
+      - pattern: import http.client
+      - pattern: from http.client import $X
+      - pattern: import xmlrpc
+      - pattern: from xmlrpc import $X
+      - pattern: import xmlrpc.client
+      - pattern: from xmlrpc.client import $X
+      - pattern: import imaplib
+      - pattern: from imaplib import $X
+      - pattern: import poplib
+      - pattern: from poplib import $X
+      - pattern: import telnetlib
+      - pattern: from telnetlib import $X
+      - pattern: import nntplib
+      - pattern: from nntplib import $X
+      - pattern: import asyncio
+      - pattern: from asyncio import $X
+      - pattern: import ssl
+      - pattern: from ssl import $X
+      - pattern: import pycurl
+      - pattern: from pycurl import $X
+      - pattern: import websocket
+      - pattern: from websocket import $X
+      - pattern: import websockets
+      - pattern: from websockets import $X
+      - pattern: import grpc
+      - pattern: from grpc import $X
+      - pattern: import twilio
+      - pattern: from twilio import $X
+      - pattern: import sendgrid
+      - pattern: from sendgrid import $X
+      - pattern: import firebase_admin
+      - pattern: from firebase_admin import $X
+      - pattern: import supabase
+      - pattern: from supabase import $X
+      - pattern: import antigravity
+      - pattern: import httplib2
+      - pattern: from httplib2 import $X
+      - pattern: import tornado
+      - pattern: from tornado import $X
+      - pattern: import twisted
+      - pattern: from twisted import $X
+      - pattern: import zmq
+      - pattern: from zmq import $X
+      - pattern: import pika
+      - pattern: from pika import $X
+      - pattern: import kafka
+      - pattern: from kafka import $X
+      - pattern: import celery
+      - pattern: from celery import $X
+      - pattern: import nats
+      - pattern: from nats import $X
+      - pattern: import redis
+      - pattern: from redis import $X
+      - pattern: import pymongo
+      - pattern: from pymongo import $X
+      - pattern: import elasticsearch
+      - pattern: from elasticsearch import $X
+      - pattern: import httpcore
+      - pattern: from httpcore import $X
+      - pattern: import starlette
+      - pattern: from starlette import $X
+      - pattern: import fastapi
+      - pattern: from fastapi import $X
+      - pattern: import flask
+      - pattern: from flask import $X
+      - pattern: import django
+      - pattern: from django import $X
+    message: "network/API calls not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CODE EXECUTION ──────────────────────────────────────────────────
+
+  - id: block-eval-exec
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: exec($X)
+      - pattern: compile($X, ...)
+    message: "eval/exec/compile not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DYNAMIC IMPORTS ─────────────────────────────────────────────────
+
+  - id: block-dynamic-imports
+    pattern-either:
+      - pattern: import importlib
+      - pattern: from importlib import $X
+      - pattern: import imp
+      - pattern: from imp import $X
+      - pattern: __import__($X)
+    message: "dynamic imports not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SERIALIZATION ───────────────────────────────────────────────────
+
+  - id: block-serialization
+    pattern-either:
+      - pattern: import pickle
+      - pattern: from pickle import $X
+      - pattern: import shelve
+      - pattern: from shelve import $X
+      - pattern: import marshal
+      - pattern: from marshal import $X
+    message: "serialization not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PROCESS CONTROL ─────────────────────────────────────────────────
+
+  - id: block-process-control
+    pattern-either:
+      - pattern: import multiprocessing
+      - pattern: from multiprocessing import $X
+      - pattern: import threading
+      - pattern: from threading import $X
+    message: "process control not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK GIT ─────────────────────────────────────────────────────────────
+
+  - id: block-git
+    pattern-either:
+      - pattern: import git
+      - pattern: from git import $X
+      - pattern: import github
+      - pattern: from github import $X
+      - pattern: import gitlab
+      - pattern: from gitlab import $X
+    message: "git not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PIP ─────────────────────────────────────────────────────────────
+
+  - id: block-pip
+    pattern-either:
+      - pattern: import pip
+      - pattern: from pip import $X
+      - pattern: from pip._internal import $X
+    message: "pip not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK BASE64 ──────────────────────────────────────────────────────────
+
+  - id: block-base64
+    pattern-either:
+      - pattern: import base64
+      - pattern: from base64 import $X
+      - pattern: base64.b64decode($X)
+      - pattern: base64.b64encode($X)
+    message: "base64 not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CSV / JSON ──────────────────────────────────────────────────────
+
+  - id: block-csv-json
+    pattern-either:
+      - pattern: import csv
+      - pattern: from csv import $X
+      - pattern: import json
+      - pattern: from json import $X
+    message: "csv/json not allowed — use pandas only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DATABASE ────────────────────────────────────────────────────────
+
+  - id: block-database
+    pattern-either:
+      - pattern: import sqlite3
+      - pattern: from sqlite3 import $X
+      - pattern: import sqlalchemy
+      - pattern: from sqlalchemy import $X
+      - pattern: sqlite3.connect($X, ...)
+    message: "database not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK ARCHIVES ────────────────────────────────────────────────────────
+
+  - id: block-archives
+    pattern-either:
+      - pattern: import zipfile
+      - pattern: from zipfile import $X
+      - pattern: import tarfile
+      - pattern: from tarfile import $X
+      - pattern: import gzip
+      - pattern: from gzip import $X
+      - pattern: import bz2
+      - pattern: from bz2 import $X
+      - pattern: import lzma
+      - pattern: from lzma import $X
+    message: "archives not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK EXCEL LIBRARIES ─────────────────────────────────────────────────
+
+  - id: block-excel-libraries
+    pattern-either:
+      - pattern: import openpyxl
+      - pattern: from openpyxl import $X
+      - pattern: import xlrd
+      - pattern: from xlrd import $X
+      - pattern: import xlwt
+      - pattern: from xlwt import $X
+      - pattern: import xlsxwriter
+      - pattern: from xlsxwriter import $X
+    message: "direct Excel libraries not allowed — use pd.read_excel/to_excel only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK LLM LIBRARIES ───────────────────────────────────────────────────
+
+  - id: block-llm
+    pattern-either:
+      - pattern: import openai
+      - pattern: from openai import $X
+      - pattern: import anthropic
+      - pattern: from anthropic import $X
+      - pattern: import cohere
+      - pattern: from cohere import $X
+      - pattern: import mistralai
+      - pattern: from mistralai import $X
+      - pattern: import groq
+      - pattern: from groq import $X
+      - pattern: import together
+      - pattern: from together import $X
+      - pattern: import replicate
+      - pattern: from replicate import $X
+      - pattern: import huggingface_hub
+      - pattern: from huggingface_hub import $X
+      - pattern: import langchain
+      - pattern: from langchain import $X
+      - pattern: import langgraph
+      - pattern: from langgraph import $X
+      - pattern: import llama_index
+      - pattern: from llama_index import $X
+      - pattern: import vertexai
+      - pattern: from vertexai import $X
+    message: "LLM API calls not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK KERAS ───────────────────────────────────────────────────────────
+
+  - id: block-keras
+    pattern-either:
+      - pattern: import keras
+      - pattern: from keras import $X
+      - pattern: $MODEL.save($X, ...)
+      - pattern: $MODEL.load_weights($X, ...)
+      - pattern: $MODEL.save_weights($X, ...)
+    message: "keras not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TENSORFLOW ──────────────────────────────────────────────────────
+
+  - id: block-tensorflow
+    pattern-either:
+      - pattern: import tensorflow
+      - pattern: from tensorflow import $X
+      - pattern: tf.saved_model.save($X, ...)
+      - pattern: tf.saved_model.load($X, ...)
+      - pattern: tf.keras.models.load_model($X, ...)
+    message: "tensorflow not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PYTORCH ─────────────────────────────────────────────────────────
+
+  - id: block-pytorch
+    pattern-either:
+      - pattern: import torch
+      - pattern: from torch import $X
+      - pattern: import torchvision
+      - pattern: from torchvision import $X
+      - pattern: import torchaudio
+      - pattern: from torchaudio import $X
+      - pattern: torch.save($X, ...)
+      - pattern: torch.load($X, ...)
+      - pattern: torch.hub.load($X, ...)
+    message: "pytorch not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TRANSFORMERS ────────────────────────────────────────────────────
+
+  - id: block-transformers
+    pattern-either:
+      - pattern: import transformers
+      - pattern: from transformers import $X
+      - pattern: import diffusers
+      - pattern: from diffusers import $X
+      - pattern: import datasets
+      - pattern: from datasets import $X
+      - pattern: import accelerate
+      - pattern: from accelerate import $X
+    message: "huggingface libraries not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK INTROSPECTION ───────────────────────────────────────────────────
+
+  - id: block-introspection
+    pattern-either:
+      - pattern: globals()
+      - pattern: locals()
+      - pattern: vars()
+      - pattern: __builtins__
+    message: "introspection not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DUNDER ACCESS ───────────────────────────────────────────────────
+
+  - id: block-dunder-access
+    pattern-either:
+      - pattern: $X.__class__
+      - pattern: $X.__bases__
+      - pattern: $X.__subclasses__(...)
+      - pattern: $X.__mro__
+      - pattern: $X.__globals__
+      - pattern: $X.__code__
+      - pattern: $X.__builtins__
+    message: "dunder access not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK GETATTR / SETATTR / HASATTR / DELATTR ───────────────────────────
+
+  - id: block-attr-manipulation
+    pattern-either:
+      - pattern: getattr($X, $Y, ...)
+      - pattern: setattr($X, $Y, $Z)
+      - pattern: hasattr($X, $Y)
+      - pattern: delattr($X, $Y)
+    message: "attribute manipulation not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK RAW FILE OPEN ───────────────────────────────────────────────────
+
+  - id: block-open
+    pattern: open($PATH, ...)
+    message: "open() not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK INPUT ───────────────────────────────────────────────────────────
+
+  - id: block-input
+    pattern: input(...)
+    message: "input() not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TIME SLEEP ──────────────────────────────────────────────────────
+
+  - id: block-sleep
+    pattern: time.sleep($X)
+    message: "time.sleep not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK LOGGING ─────────────────────────────────────────────────────────
+
+  - id: block-logging
+    pattern-either:
+      - pattern: import logging
+      - pattern: from logging import $X
+      - pattern: logging.FileHandler($X, ...)
+      - pattern: logging.basicConfig(filename=$X, ...)
+    message: "logging not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK LOW LEVEL MODULES ───────────────────────────────────────────────
+
+  - id: block-low-level
+    pattern-either:
+      - pattern: import hashlib
+      - pattern: from hashlib import $X
+      - pattern: import struct
+      - pattern: from struct import $X
+      - pattern: import array
+      - pattern: from array import $X
+    message: "low level modules not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK MKDIR / FOLDER CREATION ────────────────────────────────────────
+
+  - id: block-mkdir
+    pattern-either:
+      - pattern: os.mkdir($X, ...)
+      - pattern: os.makedirs($X, ...)
+      - pattern: $PATH.mkdir(...)
+    message: "mkdir not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DELETE ──────────────────────────────────────────────────────────
+
+  - id: block-delete
+    pattern-either:
+      - pattern: os.remove($X)
+      - pattern: os.unlink($X)
+      - pattern: os.rmdir($X)
+      - pattern: os.removedirs($X)
+      - pattern: shutil.rmtree($X, ...)
+      - pattern: $PATH.unlink(...)
+      - pattern: $PATH.rmdir(...)
+    message: "delete not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK MOVE / RENAME ───────────────────────────────────────────────────
+
+  - id: block-move-rename
+    pattern-either:
+      - pattern: os.rename($X, $Y)
+      - pattern: os.renames($X, $Y)
+      - pattern: os.replace($X, $Y)
+      - pattern: shutil.move($X, $Y)
+      - pattern: $PATH.rename($X)
+      - pattern: $PATH.replace($X)
+    message: "move/rename not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK COPY ────────────────────────────────────────────────────────────
+
+  - id: block-copy
+    pattern-either:
+      - pattern: shutil.copy($X, $Y)
+      - pattern: shutil.copy2($X, $Y)
+      - pattern: shutil.copyfile($X, $Y)
+      - pattern: shutil.copyfileobj($X, $Y)
+      - pattern: shutil.copytree($X, $Y)
+    message: "copy not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PERMISSIONS ─────────────────────────────────────────────────────
+
+  - id: block-permissions
+    pattern-either:
+      - pattern: os.chmod($X, ...)
+      - pattern: os.chown($X, ...)
+      - pattern: $PATH.chmod(...)
+    message: "permission changes not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SYMLINKS ────────────────────────────────────────────────────────
+
+  - id: block-symlinks
+    pattern-either:
+      - pattern: os.symlink($X, $Y)
+      - pattern: os.link($X, $Y)
+      - pattern: os.readlink($X)
+      - pattern: $PATH.symlink_to($X)
+      - pattern: $PATH.hardlink_to($X)
+    message: "symlinks not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK FILE METADATA ───────────────────────────────────────────────────
+
+  - id: block-metadata
+    pattern-either:
+      - pattern: os.stat($X, ...)
+      - pattern: os.lstat($X, ...)
+      - pattern: os.access($X, ...)
+      - pattern: os.path.exists($X)
+      - pattern: os.path.isfile($X)
+      - pattern: os.path.isdir($X)
+      - pattern: os.path.getsize($X)
+      - pattern: $PATH.stat()
+      - pattern: $PATH.exists()
+      - pattern: $PATH.is_file()
+      - pattern: $PATH.is_dir()
+    message: "file metadata not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TRAVERSAL ───────────────────────────────────────────────────────
+
+  - id: block-traversal
+    pattern-either:
+      - pattern: import fnmatch
+      - pattern: from fnmatch import $X
+      - pattern: import scandir
+      - pattern: from scandir import $X
+      - pattern: $PATH.glob($X)
+      - pattern: $PATH.rglob($X)
+      - pattern: $PATH.iterdir()
+      - pattern: os.walk($X, ...)
+      - pattern: os.scandir($X, ...)
+      - pattern: os.listdir($X, ...)
+      - pattern: os.getcwd()
+      - pattern: os.chdir($X)
+      - pattern: '"../" + $X'
+      - pattern: '$X + "/../"'
+    message: "traversal not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK NUMPY READ/WRITE ────────────────────────────────────────────────
+
+  - id: block-numpy-readwrite
+    pattern-either:
+      - pattern: np.save($PATH, ...)
+      - pattern: np.savez($PATH, ...)
+      - pattern: np.savez_compressed($PATH, ...)
+      - pattern: np.savetxt($PATH, ...)
+      - pattern: np.load($PATH, ...)
+      - pattern: np.loadtxt($PATH, ...)
+      - pattern: np.fromfile($PATH, ...)
+      - pattern: np.tofile($PATH, ...)
+      - pattern: np.memmap($PATH, ...)
+      - pattern: np.genfromtxt($PATH, ...)
+      - pattern: np.recfromcsv($PATH, ...)
+      - pattern: np.recfromtxt($PATH, ...)
+    message: "numpy read/write not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK ALL PANDAS EXCEPT 4 ─────────────────────────────────────────────
+
+  - id: block-pandas-non-allowed
+    pattern-either:
+      - pattern: pd.read_json(...)
+      - pattern: pd.read_parquet(...)
+      - pattern: pd.read_html(...)
+      - pattern: pd.read_sql(...)
+      - pattern: pd.read_pickle(...)
+      - pattern: pd.read_feather(...)
+      - pattern: pd.read_table(...)
+      - pattern: pd.read_clipboard(...)
+      - pattern: pd.read_hdf(...)
+      - pattern: pd.read_orc(...)
+      - pattern: pd.read_sas(...)
+      - pattern: pd.read_spss(...)
+      - pattern: $DF.to_json(...)
+      - pattern: $DF.to_parquet(...)
+      - pattern: $DF.to_sql(...)
+      - pattern: $DF.to_pickle(...)
+      - pattern: $DF.to_feather(...)
+      - pattern: $DF.to_hdf(...)
+      - pattern: $DF.to_html(...)
+      - pattern: $DF.to_clipboard(...)
+      - pattern: $DF.to_markdown(...)
+      - pattern: $DF.to_latex(...)
+    message: "only read_excel, read_csv, to_excel, to_csv allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK URL PATHS IN PANDAS ─────────────────────────────────────────────
+
+  - id: block-url-paths
+    pattern-either:
+      - pattern: pd.read_csv("http://...", ...)
+      - pattern: pd.read_csv("https://...", ...)
+      - pattern: pd.read_csv("s3://...", ...)
+      - pattern: pd.read_csv("ftp://...", ...)
+      - pattern: pd.read_csv("gs://...", ...)
+      - pattern: pd.read_csv("az://...", ...)
+      - pattern: pd.read_excel("http://...", ...)
+      - pattern: pd.read_excel("https://...", ...)
+      - pattern: pd.read_excel("s3://...", ...)
+      - pattern: pd.read_excel("ftp://...", ...)
+      - pattern: pd.read_excel("gs://...", ...)
+      - pattern: pd.read_excel("az://...", ...)
+      - pattern: $DF.to_csv("http://...", ...)
+      - pattern: $DF.to_csv("https://...", ...)
+      - pattern: $DF.to_csv("s3://...", ...)
+      - pattern: $DF.to_excel("http://...", ...)
+      - pattern: $DF.to_excel("https://...", ...)
+      - pattern: $DF.to_excel("s3://...", ...)
+    message: "URL paths not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── ENFORCE agent_filesystem ON 4 ALLOWED OPS ────────────────────────────
+
+  - id: enforce-path-read-excel
+    pattern: pd.read_excel($PATH, ...)
+    pattern-not: pd.read_excel("agent_filesystem/...", ...)
+    message: "pd.read_excel must use agent_filesystem/"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-path-read-csv
+    pattern: pd.read_csv($PATH, ...)
+    pattern-not: pd.read_csv("agent_filesystem/...", ...)
+    message: "pd.read_csv must use agent_filesystem/"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-path-to-excel
+    pattern: $DF.to_excel($PATH, ...)
+    pattern-not: $DF.to_excel("agent_filesystem/...", ...)
+    message: "df.to_excel must use agent_filesystem/"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-path-to-csv
+    pattern: $DF.to_csv($PATH, ...)
+    pattern-not: $DF.to_csv("agent_filesystem/...", ...)
+    message: "df.to_csv must use agent_filesystem/"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK RUNPY (execute other .py files) ─────────────────────────────────
+
+  - id: block-runpy
+    pattern-either:
+      - pattern: import runpy
+      - pattern: from runpy import $X
+      - pattern: runpy.run_path($X, ...)
+      - pattern: runpy.run_module($X, ...)
+    message: "runpy not allowed — cannot execute other Python files"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK ENSUREPIP / VENV ────────────────────────────────────────────────
+
+  - id: block-ensurepip-venv
+    pattern-either:
+      - pattern: import ensurepip
+      - pattern: from ensurepip import $X
+      - pattern: import venv
+      - pattern: from venv import $X
+    message: "ensurepip/venv not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DISTUTILS / SETUPTOOLS ──────────────────────────────────────────
+
+  - id: block-distutils-setuptools
+    pattern-either:
+      - pattern: import distutils
+      - pattern: from distutils import $X
+      - pattern: import setuptools
+      - pattern: from setuptools import $X
+    message: "distutils/setuptools not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK UNITTEST / DOCTEST ──────────────────────────────────────────────
+
+  - id: block-unittest-doctest
+    pattern-either:
+      - pattern: import unittest
+      - pattern: from unittest import $X
+      - pattern: import doctest
+      - pattern: from doctest import $X
+      - pattern: doctest.testfile($X, ...)
+      - pattern: doctest.testmod(...)
+    message: "unittest/doctest not allowed — can execute arbitrary code"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK FILEINPUT ───────────────────────────────────────────────────────
+
+  - id: block-fileinput
+    pattern-either:
+      - pattern: import fileinput
+      - pattern: from fileinput import $X
+    message: "fileinput not allowed — reads files bypassing open()"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TOKENIZE ────────────────────────────────────────────────────────
+
+  - id: block-tokenize
+    pattern-either:
+      - pattern: import tokenize
+      - pattern: from tokenize import $X
+    message: "tokenize not allowed — can open and read files"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PYCLBR ──────────────────────────────────────────────────────────
+
+  - id: block-pyclbr
+    pattern-either:
+      - pattern: import pyclbr
+      - pattern: from pyclbr import $X
+    message: "pyclbr not allowed — reads Python source files"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK XML ─────────────────────────────────────────────────────────────
+
+  - id: block-xml
+    pattern-either:
+      - pattern: import xml
+      - pattern: from xml import $X
+      - pattern: import xml.etree
+      - pattern: from xml.etree import $X
+      - pattern: import xml.etree.ElementTree
+      - pattern: from xml.etree.ElementTree import $X
+      - pattern: import xml.dom
+      - pattern: from xml.dom import $X
+      - pattern: import xml.dom.minidom
+      - pattern: from xml.dom.minidom import $X
+      - pattern: import xml.sax
+      - pattern: from xml.sax import $X
+      - pattern: import xml.parsers
+      - pattern: from xml.parsers import $X
+      - pattern: import lxml
+      - pattern: from lxml import $X
+    message: "XML parsing not allowed — file read and XXE risk"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CONFIGPARSER ────────────────────────────────────────────────────
+
+  - id: block-configparser
+    pattern-either:
+      - pattern: import configparser
+      - pattern: from configparser import $X
+    message: "configparser not allowed — reads config files from disk"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PLISTLIB ────────────────────────────────────────────────────────
+
+  - id: block-plistlib
+    pattern-either:
+      - pattern: import plistlib
+      - pattern: from plistlib import $X
+    message: "plistlib not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DBM ─────────────────────────────────────────────────────────────
+
+  - id: block-dbm
+    pattern-either:
+      - pattern: import dbm
+      - pattern: from dbm import $X
+    message: "dbm not allowed — file-based database"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PKGUTIL ─────────────────────────────────────────────────────────
+
+  - id: block-pkgutil
+    pattern-either:
+      - pattern: import pkgutil
+      - pattern: from pkgutil import $X
+    message: "pkgutil not allowed — can read package data from disk"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PY_COMPILE / COMPILEALL ─────────────────────────────────────────
+
+  - id: block-compile-modules
+    pattern-either:
+      - pattern: import py_compile
+      - pattern: from py_compile import $X
+      - pattern: import compileall
+      - pattern: from compileall import $X
+    message: "py_compile/compileall not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK ATEXIT ──────────────────────────────────────────────────────────
+
+  - id: block-atexit
+    pattern-either:
+      - pattern: import atexit
+      - pattern: from atexit import $X
+      - pattern: atexit.register($X, ...)
+    message: "atexit not allowed — code runs after cleanup"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK _THREAD ─────────────────────────────────────────────────────────
+
+  - id: block-low-thread
+    pattern-either:
+      - pattern: import _thread
+      - pattern: from _thread import $X
+    message: "_thread not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK WEBBROWSER ──────────────────────────────────────────────────────
+
+  - id: block-webbrowser
+    pattern-either:
+      - pattern: import webbrowser
+      - pattern: from webbrowser import $X
+    message: "webbrowser not allowed — potential data exfiltration"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TKINTER / TURTLE ────────────────────────────────────────────────
+
+  - id: block-gui
+    pattern-either:
+      - pattern: import tkinter
+      - pattern: from tkinter import $X
+      - pattern: import turtle
+      - pattern: from turtle import $X
+      - pattern: import _tkinter
+      - pattern: from _tkinter import $X
+    message: "GUI modules not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SELECT / SELECTORS ──────────────────────────────────────────────
+
+  - id: block-select
+    pattern-either:
+      - pattern: import select
+      - pattern: from select import $X
+      - pattern: import selectors
+      - pattern: from selectors import $X
+    message: "select/selectors not allowed — raw I/O multiplexing"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK COPYREG ─────────────────────────────────────────────────────────
+
+  - id: block-copyreg
+    pattern-either:
+      - pattern: import copyreg
+      - pattern: from copyreg import $X
+      - pattern: import copy_reg
+      - pattern: from copy_reg import $X
+    message: "copyreg not allowed — pickle constructor registration"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK TYPES.CODETYPE ──────────────────────────────────────────────────
+
+  - id: block-types
+    pattern-either:
+      - pattern: import types
+      - pattern: from types import $X
+      - pattern: types.CodeType(...)
+      - pattern: types.FunctionType(...)
+    message: "types not allowed — can construct executable code objects"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK DIS / SYMTABLE ──────────────────────────────────────────────────
+
+  - id: block-disassembly
+    pattern-either:
+      - pattern: import dis
+      - pattern: from dis import $X
+      - pattern: import symtable
+      - pattern: from symtable import $X
+    message: "dis/symtable not allowed — bytecode inspection"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PROFILING ───────────────────────────────────────────────────────
+
+  - id: block-profiling
+    pattern-either:
+      - pattern: import cProfile
+      - pattern: from cProfile import $X
+      - pattern: import profile
+      - pattern: from profile import $X
+    message: "profiling not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK EMAIL / MAILBOX ─────────────────────────────────────────────────
+
+  - id: block-email
+    pattern-either:
+      - pattern: import email
+      - pattern: from email import $X
+      - pattern: import mailbox
+      - pattern: from mailbox import $X
+    message: "email/mailbox not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK AUDIO I/O ───────────────────────────────────────────────────────
+
+  - id: block-audio
+    pattern-either:
+      - pattern: import wave
+      - pattern: from wave import $X
+      - pattern: import audioop
+      - pattern: from audioop import $X
+      - pattern: import aifc
+      - pattern: from aifc import $X
+      - pattern: import sunau
+      - pattern: from sunau import $X
+    message: "audio I/O not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK GETTEXT ─────────────────────────────────────────────────────────
+
+  - id: block-gettext
+    pattern-either:
+      - pattern: import gettext
+      - pattern: from gettext import $X
+    message: "gettext not allowed — reads .po/.mo files from disk"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK STRING TEMPLATE ─────────────────────────────────────────────────
+
+  - id: block-string-template
+    pattern-either:
+      - pattern: import string
+      - pattern: from string import $X
+      - pattern: string.Template($X)
+    message: "string module not allowed — Template injection risk"
+    languages: [python]
+    severity: ERROR

@@ -1,6 +1,47 @@
+# --- Secrets — NEVER commit ---
 .env
+*.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# --- Virtual environments ---
 .venv/
 venv/
-__pycache__/
-*.pyc
-.data/
+env/
+ENV/
+
+# --- Distribution / packaging ---
+dist/
+build/
+*.egg-info/
+*.egg
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# --- Agent workspace (runtime data, not source) ---
+agent_filesystem/input/
+agent_filesystem/output/
+agent_filesystem/processed/
+agent_filesystem/scratchpad/
+agent_filesystem/code/
+
+# --- Logs ---
+*.log
+logs/

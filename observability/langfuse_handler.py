@@ -1,22 +1,32 @@
 """
-Langfuse callback handler for LangChain/LangGraph.
-When LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set, returns a list of callbacks
-so that graph invocations (LLM + tool calls) are traced in Langfuse.
+Optional Langfuse tracing for LangChain / LangGraph invocations.
+
+If ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set in the environment,
+:func:`get_langfuse_callbacks` returns a LangChain callback list so LLM and tool calls
+appear in Langfuse. Import failures or missing keys yield an empty list (no-op).
 """
+
+from __future__ import annotations
+
 import os
-from typing import List, Any
+from typing import Any, List
 
 
 def get_langfuse_callbacks() -> List[Any]:
     """
-    Return a list of callbacks for LangChain/LangGraph invoke config.
-    When LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set, LLM and tool calls are traced in Langfuse.
-    Otherwise returns an empty list (no-op).
+    Build Langfuse :class:`~langfuse.langchain.CallbackHandler` instances when configured.
+
+    Returns
+        A list with one handler, or ``[]`` if keys are missing or Langfuse cannot be imported.
+
+    Environment
+        ``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY`` — required for tracing.
     """
     if not os.environ.get("LANGFUSE_PUBLIC_KEY") or not os.environ.get("LANGFUSE_SECRET_KEY"):
         return []
     try:
         from langfuse.langchain import CallbackHandler
+
         handler = CallbackHandler()
         return [handler]
     except Exception:
