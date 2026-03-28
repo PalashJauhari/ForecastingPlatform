@@ -4,7 +4,6 @@ GaussianBlurr — redesigned Streamlit UI.
 Changes from original:
   - Sidebar: file uploader + loaded-files list with preview on click
   - Main area: data preview table (real columns + rows from backend) + chat
-  - Download buttons for every file in agent_filesystem/output/
   - Interrupt / resume fully wired up
   - Session state tracks uploaded files, messages, active file
 """
@@ -12,6 +11,7 @@ Changes from original:
 import io
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import requests
@@ -50,12 +50,6 @@ section[data-testid="stSidebar"] { background: #fafaf9; }
 [data-testid="stChatMessage"] {
     padding: 0.4rem 0.6rem;
     border-radius: 10px;
-}
-
-/* download button sizing */
-[data-testid="stDownloadButton"] button {
-    padding: 0.25rem 0.75rem;
-    font-size: 0.75rem;
 }
 
 /* metric label size */
@@ -127,7 +121,7 @@ def new_session():
     st.rerun()
 
 
-def post_upload(file_obj) -> str | None:
+def post_upload(file_obj) -> Optional[str]:
     """POST a file to /upload-data. Returns the saved path or None on error."""
     try:
         resp = requests.post(
@@ -144,7 +138,7 @@ def post_upload(file_obj) -> str | None:
     return None
 
 
-def fetch_file_preview(agent_path: str) -> dict | None:
+def fetch_file_preview(agent_path: str) -> Optional[dict]:
     """Call /read-data (via POST /run) to get columns + head rows for a file."""
     try:
         resp = requests.post(
@@ -162,7 +156,7 @@ def fetch_file_preview(agent_path: str) -> dict | None:
     return None
 
 
-def read_uploaded_file(file_obj) -> pd.DataFrame | None:
+def read_uploaded_file(file_obj) -> Optional[pd.DataFrame]:
     """Read an uploaded file directly into a DataFrame for instant preview."""
     try:
         file_obj.seek(0)
@@ -208,19 +202,6 @@ def call_resume(answer: str) -> dict:
         return {"error": "Request timed out."}
     except Exception as e:
         return {"error": str(e)}
-
-
-def list_output_files() -> list[Path]:
-    """Scan agent_filesystem/output/ for downloadable files."""
-    project_root = Path(__file__).resolve().parent.parent
-    output_dir = project_root / "agent_filesystem" / "output"
-    if not output_dir.exists():
-        return []
-    return sorted(
-        [f for f in output_dir.rglob("*") if f.is_file()],
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
 
 
 def file_type_label(name: str) -> str:
@@ -332,49 +313,6 @@ with st.sidebar:
                     st.rerun()
 
         st.markdown("")
-
-    st.divider()
-
-    # ── Output files (downloads) ──────────────────────────────────────────────
-    st.caption("DOWNLOAD OUTPUTS")
-    output_files = list_output_files()
-    if not output_files:
-        st.markdown(
-            "<p style='font-size:0.75rem;color:#aaa'>No output files yet.</p>",
-            unsafe_allow_html=True,
-        )
-    else:
-        for out_f in output_files:
-            label = file_type_label(out_f.name)
-            bg = file_type_color(label)
-            fg = file_type_text_color(label)
-            col_icon, col_dl = st.columns([1, 5])
-            with col_icon:
-                st.markdown(
-                    f"<div style='width:22px;height:22px;border-radius:4px;background:{bg};"
-                    f"color:{fg};font-size:8px;font-weight:500;display:flex;align-items:center;"
-                    f"justify-content:center;margin-top:6px'>{label}</div>",
-                    unsafe_allow_html=True,
-                )
-            with col_dl:
-                file_bytes = out_f.read_bytes()
-                mime = {
-                    ".csv": "text/csv",
-                    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    ".png": "image/png",
-                    ".jpg": "image/jpeg",
-                    ".pdf": "application/pdf",
-                    ".py": "text/plain",
-                }.get(out_f.suffix.lower(), "application/octet-stream")
-                short = out_f.name if len(out_f.name) <= 22 else out_f.name[:19] + "…"
-                st.download_button(
-                    label=f"⬇ {short}",
-                    data=file_bytes,
-                    file_name=out_f.name,
-                    mime=mime,
-                    key=f"dl_{out_f.name}_{out_f.stat().st_mtime}",
-                    use_container_width=True,
-                )
 
     st.divider()
 
