@@ -211,14 +211,14 @@ class AnalysisGraph:
     """
 
     def __init__(self) -> None:
-        self._checkpointer = InMemorySaver()
-        self._graph = self._build_graph()
+        self.checkpointer = InMemorySaver()
+        self.graph = self.build_graph()
 
     # ------------------------------------------------------------------
     # Graph construction
     # ------------------------------------------------------------------
 
-    def _build_graph(self) -> Any:
+    def build_graph(self) -> Any:
         """Construct and compile the ``StateGraph``."""
         builder = StateGraph(AgentState)
 
@@ -233,7 +233,7 @@ class AnalysisGraph:
         )
         builder.add_edge("tools", "refresh_data_schema")
 
-        return builder.compile(checkpointer=self._checkpointer)
+        return builder.compile(checkpointer=self.checkpointer)
 
     # ------------------------------------------------------------------
     # Public API
@@ -258,7 +258,7 @@ class AnalysisGraph:
         """
         # thread_id drives InMemorySaver checkpointing per session
         config["configurable"] = {"thread_id": session_id}
-        return self._graph.invoke(
+        return self.graph.invoke(
             {"messages": [HumanMessage(content=user_query)]}, config=config,
         )
 
@@ -280,8 +280,8 @@ class AnalysisGraph:
             Graph invoke result dict.
         """
         config["configurable"] = {"thread_id": session_id}
-        return self._graph.invoke(Command(resume=value), config=config)
+        return self.graph.invoke(Command(resume=value), config=config)
 
     def get_state(self, session_id: str) -> Any:
         """Return the current state snapshot for *session_id*."""
-        return self._graph.get_state({"configurable": {"thread_id": session_id}})
+        return self.graph.get_state({"configurable": {"thread_id": session_id}})

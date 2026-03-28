@@ -1,9 +1,8 @@
 """
 Streamlit front-end for GaussianBlurr.
 
-Calls the FastAPI ``POST /run`` endpoint (default ``http://localhost:8000``). Manages
-``session_id``, CSV upload state, and chat history in ``st.session_state``. Layout uses
-custom HTML/CSS for top bar, upload strip, scrollable messages, and input bar.
+Calls the FastAPI ``POST /run`` and ``POST /resume`` endpoints (default ``http://localhost:8000``).
+Manages ``session_id`` and chat history in ``st.session_state``.
 """
 import html
 import uuid
@@ -211,29 +210,26 @@ LOGO_SVG = """
 """
 
 
-def _ensure_session_id() -> None:
+def ensure_session_id() -> None:
     """Assign a UUID ``session_id`` if the current session has none (first load)."""
     if "session_id" not in st.session_state or not st.session_state.session_id:
         st.session_state.session_id = str(uuid.uuid4())
 
 
-def _new_session() -> None:
+def new_session() -> None:
     st.session_state.session_id = str(uuid.uuid4())
-    st.session_state.csv_path = None
     st.session_state.messages = []
-    st.session_state.uploaded_file = None
+    st.session_state.awaiting_resume = False
     st.rerun()
 
 
-_ensure_session_id()
-if "csv_path" not in st.session_state:
-    st.session_state.csv_path = None
+ensure_session_id()
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "uploaded_file" not in st.session_state:
-    st.session_state.uploaded_file = None
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
+if "awaiting_resume" not in st.session_state:
+    st.session_state.awaiting_resume = False
 
 
 # ── Top bar ───────────────────────────────────────────────────────────────────
@@ -264,59 +260,23 @@ document.getElementById('fp-new-session-link').onclick = function() {
 """, unsafe_allow_html=True)
 with st.sidebar:
     if st.button("+ New session", key="sidebar_new_session"):
-        _new_session()
+        new_session()
 
 
-# ── Upload strip ─────────────────────────────────────────────────────────────
-has_data = bool(st.session_state.uploaded_file or st.session_state.csv_path)
-uploaded = st.file_uploader("Upload", type=["csv"], label_visibility="collapsed", key="uploader")
-if uploaded is not None and not has_data:
-    st.session_state.uploaded_file = (uploaded.name, uploaded.getvalue())
-    st.session_state.csv_path = None
-    has_data = True
-
-if not has_data:
-    st.markdown("""
-    <div class="fp-upload idle">
-      <div class="fp-upload-icon idle">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 11V4M5.5 6.5L8 4l2.5 2.5" stroke="#888" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2.5 12v.5a1 1 0 001 1h9a1 1 0 001-1V12" stroke="#888" stroke-width="1.3" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <div style="flex:1">
-        <div class="fp-upload-title idle">+ Attach data file</div>
-        <div class="fp-upload-sub">CSV — then send a message below to run</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    name = st.session_state.uploaded_file[0] if st.session_state.uploaded_file else (st.session_state.csv_path or "data").split("/")[-1]
-    size = ""
-    if st.session_state.uploaded_file:
-        size = f"{round(len(st.session_state.uploaded_file[1]) / 1024, 1)} KB · ready"
-    else:
-        size = "attached"
-    st.markdown(f"""
-    <div class="fp-upload done">
-      <div class="fp-upload-icon done">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M3 8.5l3 3 7-7" stroke="#2d7a52" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div style="flex:1">
-        <div class="fp-upload-title done">{html.escape(name)}</div>
-        <div class="fp-upload-sub">{html.escape(size)}</div>
-      </div>
-      <span style="font-size:12px;font-weight:500;padding:7px 15px;border-radius:7px;background:#2d7a52;color:#fff;">Attached ✓</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+# ── Hint strip ───────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="fp-upload idle" style="cursor:default">
+  <div style="flex:1">
+    <div class="fp-upload-title idle">Data lives in <code>agent_filesystem/</code></div>
+    <div class="fp-upload-sub">Place CSV/Excel under <code>input/</code> or ask the agent to use existing files.</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
 
 
 # ── Messages ─────────────────────────────────────────────────────────────────
-def _render_messages() -> None:
+def render_messages() -> None:
     """Render chat history: empty-state placeholder or assistant/user bubbles and optional metadata."""
     if not st.session_state.messages:
         st.markdown("""
@@ -327,8 +287,8 @@ def _render_messages() -> None:
                     stroke="#bbb" stroke-width="1.8" stroke-linecap="round" fill="none"/>
             </svg>
           </div>
-          <h3>Start with your data</h3>
-          <p>Upload a file above, then ask anything — forecasts, trends, summaries.</p>
+          <h3>Ask anything</h3>
+          <p>Forecasts, trends, summaries — data should be in <code>agent_filesystem/input/</code>.</p>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -380,7 +340,7 @@ def _render_messages() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-_render_messages()
+render_messages()
 
 
 # ── Input bar ──────────────────────────────────────────────────────────────────
@@ -397,9 +357,6 @@ with col_btn:
     send = st.button("Send ↗", disabled=st.session_state.is_running)
 
 if send and user_input and user_input.strip():
-    if not st.session_state.uploaded_file and not st.session_state.csv_path:
-        st.warning("Attach a CSV using the area above, then send your message.")
-        st.stop()
     prompt = user_input.strip()
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -414,25 +371,23 @@ if send and user_input and user_input.strip():
     })
     idx = len(st.session_state.messages) - 1
     resp = None
+    used_resume = st.session_state.awaiting_resume
     st.session_state.is_running = True
     with st.spinner("Thinking..."):
         try:
-            if st.session_state.uploaded_file:
-                name, data = st.session_state.uploaded_file
+            if used_resume:
                 resp = requests.post(
-                    f"{API_URL}/run",
-                    files={"file": (name, data, "text/csv")},
-                    data={"query": prompt, "session_id": st.session_state.session_id},
+                    f"{API_URL}/resume",
+                    data={
+                        "resume_value": prompt,
+                        "session_id": st.session_state.session_id,
+                    },
                     timeout=120,
                 )
             else:
                 resp = requests.post(
                     f"{API_URL}/run",
-                    data={
-                        "query": prompt,
-                        "csv_path": st.session_state.csv_path,
-                        "session_id": st.session_state.session_id,
-                    },
+                    data={"query": prompt, "session_id": st.session_state.session_id},
                     timeout=120,
                 )
         except requests.exceptions.Timeout:
@@ -478,10 +433,20 @@ if send and user_input and user_input.strip():
         st.rerun()
 
     data = resp.json()
-    st.session_state.csv_path = data.get("csv_path") or st.session_state.csv_path
-    # Only clear uploaded file after successful response and csv_path confirmed
-    if resp.status_code == 200 and data.get("csv_path"):
-        st.session_state.uploaded_file = None
+    if data.get("interrupted"):
+        st.session_state.awaiting_resume = True
+        q = data.get("question") or "Please clarify."
+        st.session_state.messages[idx] = {
+            "role": "assistant",
+            "content": q,
+            "clarification": q,
+            "summary": None,
+            "plot_saved_path": None,
+            "cols": {},
+        }
+        st.rerun()
+    if used_resume:
+        st.session_state.awaiting_resume = False
     content = data.get("summary") or data.get("clarification_question") or ""
     if data.get("last_tool_result") and isinstance(data.get("last_tool_result"), str) and data["last_tool_result"].endswith(".html"):
         content = content or "Plot saved."

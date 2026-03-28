@@ -36,12 +36,12 @@ If a previous summary is provided, integrate the new messages into it —
 do not repeat information already captured. Focus on what is new."""
 
 
-def _estimate_tokens(messages: list) -> int:
+def estimate_tokens(messages: list) -> int:
     """Rough token estimate: total characters of message content ÷ 4."""
     return sum(len(str(getattr(m, "content", "") or "")) for m in messages) // 4
 
 
-def _find_safe_truncation_point(messages: list, keep: int) -> int:
+def find_safe_truncation_point(messages: list, keep: int) -> int:
     """
     Index into *messages* at which truncation can safely begin.
 
@@ -60,7 +60,7 @@ def _find_safe_truncation_point(messages: list, keep: int) -> int:
     return candidate
 
 
-def _summarize(previous_summary: str, messages_to_evict: list) -> str:
+def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
     llm = ChatOpenAI(model=_SUMMARY_MODEL, temperature=0)
 
@@ -107,13 +107,13 @@ def truncate_and_summarize(
         When the token count is within budget, returns the inputs unchanged
         with an empty *remove_ops* list.
     """
-    if _estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
+    if estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
         return previous_summary, messages, []
 
-    cut = _find_safe_truncation_point(messages, keep)
+    cut = find_safe_truncation_point(messages, keep)
     to_evict = messages[:cut]
     remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
-    updated_summary = _summarize(previous_summary, to_evict)
+    updated_summary = summarize_evicted(previous_summary, to_evict)
     kept_messages = messages[cut:]
 
     return updated_summary, kept_messages, remove_ops
