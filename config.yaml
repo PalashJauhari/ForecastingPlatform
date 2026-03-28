@@ -1,18 +1,17 @@
-# GaussianBlurr — models, middleware tuning, and workspace paths (read by graph/graph.py)
+# GaussianBlurr — models, middleware tuning, and workspace paths
 
 models:
   orchestrator: "gpt-4o-mini"
   code_generation: "gpt-4o-mini"
+  summarization: "gpt-4o-mini"
 
 middleware:
   context_editing:
-    clear_tool_uses_trigger: 100000
-    clear_tool_uses_keep: 10
-    exclude_tools:
-      - "list_agent_filesystem_data"
-      - "read_agent_filesystem_data"
+    keep_recent_messages: 10
+  summarization:
+    token_threshold: 100000
   tool_call_limit:
-    run_limit: 15
+    max_calls: 15
 
 paths:
   agent_filesystem: "agent_filesystem"

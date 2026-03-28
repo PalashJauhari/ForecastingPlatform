@@ -1,117 +1,287 @@
 """
-LangGraph/LangChain agent construction: ``create_agent`` with tools and middleware.
+LangGraph agent construction for the Forecasting Platform.
 
-Loads ``config.yaml`` from the project root for model names and middleware tuning.
-Checkpointing uses :class:`langgraph.checkpoint.memory.InMemorySaver` with ``thread_id`` = session id.
+Builds a ``StateGraph`` with three nodes::
 
-Middleware stack (in order):
-    1. ContextEditingMiddleware
-    2. ToolCallLimitMiddleware
+    START → refresh_data_schema → orchestrator → [has tool calls?]
+                                                   ├─ YES → tools → refresh_data_schema (loop)
+                                                   └─ NO  → END
 
-Codegen safety (semgrep + path check on generated source) runs **inside**
-:func:`tools.coding_tools.generate_code.generate_code` using ``tools/coding_tools/code_scan/agent_sandbox.yaml``.
+Checkpointing uses :class:`langgraph.checkpoint.memory.InMemorySaver`
+with ``thread_id`` = session id, enabling parallel sessions and
+conversation memory across invocations.
 
+State schema (``AgentState``)
+    messages             — conversation history (``add_messages`` reducer).
+    message_summary      — running summary of evicted messages.
+    number_of_tool_calls — tool invocation count for the current user turn.
+    data_schema          — file listing from ``agent_filesystem/`` (excl. scratchpad).
+
+Codegen safety (semgrep + path check) runs **inside**
+:func:`tools.coding_tools.generate_code.generate_code`.
 Layer 3 (runtime patch) lives inside ``run_python_file``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, Optional
 
 import yaml
-from langchain.agents import create_agent
-from langchain.agents.middleware import (
-    ClearToolUsesEdit,
-    ContextEditingMiddleware,
-    ToolCallLimitMiddleware,
-)
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, StateGraph, add_messages
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
+from typing_extensions import TypedDict
 
+from middleware.context_editing import truncate_and_summarize
+from middleware.tool_call_limit import check_tool_call_limit
 from prompts.graph_prompts import SYSTEM_PROMPT
+from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.generate_code import generate_code
 from tools.coding_tools.run_python_file import run_python_file
 from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
 from tools.file_management_tools.read_agent_filesystem_data import read_agent_filesystem_data
+from tools.file_management_tools.read_scratchpad import read_scratchpad
+from tools.file_management_tools.write_scratchpad import write_scratchpad
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 _ROOT = Path(__file__).resolve().parent.parent
 _cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
 
+_AGENT_FS        = (_ROOT / _cfg["paths"]["agent_filesystem"]).resolve()
+_SCRATCHPAD_DIR  = (_ROOT / _cfg["paths"]["scratchpad"]).resolve()
+_SCRATCHPAD_FILE = _SCRATCHPAD_DIR / "scratchpad.md"
+
+_KEEP_RECENT     = int(_cfg["middleware"]["context_editing"]["keep_recent_messages"])
+_TOKEN_THRESHOLD = int(_cfg["middleware"]["summarization"]["token_threshold"])
+_MAX_TOOL_CALLS  = int(_cfg["middleware"]["tool_call_limit"]["max_calls"])
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+
+class AgentState(TypedDict):
+    """
+    Graph state consumed by every node.
+
+    Keys
+        messages             — full conversation (HumanMessage, AIMessage, ToolMessage).
+                               Uses ``add_messages`` reducer: append, deduplicate by id,
+                               honour ``RemoveMessage`` for truncation.
+        message_summary      — running summary of evicted messages, grows across
+                               summarisation cycles.
+        number_of_tool_calls — total individual tool invocations in the current
+                               user-invocation (reset on each new HumanMessage).
+        data_schema          — newline-separated listing of data files currently in
+                               ``agent_filesystem/`` (excluding ``scratchpad/``).
+                               Refreshed before every orchestrator call.
+    """
+    messages: Annotated[list, add_messages]
+    message_summary: str
+    number_of_tool_calls: int
+    data_schema: str
+
+
+# ---------------------------------------------------------------------------
+# Tools and LLM (module-level, built once)
+# ---------------------------------------------------------------------------
+
+TOOLS = [
+    list_agent_filesystem_data,
+    read_agent_filesystem_data,
+    generate_code,
+    run_python_file,
+    ask_user,
+    read_scratchpad,
+    write_scratchpad,
+]
+
+_llm = ChatOpenAI(model=_cfg["models"]["orchestrator"], temperature=0)
+_llm_with_tools = _llm.bind_tools(TOOLS)
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
+
+
+def refresh_data_schema(state: AgentState) -> Dict[str, Any]:
+    """
+    Scan ``agent_filesystem/`` for ``.csv`` and ``.xlsx`` files (excluding
+    ``scratchpad/``) and update ``state["data_schema"]``.
+    """
+    files = [
+        f"agent_filesystem/{f.relative_to(_AGENT_FS).as_posix()}"
+        for f in sorted(_AGENT_FS.rglob("*"))
+        if f.is_file()
+        and f.suffix.lower() in {".csv", ".xlsx"}
+        and not str(f.resolve()).startswith(str(_SCRATCHPAD_DIR))
+    ] if _AGENT_FS.exists() else []
+
+    return {"data_schema": "\n".join(files) if files else "(no data files found)"}
+
+
+def orchestrator(state: AgentState) -> Dict[str, Any]:
+    """
+    Core agent node.
+
+    Steps executed in order:
+        1. **Tool call limit** — return early ``AIMessage`` if exceeded.
+        2. **Summarisation + truncation** — if token estimate exceeds the
+           threshold, evict old messages into a running summary and
+           produce ``RemoveMessage`` ops for the ``add_messages`` reducer.
+        3. **Build system prompt** — ``SYSTEM_PROMPT`` + available files
+           (``data_schema``) + conversation summary (``message_summary``).
+        4. **Call LLM** with bound tools.
+        5. **Count tool calls** — increment ``number_of_tool_calls``.
+    """
+    messages = state["messages"]
+    summary  = state.get("message_summary", "")
+
+    # 1. Reset tool call count on new user invocation
+    is_new_invocation = messages and isinstance(messages[-1], HumanMessage)
+    tool_calls_so_far = 0 if is_new_invocation else state.get("number_of_tool_calls", 0)
+
+    # 2. Tool call limit
+    limit_msg = check_tool_call_limit(tool_calls_so_far, _MAX_TOOL_CALLS)
+    if limit_msg:
+        return {"messages": [limit_msg]}
+    remove_ops: list = []
+
+    # 2. Summarisation + truncation
+    summary, messages, remove_ops = truncate_and_summarize(
+        messages, summary, _KEEP_RECENT, _TOKEN_THRESHOLD,
+    )
+
+    # 3. Call LLM
+    context = (
+        f"Available data files:\n{state.get('data_schema', '')}\n\n"
+        f"Conversation summary:\n{summary}"
+    )
+    response = _llm_with_tools.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages,
+    )
+
+    # 5. Count tool calls
+    new_count = tool_calls_so_far + len(response.tool_calls)
+
+    return {
+        "messages": remove_ops + [response],
+        "message_summary": summary,
+        "number_of_tool_calls": new_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+
+def should_continue(state: AgentState) -> str:
+    """Route to ``tools`` if the last ``AIMessage`` has tool calls, else ``END``."""
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "tools"
+    return END
+
+
+# ---------------------------------------------------------------------------
+# AnalysisGraph
+# ---------------------------------------------------------------------------
+
 
 class AnalysisGraph:
     """
-    Thin wrapper around a single LangChain ``create_agent`` instance.
+    Wrapper around the compiled LangGraph ``StateGraph``.
 
     Notes
-        * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``, OpenAI provider.
-        * **Tools** — list_agent_filesystem_data, read_agent_filesystem_data, generate_code, run_python_file.
-        * **Middleware** — context editing, tool-call limit.
-        * **Codegen safety** — semgrep + path checker inside ``generate_code``.
+        * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
+        * **Tools** — list/read filesystem, generate_code, run_python_file,
+          ask_user, read/write scratchpad.
+        * **Middleware logic** (context editing, summarisation, tool call limit)
+          runs inside the orchestrator node as plain function calls.
+        * **Codegen safety** — semgrep + path scanner inside ``generate_code``.
         * **Layer 3** (runtime patch) is applied inside ``run_python_file``.
     """
 
     def __init__(self) -> None:
         self._checkpointer = InMemorySaver()
-        self._agent = self._build_agent()
+        self._graph = self._build_graph()
 
-    def _build_agent(self) -> Any:
-        """Construct ``create_agent`` with tools, system prompt, and middleware stack."""
-        model_str = f"openai:{_cfg['models']['orchestrator']}"
-        mw  = _cfg.get("middleware", {})
-        ctx  = mw.get("context_editing", {})
-        tlim = mw.get("tool_call_limit", {})
+    # ------------------------------------------------------------------
+    # Graph construction
+    # ------------------------------------------------------------------
 
-        tools = [list_agent_filesystem_data, read_agent_filesystem_data, generate_code, run_python_file]
+    def _build_graph(self) -> Any:
+        """Construct and compile the ``StateGraph``."""
+        builder = StateGraph(AgentState)
 
-        middleware: List[Any] = [
-            ContextEditingMiddleware(
-                edits=[
-                    ClearToolUsesEdit(
-                        trigger=int(ctx.get("clear_tool_uses_trigger", 100_000)),
-                        keep=int(ctx.get("clear_tool_uses_keep", 5)),
-                        exclude_tools=list(ctx.get("exclude_tools", [])),
-                    ),
-                ],
-            ),
-            ToolCallLimitMiddleware(
-                run_limit=int(tlim.get("run_limit", 15)),
-                exit_behavior="continue",
-            ),
-        ]
+        builder.add_node("refresh_data_schema", refresh_data_schema)
+        builder.add_node("orchestrator", orchestrator)
+        builder.add_node("tools", ToolNode(TOOLS))
 
-        return create_agent(
-            model=model_str,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-            middleware=middleware,
-            checkpointer=self._checkpointer,
-            name="analytics_agent",
+        builder.set_entry_point("refresh_data_schema")
+        builder.add_edge("refresh_data_schema", "orchestrator")
+        builder.add_conditional_edges(
+            "orchestrator", should_continue, {"tools": "tools", END: END},
         )
+        builder.add_edge("tools", "refresh_data_schema")
+
+        return builder.compile(checkpointer=self._checkpointer)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def run_graph(
         self,
         session_id: str,
         user_query: str,
-        config: Optional[Dict[str, Any]] = None,
+        config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
-        Invoke the agent with one user message and session-scoped checkpointing.
+        Invoke the agent graph with one user message.
 
         Parameters
             session_id  — ``configurable.thread_id`` (conversation key).
-            user_query  — user text (may include appended upload paths from the API).
-            config      — optional invoke config; ``callbacks`` (e.g. Langfuse) merged in.
+            user_query  — user text (may include appended upload paths).
+            config      — invoke config with Langfuse callbacks.
 
         Returns
-            Agent invoke result dict (typically includes ``messages`` list).
+            Graph invoke result dict (``messages``, ``message_summary``, etc.).
         """
-        invoke_input = {"messages": [HumanMessage(content=user_query)]}
-        invoke_config: Dict[str, Any] = {"configurable": {"thread_id": session_id}}
-        if config:
-            if "callbacks" in config:
-                invoke_config["callbacks"] = config["callbacks"]
-            for k, v in config.items():
-                if k != "callbacks":
-                    invoke_config[k] = v
-        return self._agent.invoke(invoke_input, config=invoke_config)
+        # thread_id drives InMemorySaver checkpointing per session
+        config["configurable"] = {"thread_id": session_id}
+        return self._graph.invoke(
+            {"messages": [HumanMessage(content=user_query)]}, config=config,
+        )
+
+    def resume(
+        self,
+        session_id: str,
+        value: Any,
+        config: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Resume a paused graph (after ``ask_user`` interrupt).
+
+        Parameters
+            session_id — same session that was interrupted.
+            value      — the user's answer to the clarifying question.
+            config     — invoke config with Langfuse callbacks.
+
+        Returns
+            Graph invoke result dict.
+        """
+        config["configurable"] = {"thread_id": session_id}
+        return self._graph.invoke(Command(resume=value), config=config)
+
+    def get_state(self, session_id: str) -> Any:
+        """Return the current state snapshot for *session_id*."""
+        return self._graph.get_state({"configurable": {"thread_id": session_id}})
