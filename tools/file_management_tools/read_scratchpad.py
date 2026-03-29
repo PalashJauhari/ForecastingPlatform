@@ -10,9 +10,9 @@ from pathlib import Path
 import yaml
 from langchain_core.tools import tool
 
-_ROOT = Path(__file__).resolve().parent.parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
-_SCRATCHPAD = _ROOT / _cfg["paths"]["scratchpad"] / "scratchpad.md"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+SCRATCHPAD = PROJECT_ROOT / cfg["paths"]["scratchpad"] / "scratchpad.md"
 
 
 @tool
@@ -27,6 +27,6 @@ def read_scratchpad() -> str:
       - ``"content"`` — full text of scratchpad.md (empty string if the
         file does not exist yet).
     """
-    if not _SCRATCHPAD.exists():
+    if not SCRATCHPAD.exists():
         return json.dumps({"content": ""})
-    return json.dumps({"content": _SCRATCHPAD.read_text(encoding="utf-8")})
+    return json.dumps({"content": SCRATCHPAD.read_text(encoding="utf-8")})

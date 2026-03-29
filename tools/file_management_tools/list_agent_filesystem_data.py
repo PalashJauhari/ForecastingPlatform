@@ -9,9 +9,9 @@ import yaml
 from pathlib import Path
 from langchain_core.tools import tool
 
-_ROOT = Path(__file__).resolve().parent.parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
-AGENT_FILESYSTEM_ROOT = _ROOT / _cfg["paths"]["agent_filesystem"]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
 
 
 @tool

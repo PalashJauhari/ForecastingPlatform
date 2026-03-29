@@ -11,11 +11,11 @@ from pathlib import Path
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-_ROOT    = Path(__file__).resolve().parent.parent.parent
-_cfg     = yaml.safe_load(open(_ROOT / "config.yaml"))
-_FS_ROOT = (_ROOT / _cfg["paths"]["agent_filesystem"]).resolve()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+AGENT_FILESYSTEM_ROOT = (PROJECT_ROOT / cfg["paths"]["agent_filesystem"]).resolve()
 
-_ALLOWED = {".csv", ".xlsx"}
+ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 
 
 class ReadAgentFilesystemDataInput(BaseModel):
@@ -75,10 +75,10 @@ def read_agent_filesystem_data(path: str) -> str:
     if rel_path.is_absolute():
         return json.dumps({"error": "Path must be inside agent_filesystem/."})
 
-    target = (_FS_ROOT / rel_path).resolve()
+    target = (AGENT_FILESYSTEM_ROOT / rel_path).resolve()
 
     try:
-        target.relative_to(_FS_ROOT)
+        target.relative_to(AGENT_FILESYSTEM_ROOT)
     except ValueError:
         return json.dumps({"error": "Path must be inside agent_filesystem/."})
 
@@ -89,7 +89,7 @@ def read_agent_filesystem_data(path: str) -> str:
         return json.dumps({"error": "Path is a directory. Use list_agent_filesystem_data to browse files."})
 
     ext = target.suffix.lower()
-    if ext not in _ALLOWED:
+    if ext not in ALLOWED_EXTENSIONS:
         return json.dumps({"error": f"Only .csv and .xlsx files are supported. Got: '{ext}'"})
 
     try:

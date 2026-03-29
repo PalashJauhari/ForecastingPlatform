@@ -17,14 +17,14 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import yaml
 from dotenv import load_dotenv
 
-load_dotenv(_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -33,8 +33,8 @@ from langchain_core.messages import AIMessage
 from graph import AnalysisGraph
 from observability.langfuse_handler import get_langfuse_callbacks
 
-_cfg      = yaml.safe_load(open(_ROOT / "config.yaml"))
-INPUT_DIR = _ROOT / _cfg["paths"]["input"]
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+INPUT_DIR = PROJECT_ROOT / cfg["paths"]["input"]
 
 ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 

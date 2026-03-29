@@ -22,9 +22,9 @@ import yaml
 
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / 'config.yaml'))
-AGENT_FILESYSTEM_ROOT = _ROOT / _cfg['paths']['agent_filesystem']
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
 
 SANDBOX = AGENT_FILESYSTEM_ROOT.resolve()
 
@@ -36,7 +36,7 @@ GLOBALLY_BLOCKED_EXTENSIONS = {
 
 # -- Validators ---------------------------------------------------------------
 
-def _is_safe_path(path: str) -> bool:
+def is_safe_path(path: str) -> bool:
     """True when *path* resolves inside the sandbox (catches traversal)."""
     try:
         return str(Path(path).resolve()).startswith(str(SANDBOX))
@@ -44,7 +44,7 @@ def _is_safe_path(path: str) -> bool:
         return False
 
 
-def _validate(path: str, operation: str, allowed_extensions: set[str]) -> None:
+def validate_path(path: str, operation: str, allowed_extensions: set[str]) -> None:
     ext = Path(path).suffix.lower()
 
     if ext in GLOBALLY_BLOCKED_EXTENSIONS:
@@ -55,7 +55,7 @@ def _validate(path: str, operation: str, allowed_extensions: set[str]) -> None:
             f"  Reason    : '{ext}' files are globally blocked -- no exceptions\n"
             f"  Blocked   : {GLOBALLY_BLOCKED_EXTENSIONS}\n"
         )
-    if not _is_safe_path(path):
+    if not is_safe_path(path):
         raise PermissionError(
             f"\n[SANDBOX VIOLATION]\n"
             f"  Operation : {operation}\n"
@@ -75,11 +75,11 @@ def _validate(path: str, operation: str, allowed_extensions: set[str]) -> None:
 
 # -- Originals (captured at import time) --------------------------------------
 
-_original_open = builtins.open
-_original_read_excel = pd.read_excel
-_original_read_csv = pd.read_csv
-_original_to_excel = pd.DataFrame.to_excel
-_original_to_csv = pd.DataFrame.to_csv
+original_open = builtins.open
+original_read_excel = pd.read_excel
+original_read_csv = pd.read_csv
+original_to_excel = pd.DataFrame.to_excel
+original_to_csv = pd.DataFrame.to_csv
 
 
 # -- Patched replacements -----------------------------------------------------
@@ -104,24 +104,24 @@ def safe_open(path, mode="r", *args, **kwargs):  # noqa: A001
 
 
 def safe_read_excel(path, *args, **kwargs):
-    _validate(str(path), "pd.read_excel()", {".xlsx", ".xls"})
-    return _original_read_excel(path, *args, **kwargs)
+    validate_path(str(path), "pd.read_excel()", {".xlsx", ".xls"})
+    return original_read_excel(path, *args, **kwargs)
 
 
 def safe_read_csv(path, *args, **kwargs):
-    _validate(str(path), "pd.read_csv()", {".csv"})
-    return _original_read_csv(path, *args, **kwargs)
+    validate_path(str(path), "pd.read_csv()", {".csv"})
+    return original_read_csv(path, *args, **kwargs)
 
 
 def safe_to_excel(self, path, *args, **kwargs):
-    _validate(str(path), "df.to_excel()", {".xlsx", ".xls"})
-    return _original_to_excel(self, path, *args, **kwargs)
+    validate_path(str(path), "df.to_excel()", {".xlsx", ".xls"})
+    return original_to_excel(self, path, *args, **kwargs)
 
 
 def safe_to_csv(self, path=None, *args, **kwargs):
     if path is not None:
-        _validate(str(path), "df.to_csv()", {".csv"})
-    return _original_to_csv(self, path, *args, **kwargs)
+        validate_path(str(path), "df.to_csv()", {".csv"})
+    return original_to_csv(self, path, *args, **kwargs)
 
 
 # -- Public API ---------------------------------------------------------------
@@ -137,8 +137,8 @@ def apply_patches() -> None:
 
 def remove_patches() -> None:
     """Restore originals. **Always** call in a ``finally`` block."""
-    builtins.open = _original_open  # type: ignore[assignment]
-    pd.read_excel = _original_read_excel  # type: ignore[assignment]
-    pd.read_csv = _original_read_csv  # type: ignore[assignment]
-    pd.DataFrame.to_excel = _original_to_excel  # type: ignore[assignment]
-    pd.DataFrame.to_csv = _original_to_csv  # type: ignore[assignment]
+    builtins.open = original_open  # type: ignore[assignment]
+    pd.read_excel = original_read_excel  # type: ignore[assignment]
+    pd.read_csv = original_read_csv  # type: ignore[assignment]
+    pd.DataFrame.to_excel = original_to_excel  # type: ignore[assignment]
+    pd.DataFrame.to_csv = original_to_csv  # type: ignore[assignment]

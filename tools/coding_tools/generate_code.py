@@ -15,10 +15,10 @@ from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
 
 # Read codegen model from config.yaml once at import
-_ROOT = Path(__file__).resolve().parent.parent.parent
-_cfg = yaml.safe_load(open(_ROOT / "config.yaml"))
-_CODING_MODEL = _cfg["models"].get("code_generation", "gpt-4o-mini")
-CODE_DIR       = Path(_ROOT) / _cfg["paths"]["code"]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
+CODE_DIR = Path(PROJECT_ROOT) / cfg["paths"]["code"]
 
 
 class GenerateCodeInput(BaseModel):
@@ -114,7 +114,7 @@ def generate_code(task: str, data_schema: str = "") -> str:
                                   {"passed": false, "detail": "..."} on failure with reason.
     """
     # --- Model and prompt ---------------------------------------------------------
-    model_name = _CODING_MODEL
+    model_name = CODING_MODEL
 
     llm = ChatOpenAI(
         model=model_name,

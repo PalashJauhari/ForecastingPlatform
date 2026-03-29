@@ -1,27 +1,3 @@
-"""
-LangGraph agent construction for the Forecasting Platform.
-
-Builds a ``StateGraph`` with three nodes::
-
-    START → refresh_data_schema → orchestrator → [has tool calls?]
-                                                   ├─ YES → tools → refresh_data_schema (loop)
-                                                   └─ NO  → END
-
-Checkpointing uses :class:`langgraph.checkpoint.memory.InMemorySaver`
-with ``thread_id`` = session id, enabling parallel sessions and
-conversation memory across invocations.
-
-State schema (``AgentState``)
-    messages             — conversation history (``add_messages`` reducer).
-    message_summary      — running summary of evicted messages.
-    number_of_tool_calls — tool invocation count for the current user turn.
-    data_schema          — file listing from ``agent_filesystem/`` (excl. scratchpad).
-
-Codegen safety (semgrep + path check) runs **inside**
-:func:`tools.coding_tools.generate_code.generate_code`.
-Layer 3 (runtime patch) lives inside ``run_python_file``.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -51,16 +27,16 @@ from tools.file_management_tools.write_scratchpad import write_scratchpad
 # Config
 # ---------------------------------------------------------------------------
 
-_ROOT = Path(__file__).resolve().parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-_AGENT_FS        = (_ROOT / _cfg["paths"]["agent_filesystem"]).resolve()
-_SCRATCHPAD_DIR  = (_ROOT / _cfg["paths"]["scratchpad"]).resolve()
-_SCRATCHPAD_FILE = _SCRATCHPAD_DIR / "scratchpad.md"
+AGENT_FS = (PROJECT_ROOT / cfg["paths"]["agent_filesystem"]).resolve()
+SCRATCHPAD_DIR = (PROJECT_ROOT / cfg["paths"]["scratchpad"]).resolve()
+SCRATCHPAD_FILE = SCRATCHPAD_DIR / "scratchpad.md"
 
-_KEEP_RECENT     = int(_cfg["middleware"]["context_editing"]["keep_recent_messages"])
-_TOKEN_THRESHOLD = int(_cfg["middleware"]["summarization"]["token_threshold"])
-_MAX_TOOL_CALLS  = int(_cfg["middleware"]["tool_call_limit"]["max_calls"])
+KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
+TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
+MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
 # ---------------------------------------------------------------------------
 # State
@@ -103,8 +79,8 @@ TOOLS = [
     write_scratchpad,
 ]
 
-_llm = ChatOpenAI(model=_cfg["models"]["orchestrator"], temperature=0)
-_llm_with_tools = _llm.bind_tools(TOOLS)
+llm = ChatOpenAI(model=cfg["models"]["orchestrator"], temperature=0)
+llm_with_tools = llm.bind_tools(TOOLS)
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -117,12 +93,12 @@ def refresh_data_schema(state: AgentState) -> Dict[str, Any]:
     ``scratchpad/``) and update ``state["data_schema"]``.
     """
     files = [
-        f"agent_filesystem/{f.relative_to(_AGENT_FS).as_posix()}"
-        for f in sorted(_AGENT_FS.rglob("*"))
+        f"agent_filesystem/{f.relative_to(AGENT_FS).as_posix()}"
+        for f in sorted(AGENT_FS.rglob("*"))
         if f.is_file()
         and f.suffix.lower() in {".csv", ".xlsx"}
-        and not str(f.resolve()).startswith(str(_SCRATCHPAD_DIR))
-    ] if _AGENT_FS.exists() else []
+        and not str(f.resolve()).startswith(str(SCRATCHPAD_DIR))
+    ] if AGENT_FS.exists() else []
 
     return {"data_schema": "\n".join(files) if files else "(no data files found)"}
 
@@ -149,14 +125,14 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
     tool_calls_so_far = 0 if is_new_invocation else state.get("number_of_tool_calls", 0)
 
     # 2. Tool call limit
-    limit_msg = check_tool_call_limit(tool_calls_so_far, _MAX_TOOL_CALLS)
+    limit_msg = check_tool_call_limit(tool_calls_so_far, MAX_TOOL_CALLS)
     if limit_msg:
         return {"messages": [limit_msg]}
     remove_ops: list = []
 
     # 2. Summarisation + truncation
     summary, messages, remove_ops = truncate_and_summarize(
-        messages, summary, _KEEP_RECENT, _TOKEN_THRESHOLD,
+        messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
     )
 
     # 3. Call LLM
@@ -164,7 +140,7 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         f"Available data files:\n{state.get('data_schema', '')}\n\n"
         f"Conversation summary:\n{summary}"
     )
-    response = _llm_with_tools.invoke(
+    response = llm_with_tools.invoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages,
     )
 

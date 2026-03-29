@@ -23,11 +23,11 @@ from langchain_core.messages import (
 )
 from langchain_openai import ChatOpenAI
 
-_ROOT = Path(__file__).resolve().parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / "config.yaml"))
-_SUMMARY_MODEL = _cfg["models"].get("summarization", "gpt-4o-mini")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+SUMMARY_MODEL = cfg["models"].get("summarization", "gpt-4o-mini")
 
-_SUMMARY_SYSTEM = """\
+SUMMARY_SYSTEM = """\
 You are a conversation summariser. Produce a concise running summary that
 preserves all important facts, data references, file paths, column names,
 analysis results, and user preferences mentioned so far.
@@ -62,7 +62,7 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
 
 def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
-    llm = ChatOpenAI(model=_SUMMARY_MODEL, temperature=0)
+    llm = ChatOpenAI(model=SUMMARY_MODEL, temperature=0)
 
     conversation = "\n".join(
         f"{type(m).__name__}: {m.content}"
@@ -76,7 +76,7 @@ def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     user_content += f"## New Messages to Integrate\n{conversation}"
 
     response = llm.invoke([
-        SystemMessage(content=_SUMMARY_SYSTEM),
+        SystemMessage(content=SUMMARY_SYSTEM),
         HumanMessage(content=user_content),
     ])
     return response.content

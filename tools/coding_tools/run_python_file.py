@@ -21,25 +21,25 @@ import yaml
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-_ROOT = Path(__file__).resolve().parent.parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / 'config.yaml'))
-AGENT_FILESYSTEM_ROOT = _ROOT / _cfg['paths']['agent_filesystem']
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
 from .code_scan.runtime_patch_scan import apply_patches, remove_patches
 
 
-def _agent_fs_root() -> Path:
+def agent_fs_root() -> Path:
     """Resolved absolute path to ``agent_filesystem``."""
     return AGENT_FILESYSTEM_ROOT.resolve()
 
 
-def _resolve_script(filename: str) -> Path:
+def resolve_script(filename: str) -> Path:
     """
     Resolve *filename* to a ``.py`` path confined under ``agent_filesystem``.
 
     Raises
         ValueError -- path escapes workspace or suffix is not ``.py``.
     """
-    base = _agent_fs_root()
+    base = agent_fs_root()
     p = Path(filename)
     candidate = p.resolve() if p.is_absolute() else (base / filename).resolve()
     try:
@@ -72,7 +72,7 @@ def run_python_file(filename: str) -> str:
         JSON with ``stdout``, ``stderr``, ``returncode``.
     """
     try:
-        script = _resolve_script(filename.strip())
+        script = resolve_script(filename.strip())
     except ValueError as e:
         return json.dumps({"error": str(e), "stdout": "", "stderr": "", "returncode": -1})
 

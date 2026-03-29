@@ -9,6 +9,7 @@ Changes from original:
 """
 
 import io
+import json
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -459,10 +460,9 @@ if user_input and user_input.strip():
     last_tool = data.get("last_tool_result") or ""
 
     # Try to extract output file paths from the tool result
-    import json as _json
     output_files_mentioned = []
     try:
-        tool_json = _json.loads(last_tool) if last_tool else {}
+        tool_json = json.loads(last_tool) if last_tool else {}
         if isinstance(tool_json, dict):
             for v in tool_json.values():
                 if isinstance(v, str) and v.startswith("agent_filesystem/output/"):

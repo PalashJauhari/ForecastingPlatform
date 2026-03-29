@@ -10,9 +10,9 @@ from enum import Enum
 from pathlib import Path
 import yaml
 
-_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_cfg  = yaml.safe_load(open(_ROOT / 'config.yaml'))
-AGENT_FILESYSTEM_ROOT = _ROOT / _cfg['paths']['agent_filesystem']
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
 
 SANDBOX = AGENT_FILESYSTEM_ROOT.resolve()
 
@@ -31,7 +31,7 @@ class FoundPath:
     status: Status
 
 
-def _looks_like_path(val: str) -> bool:
+def looks_like_path(val: str) -> bool:
     return (
         val.startswith("/")
         or val.startswith("./")
@@ -45,7 +45,7 @@ def _looks_like_path(val: str) -> bool:
     )
 
 
-def _check_status(path_str: str) -> Status:
+def check_path_status(path_str: str) -> Status:
     if "dynamic" in path_str:
         prefix = path_str.replace("... (dynamic)", "").strip()
         if prefix.startswith("agent_filesystem"):
@@ -60,7 +60,7 @@ def _check_status(path_str: str) -> Status:
     return Status.UNSAFE
 
 
-def _scan_code(code: str) -> list[FoundPath]:
+def scan_code_paths(code: str) -> list[FoundPath]:
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
@@ -72,38 +72,38 @@ def _scan_code(code: str) -> list[FoundPath]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             val = node.value
-            if _looks_like_path(val):
+            if looks_like_path(val):
                 key = (node.lineno, val)
                 if key not in seen:
                     seen.add(key)
-                    found.append(FoundPath(line=node.lineno, path=val, kind="hardcoded", status=_check_status(val)))
+                    found.append(FoundPath(line=node.lineno, path=val, kind="hardcoded", status=check_path_status(val)))
 
         if isinstance(node, ast.JoinedStr):
             parts = [v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
             prefix = parts[0] if parts else ""
-            if _looks_like_path(prefix):
+            if looks_like_path(prefix):
                 path_repr = f"{prefix}... (dynamic)"
                 key = (node.lineno, path_repr)
                 if key not in seen:
                     seen.add(key)
-                    found.append(FoundPath(line=node.lineno, path=path_repr, kind="fstring", status=_check_status(path_repr)))
+                    found.append(FoundPath(line=node.lineno, path=path_repr, kind="fstring", status=check_path_status(path_repr)))
 
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left = node.left
             if isinstance(left, ast.Constant) and isinstance(left.value, str):
                 val = left.value
-                if _looks_like_path(val):
+                if looks_like_path(val):
                     path_repr = f"{val}... (dynamic)"
                     key = (node.lineno, path_repr)
                     if key not in seen:
                         seen.add(key)
-                        found.append(FoundPath(line=node.lineno, path=path_repr, kind="concatenation", status=_check_status(path_repr)))
+                        found.append(FoundPath(line=node.lineno, path=path_repr, kind="concatenation", status=check_path_status(path_repr)))
 
     return sorted(found, key=lambda x: x.line)
 
 
 def run_path_scan(code: str) -> dict:
-    paths = _scan_code(code)
+    paths = scan_code_paths(code)
     unsafe = [p for p in paths if p.status == Status.UNSAFE]
     dynamic = [p for p in paths if p.status == Status.DYNAMIC]
     safe = [p for p in paths if p.status == Status.SAFE]
