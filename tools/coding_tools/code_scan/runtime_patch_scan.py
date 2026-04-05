@@ -1,9 +1,9 @@
 """
-Layer 3 — **Runtime patch scan**: monkey-patching for LLM-generated code execution.
+Layer 2 — **Runtime patch scan**: monkey-patching for LLM-generated code execution.
 
 Lives under ``tools/coding_tools/`` alongside codegen and static scans.
-Applied inside ``run_python_file`` just before execution and torn down in a
-``finally`` block.
+Intended for callers that execute LLM code in-process with ``exec`` (apply before
+``exec``, remove in ``finally``).
 
 Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
 ``df.to_excel``, ``df.to_csv`` to enforce:

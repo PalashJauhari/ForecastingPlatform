@@ -1,0 +1,266 @@
+"""
+``code_pipeline`` tool implementation (generate → Semgrep → judge → save → run).
+
+Pipeline order
+    1. **Codegen** — OpenAI JSON mode with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
+       may include task, data schema, and optional ``## Previous code policy violations`` on retry.
+    2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
+    3. **LLM judge** — semantic/policy check (``run_llm_judge``).
+    4. **Save** — ``pipeline_run.py`` under ``paths.code`` (overwrites).
+    5. **Execute** — same Python interpreter, project root as cwd, timeout and optional Linux RLIMIT.
+
+On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
+write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
+
+The LangChain ``@tool`` docstring on ``code_pipeline`` is what the orchestrator model sees; this
+module docstring is for developers maintaining the implementation.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+
+from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
+
+from .code_scan.llm_judge import run_llm_judge
+from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
+
+# ---------------------------------------------------------------------------
+# Config (loaded once at import)
+# ---------------------------------------------------------------------------
+
+# Repo root (``ForecastingPlatform/``): parents are coding_tools → tools → project.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
+
+# Model names (``models.*`` in config.yaml).
+CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
+JUDGE_MODEL = cfg["models"].get("code_judge", cfg["models"].get("code_generation", "gpt-4o-mini"))
+# Where generated ``.py`` files are stored (``paths.code``, usually ``agent_filesystem/code``).
+CODE_DIR = PROJECT_ROOT / cfg["paths"]["code"]
+
+# Execution limits: prefer ``code_pipeline``; fall back to legacy ``run_python_file`` for older configs.
+_pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
+# Hard stop for the child process (seconds); raises ``TimeoutExpired`` in the parent.
+TIMEOUT = float(_pipe.get("timeout_seconds", 120))
+# Optional Linux-only: RLIMIT_AS via ``prlimit`` (MiB). Invalid values are ignored.
+MEMORY_LIMIT_MB = _pipe.get("memory_limit_mb")
+if MEMORY_LIMIT_MB is not None:
+    try:
+        MEMORY_LIMIT_MB = int(MEMORY_LIMIT_MB)
+    except (TypeError, ValueError):
+        MEMORY_LIMIT_MB = None
+
+
+class CodePipelineInput(BaseModel):
+    """
+    Arguments exposed to the orchestrator for ``code_pipeline``.
+
+    Field descriptions are shown in the tool schema LangChain binds to the model; keep them aligned
+    with ``graph_prompts`` (paths, retries) and with ``CODE_GENERATION_SYSTEM_PROMPT``.
+    """
+
+    task: str = Field(
+        description=(
+            "Required. Natural-language specification of the analysis: what to read, compute, print, and optionally save. "
+            "Rules: every CSV/Excel path the generated script must use must appear as a full string starting with "
+            "agent_filesystem/ (e.g. agent_filesystem/input/data.csv). Label multiple inputs clearly (Input 1:, Input 2:). "
+            "If the script writes a file, include the full output path under agent_filesystem/output/ or processed/. "
+            "If the script only prints statistics, no output path is required. "
+            "Do not use bare filenames, ./, or paths outside agent_filesystem/. "
+            "Examples: "
+            "'Input: agent_filesystem/input/sales.csv | Output: agent_filesystem/output/forecast.csv | Fit a regression and save predictions.' "
+            "'Input: agent_filesystem/input/sales.csv | Print summary statistics.' "
+            "'Input 1: … | Input 2: … | Output: … | Merge on date and compute variance.'"
+        ),
+    )
+    data_schema: str = Field(
+        default="",
+        description=(
+            "Optional. Structured description of each input file the script will read: column names, dtypes, "
+            "date formats, nullability, and sample rows if helpful. "
+            "When possible, call read_agent_filesystem_data on each input path and paste the returned columns/samples here. "
+            "Use an empty string only when the schema is unknown and inspection was not possible."
+        ),
+    )
+    previous_code_violation: str = Field(
+        default="",
+        description=(
+            "Optional. When this is a **retry** after Semgrep or the LLM judge rejected an earlier attempt, "
+            "paste the prior **coding policy / safety** failure (e.g. forbidden import, bad path, judge detail). "
+            "Empty on the first attempt. Helps the model fix the issue without repeating the violation."
+        ),
+    )
+
+
+@tool(args_schema=CodePipelineInput)
+def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
+    """Generate, validate, save, and run Python for a tabular-data task in one tool call.
+
+    Use when the user needs **new** Python code written and executed against files under
+    ``agent_filesystem/`` (transformations, models, reports). The tool runs a dedicated
+    codegen model, applies a **Semgrep** scan and an **LLM judge** before saving, writes the script to
+    ``agent_filesystem/code/pipeline_run.py`` (overwritten each time), then executes it in a
+    subprocess with a wall-clock timeout and resource-related environment limits.
+
+    Do not use for: answering from already-loaded data alone (use read tools), or when the
+    user only needs a file listing.
+
+    Args:
+        task: Natural-language job plus all data paths (full ``agent_filesystem/...`` strings).
+        data_schema: Optional per-file schema and samples; empty if unknown.
+        previous_code_violation: Optional text describing a **prior** Semgrep/judge failure on a previous codegen attempt;
+            included in the model prompt so the retry respects policy. Empty on first attempt.
+
+    Returns:
+        A **JSON string** (parse it) with two keys:
+
+        **code_generation** — Always present.
+        - If the model returns no code: ``code`` is empty; ``detail`` explains; ``execution`` is null.
+        - If **Semgrep** or the **LLM judge** fails: ``code`` still contains the **generated source** so you can
+          review it against ``code_safety_evaluation.detail``; ``execution`` is null; nothing is saved to disk.
+        - If codegen, Semgrep, and the judge all pass: ``code`` is the generated source, ``explanation``
+          summarizes it, ``code_safety_evaluation`` has ``passed: true``; the same source is written to ``pipeline_run.py``.
+
+        **execution** — null when the script was not run (failures above). Otherwise an object
+        with ``stdout``, ``stderr``, and ``returncode`` from the subprocess. If the run hits
+        the configured timeout, ``returncode`` is 124 and ``error`` describes the timeout.
+
+    After any safety failure, the **next** call should pass **previous_code_violation** with the
+    prior attempt’s ``code_safety_evaluation.detail`` (Semgrep/judge text). You may still refine
+    **task** if needed;     do not retry with an empty **previous_code_violation** as if nothing failed.
+    """
+    # ------------------------------------------------------------------
+    # Step 1 — Codegen (JSON object: filename, explanation, code)
+    # ------------------------------------------------------------------
+    llm = ChatOpenAI(
+        model=CODING_MODEL,
+        temperature=0,
+        model_kwargs={"response_format": {"type": "json_object"}},
+    )
+    # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (schema + retries).
+    user_payload = "## Task\n" + task.strip() + "\n\n## Data schema\n" + data_schema.strip()
+    if previous_code_violation.strip():
+        user_payload += "\n\n## Previous code policy violations\n" + previous_code_violation.strip()
+    resp = llm.invoke(
+        [SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT), HumanMessage(content=user_payload)]
+    )
+    data = json.loads(resp.content if hasattr(resp, "content") else str(resp))
+
+    code = (data.get("code") or "").strip()
+    explanation = (data.get("explanation") or "").strip()
+
+    # ------------------------------------------------------------------
+    # Step 2a — Empty codegen: skip expensive checks and disk I/O
+    # ------------------------------------------------------------------
+    if not code:
+        return json.dumps(
+            {
+                "code_generation": {
+                    "code": "",
+                    "explanation": explanation,
+                    "code_safety_evaluation": {"passed": False, "detail": "No code returned from model."},
+                },
+                "execution": None,
+            },
+            default=str,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2b — Semgrep (static patterns; see codegen_scan_semgrep.yaml)
+    # ------------------------------------------------------------------
+    semgrep_report = run_semgrep_scan(code)
+    if not semgrep_report["passed"]:
+        return json.dumps(
+            {
+                "code_generation": {
+                    "code": code,
+                    "explanation": explanation,
+                    "code_safety_evaluation": {
+                        "passed": False,
+                        "detail": format_semgrep_issues(semgrep_report["violations"]),
+                    },
+                },
+                "execution": None,
+            },
+            default=str,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2c — LLM judge (task alignment, policy gaps Semgrep can miss)
+    # ------------------------------------------------------------------
+    judge_ok, judge_detail = run_llm_judge(code=code, task=task, model_name=JUDGE_MODEL)
+    if not judge_ok:
+        return json.dumps(
+            {
+                "code_generation": {
+                    "code": code,
+                    "explanation": explanation,
+                    "code_safety_evaluation": {"passed": False, "detail": judge_detail},
+                },
+                "execution": None,
+            },
+            default=str,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3 — Persist only after both gates pass (fixed name for the runner)
+    # ------------------------------------------------------------------
+    CODE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = CODE_DIR / "pipeline_run.py"
+    out_path.write_text(code, encoding="utf-8")
+    gen = {
+        "code": code,
+        "explanation": explanation,
+        "code_safety_evaluation": {"passed": True},
+    }
+
+    # ------------------------------------------------------------------
+    # Step 4 — Run script: subprocess, no shell, project root as cwd
+    # ------------------------------------------------------------------
+    env = os.environ.copy()
+    # Cap BLAS/OpenMP threads so one run does not pin all CPU cores (numpy/pandas).
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMEXPR_NUM_THREADS"] = "1"
+    env["VECLIB_MAXIMUM_THREADS"] = "1"
+    cmd = [sys.executable, str(out_path)]
+    # Optional virtual memory cap (Linux only): prlimit wraps the Python invocation.
+    if MEMORY_LIMIT_MB and MEMORY_LIMIT_MB > 0 and platform.system() == "Linux":
+        prlimit = shutil.which("prlimit")
+        if prlimit:
+            cmd = [prlimit, f"--as={MEMORY_LIMIT_MB * 1024 * 1024}", "--"] + cmd
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+            check=False,
+        )
+        # Non-zero returncode is still a successful tool result (caller inspects stderr/stdout).
+        execution = {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "returncode": proc.returncode}
+    except subprocess.TimeoutExpired as e:
+        # SIGKILL path: returncode 124 convention; surface partial streams if the OS attached them.
+        err = f"Execution exceeded timeout ({TIMEOUT}s). Process was terminated."
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
+        err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
+        combined = (err_out + "\n" + err).strip() if err_out else err
+        execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
+
+    return json.dumps({"code_generation": gen, "execution": execution}, default=str)

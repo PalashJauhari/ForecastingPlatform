@@ -21,7 +21,7 @@ def list_agent_filesystem_data() -> str:
 
     Call this first to discover what data files are available. Each path in the
     result starts with 'agent_filesystem/' so it can be passed directly to
-    read_agent_filesystem_data or used as an input path in generate_code.
+    read_agent_filesystem_data or used as an input path in ``code_pipeline``.
 
     Returns a JSON string with two keys:
       - "files": list of matching file paths, e.g.

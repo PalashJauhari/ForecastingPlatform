@@ -1,7 +1,7 @@
 """
-Semgrep static analysis for generated Python (used by ``tools.generate_code``).
+Semgrep static analysis for generated Python (used by ``tools.coding_tools.code_pipeline``).
 
-Runs ``semgrep`` with ``tools/agent_sandbox.yaml``. Requires ``pip install semgrep``.
+Runs ``semgrep`` with ``codegen_scan_semgrep.yaml``. Requires ``pip install semgrep``.
 """
 
 from __future__ import annotations
@@ -12,11 +12,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SEMGREP_CONFIG = Path(__file__).resolve().parent / "agent_sandbox.yaml"
+SEMGREP_CONFIG = Path(__file__).resolve().parent / "codegen_scan_semgrep.yaml"
 
 
 def run_semgrep_scan(code: str) -> dict:
     """Run semgrep on *code*; returns ``{"passed": bool, "violations": list}``."""
+    # Semgrep expects a file path; write generated source to a temp ``.py`` and delete in ``finally``.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
         tmp.write(code)
         tmp_path = tmp.name
@@ -42,6 +43,7 @@ def run_semgrep_scan(code: str) -> dict:
             }
         findings = output.get("results", [])
         violations = []
+        # Normalize Semgrep JSON into a small dict list for ``format_semgrep_issues`` / JSON responses.
         for f in findings:
             violations.append({
                 "rule": f.get("check_id", "unknown"),
@@ -52,6 +54,7 @@ def run_semgrep_scan(code: str) -> dict:
         return {"passed": len(violations) == 0, "violations": violations}
 
     except FileNotFoundError:
+        # ``semgrep`` binary missing from PATH (e.g. venv without dev extras).
         return {
             "passed": False,
             "violations": [{
@@ -62,6 +65,7 @@ def run_semgrep_scan(code: str) -> dict:
             }],
         }
     except subprocess.TimeoutExpired:
+        # Scan hung or pathological rule/file; fail closed so unsafe code is not saved.
         return {
             "passed": False,
             "violations": [{
@@ -76,6 +80,7 @@ def run_semgrep_scan(code: str) -> dict:
 
 
 def format_semgrep_issues(violations: list[dict]) -> str:
+    """Human-readable block for ``code_safety_evaluation.detail`` and retry context."""
     lines = ["Semgrep rejected the generated code.", "Violations:", ""]
     for v in violations:
         lines.append(f"  Line {v['line']:<4} | {v['rule']}")
@@ -83,5 +88,5 @@ def format_semgrep_issues(violations: list[dict]) -> str:
         if v.get("code"):
             lines.append(f"           Code: {v['code']}")
         lines.append("")
-    lines.append("Rules: see tools/coding_tools/code_scan/agent_sandbox.yaml.")
+    lines.append("Rules: see tools/coding_tools/code_scan/codegen_scan_semgrep.yaml.")
     return "\n".join(lines)

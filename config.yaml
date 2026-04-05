@@ -3,6 +3,7 @@
 models:
   orchestrator: "gpt-4o-mini"
   code_generation: "gpt-4o-mini"
+  code_judge: "gpt-4o-mini"
   summarization: "gpt-4o-mini"
 
 middleware:
@@ -12,6 +13,11 @@ middleware:
     token_threshold: 100000
   tool_call_limit:
     max_calls: 15
+
+code_pipeline:
+  timeout_seconds: 120
+  # Linux only (uses `prlimit --as` when available): max virtual memory in MiB. Omit or null for no cap.
+  memory_limit_mb: null
 
 paths:
   agent_filesystem: "agent_filesystem"

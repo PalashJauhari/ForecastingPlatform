@@ -1,5 +1,5 @@
 """
-LangChain tool: read a .csv or .xlsx file from agent_filesystem/ and return the top 5 rows.
+LangChain tool: read a .csv or .xlsx file from agent_filesystem/ and return schema + a preview of rows.
 """
 
 from __future__ import annotations
@@ -25,18 +25,27 @@ class ReadAgentFilesystemDataInput(BaseModel):
             "(e.g. 'agent_filesystem/input/data.csv'). Use list_agent_filesystem_data to discover files."
         ),
     )
+    n_rows: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description=(
+            "How many rows to return as a preview from the start of the file. "
+            "Default 5; maximum 100 to limit context size."
+        ),
+    )
 
 
 @tool(args_schema=ReadAgentFilesystemDataInput)
-def read_agent_filesystem_data(path: str) -> str:
+def read_agent_filesystem_data(path: str, n_rows: int = 5) -> str:
     """
     Read a .csv or .xlsx file from agent_filesystem/ and return its schema and a sample of rows.
 
     Can be used any time you need to inspect or understand the contents of a data file —
-    not just before generate_code. Use it to answer questions about the data, check column
+    not just before ``code_pipeline``. Use it to answer questions about the data, check column
     names, verify row counts, or preview values.
 
-    Using it before generate_code is recommended so you can pass the returned columns and
+    Using it before ``code_pipeline`` is recommended so you can pass the returned columns and
     sample rows as data_schema, giving the code-generation model precise knowledge of the
     file structure.
 
@@ -44,13 +53,15 @@ def read_agent_filesystem_data(path: str) -> str:
         path: Full path to the file, must start with 'agent_filesystem/'
               e.g. 'agent_filesystem/input/sales.csv'.
               Use list_agent_filesystem_data first to get valid paths.
+        n_rows: Number of preview rows from the top of the file (default 5, max 100).
 
     Returns a JSON string with the following keys on success:
-      - "path"       : the path you passed in (string).
-      - "columns"    : list of column names, e.g. ["date", "revenue", "region"].
-      - "rows"       : first 5 rows as a list of dicts, e.g.
-                       [{"date": "2024-01-01", "revenue": 1200.5, "region": "North"}, ...]
-      - "total_rows" : total number of rows in the file (int).
+      - "path"            : the path you passed in (string).
+      - "preview_n_rows"  : how many preview rows were returned (same as n_rows, capped 1–100).
+      - "columns"         : list of column names, e.g. ["date", "revenue", "region"].
+      - "rows"            : first n_rows rows as a list of dicts, e.g.
+                            [{"date": "2024-01-01", "revenue": 1200.5, "region": "North"}, ...]
+      - "total_rows"      : total number of rows in the file (int).
 
     Returns a JSON string with an "error" key on failure:
       - Path does not start with 'agent_filesystem/'
@@ -97,9 +108,13 @@ def read_agent_filesystem_data(path: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"Failed to read file: {e}"})
 
+    n = max(1, min(int(n_rows), 100))
+    preview = df.head(n).to_dict(orient="records")
+
     return json.dumps({
         "path": p,
+        "preview_n_rows": n,
         "columns": list(df.columns),
-        "rows": df.head(5).to_dict(orient="records"),
+        "rows": preview,
         "total_rows": len(df),
     }, default=str)

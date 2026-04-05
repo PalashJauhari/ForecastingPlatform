@@ -12,10 +12,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
 - **Auto-refreshed file listing** — a `refresh_data_schema` node runs before every orchestrator call, scanning `agent_filesystem/` so the LLM always sees the current file listing without a tool call.
-- **Three-layer code sandbox** —
-  - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static security scan on generated source before saving, using `tools/coding_tools/code_scan/agent_sandbox.yaml`.
-  - **Layer 2 — Path scan** (`tools/coding_tools/code_scan/path_scan.py`): AST scan — any path literal outside `agent_filesystem/` is rejected.
-  - **Layer 3 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` at execution time inside `run_python_file`.
+- **Two-layer code sandbox** —
+  - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static security scan on generated source before saving, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
+  - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` at execution time inside `run_python_file`.
 - **Sessions** — `thread_id = session_id` with `InMemorySaver` (per-session checkpoints; lost on restart).
 - **Observability** — optional Langfuse callbacks when `LANGFUSE_*` keys are set, propagated via `RunnableConfig`.
 
@@ -24,9 +23,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 ## Graph architecture
 
 ```
-START → refresh_data_schema → orchestrator → [has tool calls?]
-                                               ├─ YES → ToolNode → refresh_data_schema (loop)
-                                               └─ NO  → END
+START → refresh_data_schema → reset_tool_budget → orchestrator → [has tool calls?]
+                                                       ├─ YES → ToolNode → refresh_data_schema (loop)
+                                                       └─ NO  → END
 ```
 
 **State schema** (`graph/state.py`):
@@ -65,14 +64,13 @@ tools/
   coding_tools/
     code_scan/
       semgrep_scan.py                        # Layer 1 — Semgrep static scan
-      path_scan.py                           # Layer 2 — AST path scan
-      runtime_patch_scan.py                  # Layer 3 — runtime monkey-patching
-      agent_sandbox.yaml                     # Semgrep rules
-    generate_code.py                         # Tool — codegen LLM + Layers 1 & 2
-    run_python_file.py                       # Tool — script executor with Layer 3
+      runtime_patch_scan.py                  # Layer 2 — runtime monkey-patching
+      codegen_scan_semgrep.yaml              # Semgrep rules
+    generate_code.py                         # Tool — codegen LLM + Semgrep before save
+    run_python_file.py                       # Tool — script executor with runtime patch
   file_management_tools/
     list_agent_filesystem_data.py            # Tool — list all .csv/.xlsx in agent_filesystem/
-    read_agent_filesystem_data.py            # Tool — read schema + top 5 rows of a file
+    read_agent_filesystem_data.py            # Tool — read schema + preview rows (default 5, max 100)
     read_scratchpad.py                       # Tool — read scratchpad.md
     write_scratchpad.py                      # Tool — append to scratchpad.md
 prompts/
@@ -95,8 +93,8 @@ observability/
 | `check_tool_call_limit` | `middleware/tool_call_limit.py` | Returns early-stop `AIMessage` when `max_calls` exceeded. Parallel calls count individually. |
 | `truncate_messages` | `middleware/context_editing.py` | Produces `RemoveMessage` ops at safe turn boundaries (never orphans a `ToolMessage`). |
 | `summarize_messages` | `middleware/summarization.py` | Running LLM summary — previous summary + evicted messages → updated summary. |
-| — | `generate_code` (tool) | Layers 1 & 2 — Semgrep + path scan before writing script. |
-| — | `run_python_file` (tool) | Layer 3 — runtime patch applied at execution time. |
+| — | `generate_code` (tool) | Layer 1 — Semgrep before writing script. |
+| — | `run_python_file` (tool) | Layer 2 — runtime patch applied at execution time. |
 
 ---
 
@@ -105,9 +103,9 @@ observability/
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | **list_agent_filesystem_data** | none | Scans `agent_filesystem/` recursively and returns all `.csv` and `.xlsx` files as `agent_filesystem/...` paths. |
-| **read_agent_filesystem_data** | `path` | Opens a `.csv` or `.xlsx` file and returns columns, top 5 rows, and total row count. Path must start with `agent_filesystem/`. |
-| **generate_code** | `task`, `data_schema` | Sends task to a codegen LLM → validates with Layers 1 & 2 → saves script to `agent_filesystem/code/`. |
-| **run_python_file** | `filename` | Executes a `.py` script from `agent_filesystem/code/` with Layer 3 runtime patches. |
+| **read_agent_filesystem_data** | `path`, `n_rows` (optional, default 5, max 100) | Opens a `.csv` or `.xlsx` file and returns columns, preview rows, and total row count. Path must start with `agent_filesystem/`. |
+| **generate_code** | `task`, `data_schema` | Sends task to a codegen LLM → Semgrep → saves script to `agent_filesystem/code/`. |
+| **run_python_file** | `filename` | Executes a `.py` script from `agent_filesystem/code/` with Layer 2 runtime patches. |
 | **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
 | **read_scratchpad** | none | Reads `agent_filesystem/scratchpad/scratchpad.md`. |
 | **write_scratchpad** | `content` | Appends text to `agent_filesystem/scratchpad/scratchpad.md`. Cleared automatically on new sessions. |
@@ -139,7 +137,7 @@ paths:
   code:       "agent_filesystem/code"
 ```
 
-Semgrep rules live in `tools/coding_tools/code_scan/agent_sandbox.yaml` — edit to tune blocking.
+Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` — edit to tune blocking.
 
 ---
 
@@ -213,5 +211,5 @@ streamlit run ui/app.py
 ## Notes
 
 - **Production:** replace `InMemorySaver` with a persistent checkpointer (e.g. `PostgresSaver`) so conversations survive restarts.
-- If `generate_code` is blocked by safety scans, check `code_safety_evaluation.detail` and adjust rules in `tools/coding_tools/code_scan/agent_sandbox.yaml`.
+- If `generate_code` is blocked by safety scans, check `code_safety_evaluation.detail` and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
 - The Streamlit UI (`ui/app.py`) has not yet been updated for interrupt/resume — it still calls only `POST /run`.

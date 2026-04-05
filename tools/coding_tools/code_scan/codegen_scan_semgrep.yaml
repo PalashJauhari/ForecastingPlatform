@@ -1,4 +1,4 @@
-# agent_sandbox.yaml
+# codegen_scan_semgrep.yaml
 # Complete semgrep rules for LLM generated code sandbox
 # Only allows: pd.read_excel, pd.read_csv, df.to_excel, df.to_csv inside agent_filesystem/
 # Everything else blocked
@@ -15,6 +15,61 @@ rules:
     languages: [python]
     severity: ERROR
 
+  # ── BLOCK OS BYPASSES (posix/nt/etc. — same privileges without ``import os``)
+
+  - id: block-os-alternatives
+    pattern-either:
+      - pattern: import posix
+      - pattern: from posix import $X
+      - pattern: import nt
+      - pattern: from nt import $X
+      - pattern: import pwd
+      - pattern: from pwd import $X
+      - pattern: import grp
+      - pattern: from grp import $X
+      - pattern: import spwd
+      - pattern: from spwd import $X
+      - pattern: import fcntl
+      - pattern: from fcntl import $X
+      - pattern: import termios
+      - pattern: from termios import $X
+      - pattern: import msilib
+      - pattern: from msilib import $X
+      - pattern: import winreg
+      - pattern: from winreg import $X
+      - pattern: import _winapi
+      - pattern: from _winapi import $X
+    message: "low-level OS modules not allowed (posix/nt/winreg/...)"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK ENV / PROCESS ENV (secrets, API keys, config exfil) ─────────────
+
+  - id: block-environment-access
+    pattern-either:
+      - pattern: os.environ
+      - pattern: os.environ[...]
+      - pattern: os.getenv(...)
+      - pattern: os.putenv(...)
+      - pattern: os.unsetenv(...)
+      - pattern: sys.environ
+      - pattern: posix.environ
+    message: "environment access not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PYTHON-DOTENV (loads .env into os.environ) ─────────────────────
+
+  - id: block-dotenv
+    pattern-either:
+      - pattern: import dotenv
+      - pattern: from dotenv import $X
+      - pattern: load_dotenv(...)
+      - pattern: dotenv.load_dotenv(...)
+    message: "dotenv not allowed — no reading .env / environment"
+    languages: [python]
+    severity: ERROR
+
   # ── BLOCK SUBPROCESS ──────────────────────────────────────────────────────
 
   - id: block-subprocess
@@ -22,6 +77,39 @@ rules:
       - pattern: import subprocess
       - pattern: from subprocess import $X
     message: "subprocess not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK SUBPROCESS CALLS + OS SPAWN/EXEC (run other scripts / binaries) ─
+
+  - id: block-subprocess-os-exec-calls
+    pattern-either:
+      - pattern: subprocess.run(...)
+      - pattern: subprocess.Popen(...)
+      - pattern: subprocess.call(...)
+      - pattern: subprocess.check_call(...)
+      - pattern: subprocess.check_output(...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: os.posix_spawn(...)
+      - pattern: os.spawnv(...)
+      - pattern: os.spawnve(...)
+      - pattern: os.spawnvp(...)
+      - pattern: os.spawnvpe(...)
+      - pattern: os.spawnl(...)
+      - pattern: os.spawnle(...)
+      - pattern: os.spawnlp(...)
+      - pattern: os.spawnlpe(...)
+      - pattern: os.execv(...)
+      - pattern: os.execve(...)
+      - pattern: os.execl(...)
+      - pattern: os.execle(...)
+      - pattern: os.execlp(...)
+      - pattern: os.execvp(...)
+      - pattern: os.execvpe(...)
+      - pattern: os.startfile(...)
+      - pattern: posix.system(...)
+    message: "cannot spawn subprocess or shell — no other scripts/binaries"
     languages: [python]
     severity: ERROR
 
@@ -245,6 +333,45 @@ rules:
     languages: [python]
     severity: ERROR
 
+  # ── BLOCK URLLIB SUBMODULES (bypasses ``import urllib`` alone) ───────────
+
+  - id: block-urllib-submodules
+    pattern-either:
+      - pattern: import urllib.request
+      - pattern: from urllib.request import $X
+      - pattern: import urllib.response
+      - pattern: from urllib.response import $X
+      - pattern: import urllib.error
+      - pattern: from urllib.error import $X
+      - pattern: import urllib.robotparser
+      - pattern: from urllib.robotparser import $X
+    message: "urllib submodules not allowed — use pandas with agent_filesystem paths only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK HTTP CLIENT CALL SHAPES (defense in depth if imports are evaded) ─
+
+  - id: block-http-client-calls
+    pattern-either:
+      - pattern: requests.get(...)
+      - pattern: requests.post(...)
+      - pattern: requests.put(...)
+      - pattern: requests.delete(...)
+      - pattern: requests.head(...)
+      - pattern: requests.patch(...)
+      - pattern: requests.request(...)
+      - pattern: requests.Session(...)
+      - pattern: httpx.get(...)
+      - pattern: httpx.post(...)
+      - pattern: httpx.request(...)
+      - pattern: httpx.stream(...)
+      - pattern: httpx.Client(...)
+      - pattern: aiohttp.ClientSession(...)
+      - pattern: urllib.request.urlopen(...)
+    message: "HTTP client calls not allowed"
+    languages: [python]
+    severity: ERROR
+
   # ── BLOCK EXTENDED NETWORK ────────────────────────────────────────────────
 
   - id: block-network-extended
@@ -338,11 +465,18 @@ rules:
   - id: block-dynamic-imports
     pattern-either:
       - pattern: import importlib
+      - pattern: import importlib.util
+      - pattern: import importlib.machinery
+      - pattern: import importlib.abc
       - pattern: from importlib import $X
+      - pattern: from importlib.util import $X
+      - pattern: from importlib.machinery import $X
+      - pattern: importlib.util.spec_from_file_location(...)
+      - pattern: importlib.util.module_from_spec(...)
       - pattern: import imp
       - pattern: from imp import $X
       - pattern: __import__($X)
-    message: "dynamic imports not allowed"
+    message: "dynamic imports not allowed — no loading other .py files"
     languages: [python]
     severity: ERROR
 
@@ -356,7 +490,23 @@ rules:
       - pattern: from shelve import $X
       - pattern: import marshal
       - pattern: from marshal import $X
+      - pattern: import dill
+      - pattern: from dill import $X
+      - pattern: import cloudpickle
+      - pattern: from cloudpickle import $X
     message: "serialization not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK JOBLIB (sklearn-style persistence; pickle risk) ─────────────────
+
+  - id: block-joblib
+    pattern-either:
+      - pattern: import joblib
+      - pattern: from joblib import $X
+      - pattern: joblib.dump(...)
+      - pattern: joblib.load(...)
+    message: "joblib not allowed"
     languages: [python]
     severity: ERROR
 
@@ -382,7 +532,11 @@ rules:
       - pattern: from github import $X
       - pattern: import gitlab
       - pattern: from gitlab import $X
-    message: "git not allowed"
+      - pattern: import pygit2
+      - pattern: from pygit2 import $X
+      - pattern: import dulwich
+      - pattern: from dulwich import $X
+    message: "git / GitPython / pygit2 / dulwich not allowed"
     languages: [python]
     severity: ERROR
 
@@ -393,7 +547,9 @@ rules:
       - pattern: import pip
       - pattern: from pip import $X
       - pattern: from pip._internal import $X
-    message: "pip not allowed"
+      - pattern: pip.main(...)
+      - pattern: pip._internal.main(...)
+    message: "pip not allowed (including pip.main / pip._internal)"
     languages: [python]
     severity: ERROR
 
@@ -567,6 +723,9 @@ rules:
       - pattern: locals()
       - pattern: vars()
       - pattern: __builtins__
+      - pattern: __builtins__[$X]
+      - pattern: __builtins__[...]
+      - pattern: __builtins__.get(...)
     message: "introspection not allowed"
     languages: [python]
     severity: ERROR
@@ -582,6 +741,8 @@ rules:
       - pattern: $X.__globals__
       - pattern: $X.__code__
       - pattern: $X.__builtins__
+      - pattern: $X.__loader__
+      - pattern: __loader__
     message: "dunder access not allowed"
     languages: [python]
     severity: ERROR
@@ -598,11 +759,61 @@ rules:
     languages: [python]
     severity: ERROR
 
+  # ── BLOCK OPERATOR (attrgetter/itemgetter — bypasses getattr ban) ─────────
+
+  - id: block-operator
+    pattern-either:
+      - pattern: import operator
+      - pattern: from operator import $X
+      - pattern: operator.attrgetter(...)
+      - pattern: operator.itemgetter(...)
+      - pattern: operator.methodcaller(...)
+    message: "operator not allowed"
+    languages: [python]
+    severity: ERROR
+
   # ── BLOCK RAW FILE OPEN ───────────────────────────────────────────────────
 
   - id: block-open
-    pattern: open($PATH, ...)
-    message: "open() not allowed"
+    pattern-either:
+      - pattern: open($PATH, ...)
+      - pattern: builtins.open($PATH, ...)
+    message: "open() / builtins.open() not allowed"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-builtins-import
+    pattern-either:
+      - pattern: import builtins
+      - pattern: from builtins import $X
+    message: "importing builtins not allowed — use pandas I/O only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CODECS (bypasses builtins.open) ────────────────────────────────
+
+  - id: block-codecs
+    pattern-either:
+      - pattern: import codecs
+      - pattern: from codecs import $X
+      - pattern: codecs.open($PATH, ...)
+    message: "codecs not allowed — use pandas I/O only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CONFIG / MARKUP LOADERS (read arbitrary files) ───────────────────
+
+  - id: block-config-markup-loaders
+    pattern-either:
+      - pattern: import tomllib
+      - pattern: from tomllib import $X
+      - pattern: import yaml
+      - pattern: from yaml import $X
+      - pattern: import ruamel.yaml
+      - pattern: from ruamel.yaml import $X
+      - pattern: import tomli
+      - pattern: from tomli import $X
+    message: "toml/yaml loaders not allowed"
     languages: [python]
     severity: ERROR
 
@@ -1013,6 +1224,20 @@ rules:
       - pattern: import pkgutil
       - pattern: from pkgutil import $X
     message: "pkgutil not allowed — can read package data from disk"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PKG_RESOURCES / IMPORTLIB.RESOURCES ──────────────────────────────
+
+  - id: block-package-resource-readers
+    pattern-either:
+      - pattern: import pkg_resources
+      - pattern: from pkg_resources import $X
+      - pattern: import importlib.resources
+      - pattern: from importlib.resources import $X
+      - pattern: import importlib_resources
+      - pattern: from importlib_resources import $X
+    message: "pkg_resources / importlib.resources not allowed — package data reads"
     languages: [python]
     severity: ERROR
 

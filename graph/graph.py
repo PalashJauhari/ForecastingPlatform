@@ -1,3 +1,10 @@
+"""
+LangGraph entrypoint for the data-analysis agent: orchestrator + tools + checkpointing.
+
+Flow: ``refresh_data_schema`` → ``reset_tool_budget`` → ``orchestrator`` → (optional) ``tools`` loop.
+Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,8 +23,7 @@ from middleware.context_editing import truncate_and_summarize
 from middleware.tool_call_limit import check_tool_call_limit
 from prompts.graph_prompts import SYSTEM_PROMPT
 from tools.human_in_loop.ask_user import ask_user
-from tools.coding_tools.generate_code import generate_code
-from tools.coding_tools.run_python_file import run_python_file
+from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
 from tools.file_management_tools.read_agent_filesystem_data import read_agent_filesystem_data
 from tools.file_management_tools.read_scratchpad import read_scratchpad
@@ -54,7 +60,8 @@ class AgentState(TypedDict):
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles.
         number_of_tool_calls — total individual tool invocations in the current
-                               user-invocation (reset on each new HumanMessage).
+                               user turn; reset in ``reset_tool_budget`` when the
+                               last message is a ``HumanMessage``.
         data_schema          — newline-separated listing of data files currently in
                                ``agent_filesystem/`` (excluding ``scratchpad/``).
                                Refreshed before every orchestrator call.
@@ -72,8 +79,7 @@ class AgentState(TypedDict):
 TOOLS = [
     list_agent_filesystem_data,
     read_agent_filesystem_data,
-    generate_code,
-    run_python_file,
+    code_pipeline,
     ask_user,
     read_scratchpad,
     write_scratchpad,
@@ -103,39 +109,53 @@ def refresh_data_schema(state: AgentState) -> Dict[str, Any]:
     return {"data_schema": "\n".join(files) if files else "(no data files found)"}
 
 
+def reset_tool_budget(state: AgentState) -> Dict[str, Any]:
+    """
+    Zero ``number_of_tool_calls`` when the latest message is a new user turn.
+
+    Runs after ``refresh_data_schema`` on every path into the orchestrator (initial
+    invoke, post-tool loop). When the graph is mid-tool-loop the last message is not
+    a ``HumanMessage``, so the counter is left unchanged.
+    """
+    messages = state["messages"]
+    if messages and isinstance(messages[-1], HumanMessage):
+        return {"number_of_tool_calls": 0}
+    return {}
+
+
 def orchestrator(state: AgentState) -> Dict[str, Any]:
     """
     Core agent node.
 
     Steps executed in order:
-        1. **Tool call limit** — return early ``AIMessage`` if exceeded.
+        1. **Tool call limit** — return early ``AIMessage`` if exceeded (budget set
+           by ``reset_tool_budget`` on each new user message).
         2. **Summarisation + truncation** — if token estimate exceeds the
            threshold, evict old messages into a running summary and
            produce ``RemoveMessage`` ops for the ``add_messages`` reducer.
-        3. **Build system prompt** — ``SYSTEM_PROMPT`` + available files
-           (``data_schema``) + conversation summary (``message_summary``).
-        4. **Call LLM** with bound tools.
-        5. **Count tool calls** — increment ``number_of_tool_calls``.
+        3. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with available
+           files (``data_schema``) + conversation summary, then prior ``messages``;
+           model has tools bound (``llm_with_tools``).
+        4. **Count tool calls** — increment ``number_of_tool_calls`` by this response’s
+           ``tool_calls`` length.
     """
     messages = state["messages"]
     summary = state.get("message_summary", "")
 
-    # 1. Reset tool call count on new user invocation
-    is_new_invocation = messages and isinstance(messages[-1], HumanMessage)
-    tool_calls_so_far = 0 if is_new_invocation else state.get("number_of_tool_calls", 0)
+    tool_calls_so_far = state.get("number_of_tool_calls", 0)
 
-    # 2. Tool call limit
+    # 1. Hard cap on tool invocations per user turn (see ``reset_tool_budget``).
     limit_msg = check_tool_call_limit(tool_calls_so_far, MAX_TOOL_CALLS)
     if limit_msg:
         return {"messages": [limit_msg]}
     remove_ops: list = []
 
-    # 2. Summarisation + truncation
+    # 2. Evict old turns into ``message_summary`` when estimated tokens exceed threshold.
     summary, messages, remove_ops = truncate_and_summarize(
         messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
     )
 
-    # 3. Call LLM
+    # 3. System prompt + dynamic context (file list, rolling summary) + full message history.
     context = (
         f"Available data files:\n{state.get('data_schema', '')}\n\n"
         f"Conversation summary:\n{summary}"
@@ -144,7 +164,7 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages,
     )
 
-    # 5. Count tool calls
+    # 4. Count tool calls in this orchestrator step (each tool_calls entry counts once).
     new_count = tool_calls_so_far + len(response.tool_calls)
 
     return {
@@ -178,12 +198,11 @@ class AnalysisGraph:
 
     Notes
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
-        * **Tools** — list/read filesystem, generate_code, run_python_file,
-          ask_user, read/write scratchpad.
-        * **Middleware logic** (context editing, summarisation, tool call limit)
-          runs inside the orchestrator node as plain function calls.
-        * **Codegen safety** — semgrep + path scanner inside ``generate_code``.
-        * **Layer 3** (runtime patch) is applied inside ``run_python_file``.
+        * **Tools** — list/read filesystem, ``code_pipeline``, ask_user, read/write scratchpad.
+        * **Middleware logic** — tool budget reset in ``reset_tool_budget``;
+          context editing, summarisation, and tool call limit checks run inside
+          the orchestrator node.
+        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then ``python`` subprocess; on safety failure, retries pass ``previous_code_violation`` with the prior ``code_safety_evaluation.detail``.
     """
 
     def __init__(self) -> None:
@@ -199,14 +218,17 @@ class AnalysisGraph:
         builder = StateGraph(AgentState)
 
         builder.add_node("refresh_data_schema", refresh_data_schema)
+        builder.add_node("reset_tool_budget", reset_tool_budget)
         builder.add_node("orchestrator", orchestrator)
         builder.add_node("tools", ToolNode(TOOLS))
 
         builder.set_entry_point("refresh_data_schema")
-        builder.add_edge("refresh_data_schema", "orchestrator")
+        builder.add_edge("refresh_data_schema", "reset_tool_budget")
+        builder.add_edge("reset_tool_budget", "orchestrator")
         builder.add_conditional_edges(
             "orchestrator", should_continue, {"tools": "tools", END: END},
         )
+        # After tools run, refresh file listing so the next orchestrator turn sees new outputs.
         builder.add_edge("tools", "refresh_data_schema")
 
         return builder.compile(checkpointer=self.checkpointer)
