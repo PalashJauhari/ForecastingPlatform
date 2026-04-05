@@ -7,7 +7,8 @@ Pipeline order
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
     4. **Save** — ``pipeline_run.py`` under ``paths.code`` (overwrites).
-    5. **Execute** — same Python interpreter, project root as cwd, timeout and optional Linux RLIMIT.
+    5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
+       (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
 
 On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
 write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
@@ -20,8 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -55,13 +54,9 @@ CODE_DIR = PROJECT_ROOT / cfg["paths"]["code"]
 _pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
 # Hard stop for the child process (seconds); raises ``TimeoutExpired`` in the parent.
 TIMEOUT = float(_pipe.get("timeout_seconds", 120))
-# Optional Linux-only: RLIMIT_AS via ``prlimit`` (MiB). Invalid values are ignored.
-MEMORY_LIMIT_MB = _pipe.get("memory_limit_mb")
-if MEMORY_LIMIT_MB is not None:
-    try:
-        MEMORY_LIMIT_MB = int(MEMORY_LIMIT_MB)
-    except (TypeError, ValueError):
-        MEMORY_LIMIT_MB = None
+
+# Subprocess always runs ``run_pipeline_sandboxed.py`` so ``runtime_patch_scan`` wraps I/O before user code.
+SANDBOX_RUNNER = Path(__file__).resolve().parent / "code_scan" / "run_pipeline_sandboxed.py"
 
 
 class CodePipelineInput(BaseModel):
@@ -229,25 +224,14 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
 
     # ------------------------------------------------------------------
     # Step 4 — Run script: subprocess, no shell, project root as cwd
+    # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
     # ------------------------------------------------------------------
-    env = os.environ.copy()
-    # Cap BLAS/OpenMP threads so one run does not pin all CPU cores (numpy/pandas).
-    env["OMP_NUM_THREADS"] = "1"
-    env["OPENBLAS_NUM_THREADS"] = "1"
-    env["MKL_NUM_THREADS"] = "1"
-    env["NUMEXPR_NUM_THREADS"] = "1"
-    env["VECLIB_MAXIMUM_THREADS"] = "1"
-    cmd = [sys.executable, str(out_path)]
-    # Optional virtual memory cap (Linux only): prlimit wraps the Python invocation.
-    if MEMORY_LIMIT_MB and MEMORY_LIMIT_MB > 0 and platform.system() == "Linux":
-        prlimit = shutil.which("prlimit")
-        if prlimit:
-            cmd = [prlimit, f"--as={MEMORY_LIMIT_MB * 1024 * 1024}", "--"] + cmd
+    cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path)]
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(PROJECT_ROOT),
-            env=env,
+            env=os.environ.copy(),
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
