@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict
 
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -118,7 +118,7 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         5. **Count tool calls** — increment ``number_of_tool_calls``.
     """
     messages = state["messages"]
-    summary  = state.get("message_summary", "")
+    summary = state.get("message_summary", "")
 
     # 1. Reset tool call count on new user invocation
     is_new_invocation = messages and isinstance(messages[-1], HumanMessage)
