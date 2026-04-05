@@ -17,6 +17,9 @@ middleware:
 code_pipeline:
   timeout_seconds: 120
 
+skills:
+  max_skill_context_tokens: 3000
+
 paths:
   agent_filesystem: "agent_filesystem"
   input:     "agent_filesystem/input"

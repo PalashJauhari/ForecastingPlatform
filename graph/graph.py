@@ -1,12 +1,13 @@
 """
 LangGraph entrypoint for the data-analysis agent: orchestrator + tools + checkpointing.
 
-Flow: ``refresh_data_schema`` → ``reset_tool_budget`` → ``orchestrator`` → (optional) ``tools`` loop.
+Flow: ``refresh_data_schema`` → ``identify_skills`` → ``reset_tool_budget`` → ``orchestrator`` → (optional) ``tools`` loop.
 Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Any, Dict
 
@@ -22,6 +23,8 @@ from typing_extensions import TypedDict
 from middleware.context_editing import truncate_and_summarize
 from middleware.tool_call_limit import check_tool_call_limit
 from prompts.graph_prompts import SYSTEM_PROMPT
+from prompts.skills_prompts import SKILL_IDENTIFICATION_PROMPT
+from skills.loader import PRIORITY_ORDER, load_skills
 from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
@@ -44,6 +47,25 @@ KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
+_VALID_SKILL_IDS = frozenset(PRIORITY_ORDER)
+
+
+def _message_content_text(msg: Any) -> str:
+    """Normalize LangChain message content to a string for JSON parsing."""
+    c = getattr(msg, "content", "")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for block in c:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(c)
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -65,11 +87,15 @@ class AgentState(TypedDict):
         data_schema          — newline-separated listing of data files currently in
                                ``agent_filesystem/`` (excluding ``scratchpad/``).
                                Refreshed before every orchestrator call.
+        active_skills        — skill ids chosen by ``identify_skills`` on the latest user turn.
+        skill_context        — assembled ``approach.md`` + reference snippets for those skills.
     """
     messages: Annotated[list, add_messages]
     message_summary: str
     number_of_tool_calls: int
     data_schema: str
+    active_skills: list[str]
+    skill_context: str
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +133,45 @@ def refresh_data_schema(state: AgentState) -> Dict[str, Any]:
     ] if AGENT_FS.exists() else []
 
     return {"data_schema": "\n".join(files) if files else "(no data files found)"}
+
+
+def identify_skills(state: AgentState) -> Dict[str, Any]:
+    """
+    One JSON LLM call per **new user turn** (last message is ``HumanMessage``).
+    Sets ``active_skills`` and ``skill_context``; on tool-loop steps returns ``{}`` (unchanged).
+    """
+    messages = state["messages"]
+    if not messages or not isinstance(messages[-1], HumanMessage):
+        return {}
+
+    user_query = _message_content_text(messages[-1])
+    data_schema = state.get("data_schema", "")
+    prompt = (
+        f"User query: {user_query}\n\n"
+        f"Available data files:\n{data_schema}\n\n"
+        "Which skills are needed? Reply with JSON only."
+    )
+    llm_json = ChatOpenAI(
+        model=cfg["models"]["orchestrator"],
+        temperature=0,
+        model_kwargs={"response_format": {"type": "json_object"}},
+    )
+    resp = llm_json.invoke(
+        [SystemMessage(content=SKILL_IDENTIFICATION_PROMPT), HumanMessage(content=prompt)],
+    )
+    raw = _message_content_text(resp)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"active_skills": [], "skill_context": ""}
+
+    skills_raw = data.get("skills", [])
+    if not isinstance(skills_raw, list):
+        skills_raw = []
+    skills = [str(s) for s in skills_raw if s in _VALID_SKILL_IDS]
+
+    skill_context = load_skills(skills) if skills else ""
+    return {"active_skills": skills, "skill_context": skill_context}
 
 
 def reset_tool_budget(state: AgentState) -> Dict[str, Any]:
@@ -155,10 +220,12 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
     )
 
-    # 3. System prompt + dynamic context (file list, rolling summary) + full message history.
+    # 3. System prompt + dynamic context (file list, summary, optional skill guidance) + messages.
+    skill_ctx = state.get("skill_context", "")
     context = (
         f"Available data files:\n{state.get('data_schema', '')}\n\n"
-        f"Conversation summary:\n{summary}"
+        f"Conversation summary:\n{summary}\n\n"
+        + (f"Skill guidance:\n{skill_ctx}" if skill_ctx else "")
     )
     response = llm_with_tools.invoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages,
@@ -202,7 +269,8 @@ class AnalysisGraph:
         * **Middleware logic** — tool budget reset in ``reset_tool_budget``;
           context editing, summarisation, and tool call limit checks run inside
           the orchestrator node.
-        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then ``python`` subprocess; on safety failure, retries pass ``previous_code_violation`` with the prior ``code_safety_evaluation.detail``.
+        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then sandbox runner.
+        * **Skills** — ``identify_skills`` injects ``skill_context`` (from ``skills/``) into the orchestrator context on new user turns.
     """
 
     def __init__(self) -> None:
@@ -218,12 +286,14 @@ class AnalysisGraph:
         builder = StateGraph(AgentState)
 
         builder.add_node("refresh_data_schema", refresh_data_schema)
+        builder.add_node("identify_skills", identify_skills)
         builder.add_node("reset_tool_budget", reset_tool_budget)
         builder.add_node("orchestrator", orchestrator)
         builder.add_node("tools", ToolNode(TOOLS))
 
         builder.set_entry_point("refresh_data_schema")
-        builder.add_edge("refresh_data_schema", "reset_tool_budget")
+        builder.add_edge("refresh_data_schema", "identify_skills")
+        builder.add_edge("identify_skills", "reset_tool_budget")
         builder.add_edge("reset_tool_budget", "orchestrator")
         builder.add_conditional_edges(
             "orchestrator", should_continue, {"tools": "tools", END: END},
@@ -257,7 +327,15 @@ class AnalysisGraph:
         # thread_id drives InMemorySaver checkpointing per session
         config["configurable"] = {"thread_id": session_id}
         return self.graph.invoke(
-            {"messages": [HumanMessage(content=user_query)]}, config=config,
+            {
+                "messages": [HumanMessage(content=user_query)],
+                "message_summary": "",
+                "number_of_tool_calls": 0,
+                "data_schema": "",
+                "active_skills": [],
+                "skill_context": "",
+            },
+            config=config,
         )
 
     def resume(

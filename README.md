@@ -18,6 +18,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
   - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
+- **Skills layer** — `identify_skills` (one JSON LLM call on each new user turn) picks from five curated skills (`eda`, `data_processing`, `feature_engineering`, `modeling`, `visualisation`). `skills/loader.py` loads `approach.md` + reference `.py` patterns into `skill_context`, injected into the orchestrator context as “Skill guidance” (budget: `skills.max_skill_context_tokens`).
 - **Sessions** — `thread_id = session_id` with `InMemorySaver` (per-session checkpoints; lost on restart).
 - **Observability** — optional Langfuse callbacks when `LANGFUSE_*` keys are set, propagated via `RunnableConfig`.
 
@@ -26,9 +27,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 ## Graph architecture
 
 ```
-START → refresh_data_schema → reset_tool_budget → orchestrator → [has tool calls?]
-                                                       ├─ YES → ToolNode → refresh_data_schema (loop)
-                                                       └─ NO  → END
+START → refresh_data_schema → identify_skills → reset_tool_budget → orchestrator → [has tool calls?]
+                                                                        ├─ YES → ToolNode → refresh_data_schema (loop)
+                                                                        └─ NO  → END
 ```
 
 **State schema** (`graph/graph.py` — `AgentState`):
@@ -39,13 +40,15 @@ START → refresh_data_schema → reset_tool_budget → orchestrator → [has to
 | `message_summary` | `str` | Running summary of evicted messages. |
 | `number_of_tool_calls` | `int` | Total individual tool invocations in the current user turn (reset per invocation). |
 | `data_schema` | `str` | Newline-separated file listing from `agent_filesystem/` (excluding `scratchpad/`). |
+| `active_skills` | `list[str]` | Skill ids selected on the latest user turn (`identify_skills`). |
+| `skill_context` | `str` | Loaded guidance text from `skills/` for those ids. |
 
 ---
 
 ## Repository layout
 
 ```
-config.yaml                                  # Models, middleware, paths, code_pipeline timeout
+config.yaml                                  # Models, middleware, paths, code_pipeline, skills budget
 agent_filesystem/
   input/                                     # Raw uploaded files (CSV, Excel)
   output/                                    # Agent-written results and plots
@@ -53,8 +56,11 @@ agent_filesystem/
   scratchpad/                                # scratchpad.md — working notes
   code/                                      # pipeline_run.py (generated; overwritten each run)
 graph/
-  graph.py                                   # StateGraph, AgentState, nodes, AnalysisGraph
+  graph.py                                   # StateGraph, identify_skills, AnalysisGraph
   __init__.py
+skills/                                      # Curated DS guidance (approach.md + reference *.py per skill)
+  loader.py                                  # Assembles skill_context for the orchestrator
+  eda/ … data_processing/ … feature_engineering/ … modeling/ … visualisation/
 middleware/
   context_editing.py                         # Truncate messages at safe turn boundaries
   summarization.py                           # Running summary of evicted messages
@@ -78,6 +84,7 @@ tools/
     write_scratchpad.py
 prompts/
   graph_prompts.py                           # Orchestrator SYSTEM_PROMPT
+  skills_prompts.py                          # Skill identification (JSON) system prompt
   code_generation_prompt.py                  # Codegen system prompt
   code_judge_prompt.py                       # Judge system prompt
 api/
@@ -97,6 +104,8 @@ observability/
 | `check_tool_call_limit` | `middleware/tool_call_limit.py` | Returns early-stop `AIMessage` when `max_calls` exceeded. Parallel calls count individually. |
 | `truncate_and_summarize` | `middleware/context_editing.py` | Truncation + running summary when token estimate exceeds threshold. |
 | — | `code_pipeline` (tool) | Codegen → Semgrep → LLM judge → save → `run_pipeline_sandboxed.py` execution. |
+
+**Graph nodes (non-middleware):** `refresh_data_schema`, `identify_skills` (JSON skill picker + `load_skills`), `reset_tool_budget`, `orchestrator`, `tools`.
 
 ---
 
@@ -132,6 +141,9 @@ middleware:
 
 code_pipeline:
   timeout_seconds: 120               # Wall-clock subprocess timeout for generated script
+
+skills:
+  max_skill_context_tokens: 3000     # Rough budget for assembled skill_context (~chars/4)
 
 paths:
   agent_filesystem: "agent_filesystem"
