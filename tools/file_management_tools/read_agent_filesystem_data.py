@@ -9,6 +9,7 @@ import yaml
 import pandas as pd
 from pathlib import Path
 from langchain_core.tools import tool
+from langfuse import observe
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -36,8 +37,8 @@ class ReadAgentFilesystemDataInput(BaseModel):
     )
 
 
-@tool(args_schema=ReadAgentFilesystemDataInput)
-def read_agent_filesystem_data(path: str, n_rows: int = 5) -> str:
+@observe(name="tool.read_agent_filesystem_data", as_type="tool")
+def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5) -> str:
     """
     Read a .csv or .xlsx file from agent_filesystem/ and return its schema and a sample of rows.
 
@@ -118,3 +119,9 @@ def read_agent_filesystem_data(path: str, n_rows: int = 5) -> str:
         "rows": preview,
         "total_rows": len(df),
     }, default=str)
+
+
+@tool(args_schema=ReadAgentFilesystemDataInput)
+def read_agent_filesystem_data(path: str, n_rows: int = 5) -> str:
+    """LangChain wrapper for the traced data-read implementation."""
+    return _read_agent_filesystem_data_impl(path=path, n_rows=n_rows)

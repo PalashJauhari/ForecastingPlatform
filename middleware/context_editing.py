@@ -22,10 +22,18 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_openai import ChatOpenAI
+from langfuse import observe
+
+from observability.langfuse_handler import (
+    extract_usage_details,
+    get_langfuse_client,
+    serialize_message,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 SUMMARY_MODEL = cfg["models"].get("summarization", "gpt-4o-mini")
+langfuse = get_langfuse_client()
 
 SUMMARY_SYSTEM = """\
 You are a conversation summariser. Produce a concise running summary that
@@ -60,6 +68,7 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
     return candidate
 
 
+@observe(name="context.summarize_evicted", capture_input=False, capture_output=False)
 def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
     llm = ChatOpenAI(model=SUMMARY_MODEL, temperature=0)
@@ -75,13 +84,25 @@ def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
         user_content += f"## Previous Summary\n{previous_summary}\n\n"
     user_content += f"## New Messages to Integrate\n{conversation}"
 
-    response = llm.invoke([
+    prompt_messages = [
         SystemMessage(content=SUMMARY_SYSTEM),
         HumanMessage(content=user_content),
-    ])
+    ]
+    with langfuse.start_as_current_observation(
+        name="context.summarize_evicted.llm",
+        as_type="generation",
+        model=SUMMARY_MODEL,
+        input=[serialize_message(message) for message in prompt_messages],
+    ) as generation:
+        response = llm.invoke(prompt_messages)
+        generation.update(
+            output=serialize_message(response),
+            usage_details=extract_usage_details(response),
+        )
     return response.content
 
 
+@observe(name="context.truncate_and_summarize", capture_input=False, capture_output=False)
 def truncate_and_summarize(
     messages: list,
     previous_summary: str,
@@ -108,6 +129,13 @@ def truncate_and_summarize(
         with an empty *remove_ops* list.
     """
     if estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
+        langfuse.update_current_span(
+            metadata={
+                "token_estimate": estimate_tokens(messages),
+                "token_threshold": token_threshold,
+                "truncated": "false",
+            }
+        )
         return previous_summary, messages, []
 
     cut = find_safe_truncation_point(messages, keep)
@@ -115,5 +143,13 @@ def truncate_and_summarize(
     remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
     updated_summary = summarize_evicted(previous_summary, to_evict)
     kept_messages = messages[cut:]
+    langfuse.update_current_span(
+        metadata={
+            "token_estimate": estimate_tokens(messages),
+            "token_threshold": token_threshold,
+            "truncated": "true",
+            "evicted_count": len(to_evict),
+        }
+    )
 
     return updated_summary, kept_messages, remove_ops

@@ -9,6 +9,7 @@ The user's answer is returned as the tool result (a ``ToolMessage``).
 from __future__ import annotations
 
 from langchain_core.tools import tool
+from langfuse import observe
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
@@ -21,8 +22,8 @@ class AskUserInput(BaseModel):
     )
 
 
-@tool(args_schema=AskUserInput)
-def ask_user(question: str) -> str:
+@observe(name="tool.ask_user", as_type="tool")
+def _ask_user_impl(question: str) -> str:
     """
     Ask the user a clarifying question and pause until they respond.
 
@@ -34,3 +35,9 @@ def ask_user(question: str) -> str:
     """
     response = interrupt({"question": question})
     return response
+
+
+@tool(args_schema=AskUserInput)
+def ask_user(question: str) -> str:
+    """LangChain wrapper for the traced interrupt tool implementation."""
+    return _ask_user_impl(question=question)

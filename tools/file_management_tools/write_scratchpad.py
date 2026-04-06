@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 from langchain_core.tools import tool
+from langfuse import observe
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -28,8 +29,8 @@ class WriteScratchpadInput(BaseModel):
     )
 
 
-@tool(args_schema=WriteScratchpadInput)
-def write_scratchpad(content: str) -> str:
+@observe(name="tool.write_scratchpad", as_type="tool")
+def _write_scratchpad_impl(content: str) -> str:
     """
     Append text to the agent's scratchpad (agent_filesystem/scratchpad/scratchpad.md).
 
@@ -44,3 +45,9 @@ def write_scratchpad(content: str) -> str:
     with open(SCRATCHPAD_FILE, "a", encoding="utf-8") as f:
         f.write(content + "\n")
     return json.dumps({"status": "ok", "path": str(SCRATCHPAD_FILE)})
+
+
+@tool(args_schema=WriteScratchpadInput)
+def write_scratchpad(content: str) -> str:
+    """LangChain wrapper for the traced scratchpad-write implementation."""
+    return _write_scratchpad_impl(content=content)

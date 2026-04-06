@@ -10,8 +10,15 @@ import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from observability.langfuse_handler import (
+    extract_usage_details,
+    get_langfuse_client,
+    serialize_message,
+)
 
 from prompts.code_judge_prompt import CODE_JUDGE_SYSTEM_PROMPT
+
+langfuse = get_langfuse_client()
 
 
 def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
@@ -36,7 +43,18 @@ def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
         + code
         + "\n```\n"
     )
-    resp = llm.invoke([SystemMessage(content=CODE_JUDGE_SYSTEM_PROMPT), HumanMessage(content=human)])
+    prompt_messages = [SystemMessage(content=CODE_JUDGE_SYSTEM_PROMPT), HumanMessage(content=human)]
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.llm_judge",
+        as_type="generation",
+        model=model_name,
+        input=[serialize_message(message) for message in prompt_messages],
+    ) as generation:
+        resp = llm.invoke(prompt_messages)
+        generation.update(
+            output=serialize_message(resp),
+            usage_details=extract_usage_details(resp),
+        )
     raw = resp.content if hasattr(resp, "content") else str(resp)
     try:
         data = json.loads(raw)

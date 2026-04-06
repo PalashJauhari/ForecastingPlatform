@@ -8,14 +8,15 @@ import json
 import yaml
 from pathlib import Path
 from langchain_core.tools import tool
+from langfuse import observe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
 
 
-@tool
-def list_agent_filesystem_data() -> str:
+@observe(name="tool.list_agent_filesystem_data", as_type="tool")
+def _list_agent_filesystem_data_impl() -> str:
     """
     Scan agent_filesystem/ recursively and return all .csv and .xlsx files found.
 
@@ -46,3 +47,9 @@ def list_agent_filesystem_data() -> str:
     ]
 
     return json.dumps({"files": files, "count": len(files)})
+
+
+@tool
+def list_agent_filesystem_data() -> str:
+    """LangChain wrapper for the traced filesystem listing implementation."""
+    return _list_agent_filesystem_data_impl()

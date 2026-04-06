@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import yaml
 from dotenv import load_dotenv
+from langfuse import observe, propagate_attributes
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -31,7 +32,7 @@ from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage
 
 from graph import AnalysisGraph
-from observability.langfuse_handler import get_langfuse_callbacks
+from observability.langfuse_handler import build_request_metadata, get_langfuse_client
 
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 INPUT_DIR = PROJECT_ROOT / cfg["paths"]["input"]
@@ -43,6 +44,7 @@ app = FastAPI(
     description="Agent API: natural-language queries with optional human-in-the-loop.",
 )
 analysis_graph = AnalysisGraph()
+langfuse = get_langfuse_client()
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +98,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/run")
+@observe(name="api.run", as_type="chain")
 async def run(
     query: str = Form(...),
     session_id: str = Form("default"),
@@ -112,13 +115,25 @@ async def run(
         If the agent asks a clarifying question, ``interrupted`` is ``true``
         and ``question`` contains the text.
     """
-    result = analysis_graph.run_graph(
-        session_id, query, config={"callbacks": get_langfuse_callbacks()},
-    )
-    return get_api_response(session_id, result)
+    with propagate_attributes(
+        session_id=session_id,
+        tags=["api", "run"],
+        metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query),
+    ):
+        result = analysis_graph.run_graph(session_id, query, config={})
+        response = get_api_response(session_id, result)
+        langfuse.update_current_span(
+            output=response,
+            metadata={
+                "interrupted": response["interrupted"],
+                "has_last_tool_result": response["last_tool_result"] is not None,
+            },
+        )
+        return response
 
 
 @app.post("/resume")
+@observe(name="api.resume", as_type="chain")
 async def resume(
     resume_value: str = Form(...),
     session_id: str = Form("default"),
@@ -133,13 +148,27 @@ async def resume(
     Returns
         Same shape as ``/run``.
     """
-    result = analysis_graph.resume(
-        session_id, resume_value, config={"callbacks": get_langfuse_callbacks()},
-    )
-    return get_api_response(session_id, result)
+    with propagate_attributes(
+        session_id=session_id,
+        tags=["api", "resume"],
+        metadata=build_request_metadata(
+            endpoint="/resume", interface="fastapi", query=resume_value,
+        ),
+    ):
+        result = analysis_graph.resume(session_id, resume_value, config={})
+        response = get_api_response(session_id, result)
+        langfuse.update_current_span(
+            output=response,
+            metadata={
+                "interrupted": response["interrupted"],
+                "has_last_tool_result": response["last_tool_result"] is not None,
+            },
+        )
+        return response
 
 
 @app.post("/upload-data")
+@observe(name="api.upload_data", as_type="tool")
 async def upload_data(files: list[UploadFile] = File(...)):
     """Save uploaded CSV/Excel files to ``agent_filesystem/input/``."""
 
@@ -163,4 +192,9 @@ async def upload_data(files: list[UploadFile] = File(...)):
             shutil.copyfileobj(upload.file, f)
         saved.append(f"agent_filesystem/input/{name}")
 
-    return {"saved": saved, "count": len(saved)}
+    response = {"saved": saved, "count": len(saved)}
+    langfuse.update_current_span(
+        output=response,
+        metadata={"uploaded_count": len(saved)},
+    )
+    return response

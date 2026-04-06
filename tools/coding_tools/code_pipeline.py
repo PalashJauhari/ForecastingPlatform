@@ -29,8 +29,14 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langfuse import observe
 from pydantic import BaseModel, Field
 
+from observability.langfuse_handler import (
+    extract_usage_details,
+    get_langfuse_client,
+    serialize_message,
+)
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
 
 from .code_scan.llm_judge import run_llm_judge
@@ -57,6 +63,7 @@ TIMEOUT = float(_pipe.get("timeout_seconds", 120))
 
 # Subprocess always runs ``run_pipeline_sandboxed.py`` so ``runtime_patch_scan`` wraps I/O before user code.
 SANDBOX_RUNNER = Path(__file__).resolve().parent / "code_scan" / "run_pipeline_sandboxed.py"
+langfuse = get_langfuse_client()
 
 
 class CodePipelineInput(BaseModel):
@@ -100,8 +107,8 @@ class CodePipelineInput(BaseModel):
     )
 
 
-@tool(args_schema=CodePipelineInput)
-def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
+@observe(name="tool.code_pipeline", as_type="tool")
+def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
     """Generate, validate, save, and run Python for a tabular-data task in one tool call.
 
     Use when the user needs **new** Python code written and executed against files under
@@ -149,9 +156,25 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
     user_payload = "## Task\n" + task.strip() + "\n\n## Data schema\n" + data_schema.strip()
     if previous_code_violation.strip():
         user_payload += "\n\n## Previous code policy violations\n" + previous_code_violation.strip()
-    resp = llm.invoke(
-        [SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT), HumanMessage(content=user_payload)]
-    )
+    prompt_messages = [
+        SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
+        HumanMessage(content=user_payload),
+    ]
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.codegen",
+        as_type="generation",
+        model=CODING_MODEL,
+        input=[serialize_message(message) for message in prompt_messages],
+    ) as generation:
+        resp = llm.invoke(prompt_messages)
+        generation.update(
+            output=serialize_message(resp),
+            usage_details=extract_usage_details(resp),
+            metadata={
+                "has_data_schema": bool(data_schema.strip()),
+                "has_previous_code_violation": bool(previous_code_violation.strip()),
+            },
+        )
     data = json.loads(resp.content if hasattr(resp, "content") else str(resp))
 
     code = (data.get("code") or "").strip()
@@ -161,7 +184,7 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
     # Step 2a — Empty codegen: skip expensive checks and disk I/O
     # ------------------------------------------------------------------
     if not code:
-        return json.dumps(
+        result = json.dumps(
             {
                 "code_generation": {
                     "code": "",
@@ -172,13 +195,27 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
             },
             default=str,
         )
+        langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "no_code"})
+        return result
 
     # ------------------------------------------------------------------
     # Step 2b — Semgrep (static patterns; see codegen_scan_semgrep.yaml)
     # ------------------------------------------------------------------
-    semgrep_report = run_semgrep_scan(code)
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.semgrep",
+        as_type="span",
+        input={"code": code},
+    ) as semgrep_span:
+        semgrep_report = run_semgrep_scan(code)
+        semgrep_span.update(
+            output=semgrep_report,
+            metadata={
+                "passed": semgrep_report["passed"],
+                "violation_count": len(semgrep_report["violations"]),
+            },
+        )
     if not semgrep_report["passed"]:
-        return json.dumps(
+        result = json.dumps(
             {
                 "code_generation": {
                     "code": code,
@@ -192,13 +229,15 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
             },
             default=str,
         )
+        langfuse.update_current_span(metadata={"final_stage": "semgrep", "status": "blocked"})
+        return result
 
     # ------------------------------------------------------------------
     # Step 2c — LLM judge (task alignment, policy gaps Semgrep can miss)
     # ------------------------------------------------------------------
     judge_ok, judge_detail = run_llm_judge(code=code, task=task, model_name=JUDGE_MODEL)
     if not judge_ok:
-        return json.dumps(
+        result = json.dumps(
             {
                 "code_generation": {
                     "code": code,
@@ -209,13 +248,24 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
             },
             default=str,
         )
+        langfuse.update_current_span(metadata={"final_stage": "llm_judge", "status": "blocked"})
+        return result
 
     # ------------------------------------------------------------------
     # Step 3 — Persist only after both gates pass (fixed name for the runner)
     # ------------------------------------------------------------------
-    CODE_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = CODE_DIR / "pipeline_run.py"
-    out_path.write_text(code, encoding="utf-8")
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.save_script",
+        as_type="span",
+        input={"target_dir": str(CODE_DIR)},
+    ) as save_span:
+        CODE_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = CODE_DIR / "pipeline_run.py"
+        out_path.write_text(code, encoding="utf-8")
+        save_span.update(
+            output={"path": str(out_path)},
+            metadata={"bytes_written": len(code.encode("utf-8"))},
+        )
     gen = {
         "code": code,
         "explanation": explanation,
@@ -227,24 +277,53 @@ def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str
     # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
     # ------------------------------------------------------------------
     cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path)]
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(PROJECT_ROOT),
-            env=os.environ.copy(),
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-            check=False,
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.execute_subprocess",
+        as_type="span",
+        input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT},
+    ) as execution_span:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(PROJECT_ROOT),
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT,
+                check=False,
+            )
+            # Non-zero returncode is still a successful tool result (caller inspects stderr/stdout).
+            execution = {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "returncode": proc.returncode}
+        except subprocess.TimeoutExpired as e:
+            # SIGKILL path: returncode 124 convention; surface partial streams if the OS attached them.
+            err = f"Execution exceeded timeout ({TIMEOUT}s). Process was terminated."
+            out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
+            err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
+            combined = (err_out + "\n" + err).strip() if err_out else err
+            execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
+        execution_span.update(
+            output=execution,
+            metadata={
+                "returncode": execution["returncode"],
+                "timed_out": execution["returncode"] == 124,
+                "stdout_length": len(execution.get("stdout", "")),
+                "stderr_length": len(execution.get("stderr", "")),
+            },
         )
-        # Non-zero returncode is still a successful tool result (caller inspects stderr/stdout).
-        execution = {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "returncode": proc.returncode}
-    except subprocess.TimeoutExpired as e:
-        # SIGKILL path: returncode 124 convention; surface partial streams if the OS attached them.
-        err = f"Execution exceeded timeout ({TIMEOUT}s). Process was terminated."
-        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-        err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
-        combined = (err_out + "\n" + err).strip() if err_out else err
-        execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
 
-    return json.dumps({"code_generation": gen, "execution": execution}, default=str)
+    result = json.dumps({"code_generation": gen, "execution": execution}, default=str)
+    langfuse.update_current_span(
+        output={"code_generation_passed": True, "execution": execution},
+        metadata={"final_stage": "execute_subprocess", "status": "completed"},
+    )
+    return result
+
+
+@tool(args_schema=CodePipelineInput)
+def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
+    """LangChain wrapper for the traced code pipeline implementation."""
+    return _code_pipeline_impl(
+        task=task,
+        data_schema=data_schema,
+        previous_code_violation=previous_code_violation,
+    )

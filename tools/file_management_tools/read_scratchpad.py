@@ -9,14 +9,15 @@ from pathlib import Path
 
 import yaml
 from langchain_core.tools import tool
+from langfuse import observe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 SCRATCHPAD = PROJECT_ROOT / cfg["paths"]["scratchpad"] / "scratchpad.md"
 
 
-@tool
-def read_scratchpad() -> str:
+@observe(name="tool.read_scratchpad", as_type="tool")
+def _read_scratchpad_impl() -> str:
     """
     Read the agent's scratchpad (agent_filesystem/scratchpad/scratchpad.md).
 
@@ -30,3 +31,9 @@ def read_scratchpad() -> str:
     if not SCRATCHPAD.exists():
         return json.dumps({"content": ""})
     return json.dumps({"content": SCRATCHPAD.read_text(encoding="utf-8")})
+
+
+@tool
+def read_scratchpad() -> str:
+    """LangChain wrapper for the traced scratchpad-read implementation."""
+    return _read_scratchpad_impl()
