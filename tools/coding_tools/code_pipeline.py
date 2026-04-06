@@ -160,21 +160,9 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
         SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
         HumanMessage(content=user_payload),
     ]
-    with langfuse.start_as_current_observation(
-        name="code_pipeline.codegen",
-        as_type="generation",
-        model=CODING_MODEL,
-        input=[serialize_message(message) for message in prompt_messages],
-    ) as generation:
+    with langfuse.start_as_current_observation(name="code_pipeline.codegen", as_type="generation", model=CODING_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         resp = llm.invoke(prompt_messages)
-        generation.update(
-            output=serialize_message(resp),
-            usage_details=extract_usage_details(resp),
-            metadata={
-                "has_data_schema": bool(data_schema.strip()),
-                "has_previous_code_violation": bool(previous_code_violation.strip()),
-            },
-        )
+        generation.update(output=serialize_message(resp), usage_details=extract_usage_details(resp), metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
     data = json.loads(resp.content if hasattr(resp, "content") else str(resp))
 
     code = (data.get("code") or "").strip()
@@ -201,19 +189,9 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     # ------------------------------------------------------------------
     # Step 2b — Semgrep (static patterns; see codegen_scan_semgrep.yaml)
     # ------------------------------------------------------------------
-    with langfuse.start_as_current_observation(
-        name="code_pipeline.semgrep",
-        as_type="span",
-        input={"code": code},
-    ) as semgrep_span:
+    with langfuse.start_as_current_observation(name="code_pipeline.semgrep", as_type="span", input={"code": code}) as semgrep_span:
         semgrep_report = run_semgrep_scan(code)
-        semgrep_span.update(
-            output=semgrep_report,
-            metadata={
-                "passed": semgrep_report["passed"],
-                "violation_count": len(semgrep_report["violations"]),
-            },
-        )
+        semgrep_span.update(output=semgrep_report, metadata={"passed": semgrep_report["passed"], "violation_count": len(semgrep_report["violations"])})
     if not semgrep_report["passed"]:
         result = json.dumps(
             {
@@ -254,18 +232,11 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     # ------------------------------------------------------------------
     # Step 3 — Persist only after both gates pass (fixed name for the runner)
     # ------------------------------------------------------------------
-    with langfuse.start_as_current_observation(
-        name="code_pipeline.save_script",
-        as_type="span",
-        input={"target_dir": str(CODE_DIR)},
-    ) as save_span:
+    with langfuse.start_as_current_observation(name="code_pipeline.save_script", as_type="span", input={"target_dir": str(CODE_DIR)}) as save_span:
         CODE_DIR.mkdir(parents=True, exist_ok=True)
         out_path = CODE_DIR / "pipeline_run.py"
         out_path.write_text(code, encoding="utf-8")
-        save_span.update(
-            output={"path": str(out_path)},
-            metadata={"bytes_written": len(code.encode("utf-8"))},
-        )
+        save_span.update(output={"path": str(out_path)}, metadata={"bytes_written": len(code.encode("utf-8"))})
     gen = {
         "code": code,
         "explanation": explanation,
@@ -277,11 +248,7 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
     # ------------------------------------------------------------------
     cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path)]
-    with langfuse.start_as_current_observation(
-        name="code_pipeline.execute_subprocess",
-        as_type="span",
-        input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT},
-    ) as execution_span:
+    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT}) as execution_span:
         try:
             proc = subprocess.run(
                 cmd,
@@ -301,21 +268,10 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
             err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
             combined = (err_out + "\n" + err).strip() if err_out else err
             execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
-        execution_span.update(
-            output=execution,
-            metadata={
-                "returncode": execution["returncode"],
-                "timed_out": execution["returncode"] == 124,
-                "stdout_length": len(execution.get("stdout", "")),
-                "stderr_length": len(execution.get("stderr", "")),
-            },
-        )
+        execution_span.update(output=execution, metadata={"returncode": execution["returncode"], "timed_out": execution["returncode"] == 124, "stdout_length": len(execution.get("stdout", "")), "stderr_length": len(execution.get("stderr", ""))})
 
     result = json.dumps({"code_generation": gen, "execution": execution}, default=str)
-    langfuse.update_current_span(
-        output={"code_generation_passed": True, "execution": execution},
-        metadata={"final_stage": "execute_subprocess", "status": "completed"},
-    )
+    langfuse.update_current_span(output={"code_generation_passed": True, "execution": execution}, metadata={"final_stage": "execute_subprocess", "status": "completed"})
     return result
 
 

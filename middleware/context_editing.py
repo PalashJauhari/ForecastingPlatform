@@ -88,17 +88,9 @@ def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
         SystemMessage(content=SUMMARY_SYSTEM),
         HumanMessage(content=user_content),
     ]
-    with langfuse.start_as_current_observation(
-        name="context.summarize_evicted.llm",
-        as_type="generation",
-        model=SUMMARY_MODEL,
-        input=[serialize_message(message) for message in prompt_messages],
-    ) as generation:
+    with langfuse.start_as_current_observation(name="context.summarize_evicted.llm", as_type="generation", model=SUMMARY_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         response = llm.invoke(prompt_messages)
-        generation.update(
-            output=serialize_message(response),
-            usage_details=extract_usage_details(response),
-        )
+        generation.update(output=serialize_message(response), usage_details=extract_usage_details(response))
     return response.content
 
 
@@ -129,13 +121,7 @@ def truncate_and_summarize(
         with an empty *remove_ops* list.
     """
     if estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
-        langfuse.update_current_span(
-            metadata={
-                "token_estimate": estimate_tokens(messages),
-                "token_threshold": token_threshold,
-                "truncated": "false",
-            }
-        )
+        langfuse.update_current_span(metadata={"token_estimate": estimate_tokens(messages), "token_threshold": token_threshold, "truncated": "false"})
         return previous_summary, messages, []
 
     cut = find_safe_truncation_point(messages, keep)
@@ -143,13 +129,6 @@ def truncate_and_summarize(
     remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
     updated_summary = summarize_evicted(previous_summary, to_evict)
     kept_messages = messages[cut:]
-    langfuse.update_current_span(
-        metadata={
-            "token_estimate": estimate_tokens(messages),
-            "token_threshold": token_threshold,
-            "truncated": "true",
-            "evicted_count": len(to_evict),
-        }
-    )
+    langfuse.update_current_span(metadata={"token_estimate": estimate_tokens(messages), "token_threshold": token_threshold, "truncated": "true", "evicted_count": len(to_evict)})
 
     return updated_summary, kept_messages, remove_ops

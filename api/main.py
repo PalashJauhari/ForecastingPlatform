@@ -122,13 +122,7 @@ async def run(
     ):
         result = analysis_graph.run_graph(session_id, query, config={})
         response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-            },
-        )
+        langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None})
         return response
 
 
@@ -157,13 +151,7 @@ async def resume(
     ):
         result = analysis_graph.resume(session_id, resume_value, config={})
         response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-            },
-        )
+        langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None})
         return response
 
 
@@ -193,8 +181,5 @@ async def upload_data(files: list[UploadFile] = File(...)):
         saved.append(f"agent_filesystem/input/{name}")
 
     response = {"saved": saved, "count": len(saved)}
-    langfuse.update_current_span(
-        output=response,
-        metadata={"uploaded_count": len(saved)},
-    )
+    langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved)})
     return response

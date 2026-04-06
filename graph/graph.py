@@ -172,27 +172,16 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
         serialize_message(SystemMessage(content=SKILL_IDENTIFICATION_PROMPT)),
         serialize_message(HumanMessage(content=prompt)),
     ]
-    with langfuse.start_as_current_observation(
-        name="graph.identify_skills.llm",
-        as_type="generation",
-        model=cfg["models"]["orchestrator"],
-        input=generation_input,
-    ) as generation:
+    with langfuse.start_as_current_observation(name="graph.identify_skills.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=generation_input) as generation:
         resp = llm_json.invoke(
             [SystemMessage(content=SKILL_IDENTIFICATION_PROMPT), HumanMessage(content=prompt)],
         )
-        generation.update(
-            output=serialize_message(resp),
-            usage_details=extract_usage_details(resp),
-        )
+        generation.update(output=serialize_message(resp), usage_details=extract_usage_details(resp))
     raw = _message_content_text(resp)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        langfuse.update_current_span(
-            metadata={"selected_skills": "", "selected_skill_count": 0},
-            status_message="Skill identification returned invalid JSON.",
-        )
+        langfuse.update_current_span(metadata={"selected_skills": "", "selected_skill_count": 0}, status_message="Skill identification returned invalid JSON.")
         return {"active_skills": [], "skill_context": ""}
 
     skills_raw = data.get("skills", [])
@@ -201,12 +190,7 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
     skills = [str(s) for s in skills_raw if s in _VALID_SKILL_IDS]
 
     skill_context = load_skills(skills) if skills else ""
-    langfuse.update_current_span(
-        metadata={
-            "selected_skills": ",".join(skills),
-            "selected_skill_count": len(skills),
-        }
-    )
+    langfuse.update_current_span(metadata={"selected_skills": ",".join(skills), "selected_skill_count": len(skills)})
     return {"active_skills": skills, "skill_context": skill_context}
 
 
@@ -268,29 +252,13 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         + (f"Skill guidance:\n{skill_ctx}" if skill_ctx else "")
     )
     orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
-    with langfuse.start_as_current_observation(
-        name="graph.orchestrator.llm",
-        as_type="generation",
-        model=cfg["models"]["orchestrator"],
-        input=serialize_messages(orchestrator_messages),
-    ) as generation:
+    with langfuse.start_as_current_observation(name="graph.orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages)) as generation:
         response = llm_with_tools.invoke(orchestrator_messages)
-        generation.update(
-            output=serialize_message(response),
-            usage_details=extract_usage_details(response),
-            metadata={"tool_call_count": len(response.tool_calls)},
-        )
+        generation.update(output=serialize_message(response), usage_details=extract_usage_details(response), metadata={"tool_call_count": len(response.tool_calls)})
 
     # 4. Count tool calls in this orchestrator step (each tool_calls entry counts once).
     new_count = tool_calls_so_far + len(response.tool_calls)
-    langfuse.update_current_span(
-        metadata={
-            "tool_calls_this_step": len(response.tool_calls),
-            "tool_calls_total": new_count,
-            "had_summary_context": "true" if bool(summary) else "false",
-            "had_skill_context": "true" if bool(skill_ctx) else "false",
-        }
-    )
+    langfuse.update_current_span(metadata={"tool_calls_this_step": len(response.tool_calls), "tool_calls_total": new_count, "had_summary_context": "true" if bool(summary) else "false", "had_skill_context": "true" if bool(skill_ctx) else "false"})
 
     return {
         "messages": remove_ops + [response],
@@ -397,11 +365,7 @@ class AnalysisGraph:
             },
             config=config,
         )
-        langfuse.update_current_span(
-            input={"session_id": session_id, "user_query": user_query},
-            output={"message_count": len(result.get("messages", []))},
-            metadata={"session_id": session_id},
-        )
+        langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
 
     @observe(name="graph.resume", as_type="chain", capture_input=False, capture_output=False)
@@ -425,11 +389,7 @@ class AnalysisGraph:
         config = config or {}
         config["configurable"] = {"thread_id": session_id}
         result = self.graph.invoke(Command(resume=value), config=config)
-        langfuse.update_current_span(
-            input={"session_id": session_id, "resume_value": value},
-            output={"message_count": len(result.get("messages", []))},
-            metadata={"session_id": session_id},
-        )
+        langfuse.update_current_span(input={"session_id": session_id, "resume_value": value}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
 
     def get_state(self, session_id: str) -> Any:
