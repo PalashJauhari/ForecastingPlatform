@@ -6,19 +6,19 @@ Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
 """
 
 from __future__ import annotations
-
-import json
 from pathlib import Path
 from typing import Annotated, Any, Dict
 
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langfuse import observe
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
+from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from middleware.context_editing import truncate_and_summarize
@@ -31,6 +31,7 @@ from observability.langfuse_handler import (
 from middleware.tool_call_limit import check_tool_call_limit
 from prompts.graph_prompts import SYSTEM_PROMPT
 from prompts.skills_prompts import SKILL_IDENTIFICATION_PROMPT
+from session_paths import session_id_from_config, session_root, to_agent_path
 from skills.loader import PRIORITY_ORDER, load_skills
 from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.code_pipeline import code_pipeline
@@ -46,15 +47,22 @@ from tools.file_management_tools.write_scratchpad import write_scratchpad
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-AGENT_FS = (PROJECT_ROOT / cfg["paths"]["agent_filesystem"]).resolve()
-SCRATCHPAD_DIR = (PROJECT_ROOT / cfg["paths"]["scratchpad"]).resolve()
-SCRATCHPAD_FILE = SCRATCHPAD_DIR / "scratchpad.md"
-
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
 _VALID_SKILL_IDS = frozenset(PRIORITY_ORDER)
+
+
+class SkillSelection(BaseModel):
+    """Structured response for the skill selector."""
+
+    skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Subset of: eda, data_processing, feature_engineering, modeling, visualisation."
+        ),
+    )
 
 
 def _message_content_text(msg: Any) -> str:
@@ -128,28 +136,29 @@ langfuse = get_langfuse_client()
 
 
 @observe(name="graph.refresh_data_schema", capture_input=False, capture_output=False)
-def refresh_data_schema(state: AgentState) -> Dict[str, Any]:
+def refresh_data_schema(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    Scan ``agent_filesystem/`` for ``.csv`` and ``.xlsx`` files (excluding
-    ``scratchpad/``) and update ``state["data_schema"]``.
+    Scan the current session workspace for ``.csv`` and ``.xlsx`` files and
+    update ``state["data_schema"]`` with logical agent paths.
     """
+    session_id = session_id_from_config(config)
+    base = session_root(session_id)
     files = [
-        f"agent_filesystem/{f.relative_to(AGENT_FS).as_posix()}"
-        for f in sorted(AGENT_FS.rglob("*"))
+        to_agent_path(session_id, f)
+        for f in sorted(base.rglob("*"))
         if f.is_file()
         and f.suffix.lower() in {".csv", ".xlsx"}
-        and not str(f.resolve()).startswith(str(SCRATCHPAD_DIR))
-    ] if AGENT_FS.exists() else []
+    ] if base.exists() else []
 
     output = {"data_schema": "\n".join(files) if files else "(no data files found)"}
-    langfuse.update_current_span(metadata={"file_count": len(files)})
+    langfuse.update_current_span(metadata={"file_count": len(files), "session_id": session_id})
     return output
 
 
 @observe(name="graph.identify_skills", capture_input=False, capture_output=False)
 def identify_skills(state: AgentState) -> Dict[str, Any]:
     """
-    One JSON LLM call per **new user turn** (last message is ``HumanMessage``).
+    One structured-output LLM call per **new user turn** (last message is ``HumanMessage``).
     Sets ``active_skills`` and ``skill_context``; on tool-loop steps returns ``{}`` (unchanged).
     """
     messages = state["messages"]
@@ -161,33 +170,31 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
     prompt = (
         f"User query: {user_query}\n\n"
         f"Available data files:\n{data_schema}\n\n"
-        "Which skills are needed? Reply with JSON only."
+        "Which skills are needed?"
     )
-    llm_json = ChatOpenAI(
+    llm_structured = ChatOpenAI(
         model=cfg["models"]["orchestrator"],
         temperature=0,
-        model_kwargs={"response_format": {"type": "json_object"}},
-    )
+    ).with_structured_output(SkillSelection)
     generation_input = [
         serialize_message(SystemMessage(content=SKILL_IDENTIFICATION_PROMPT)),
         serialize_message(HumanMessage(content=prompt)),
     ]
     with langfuse.start_as_current_observation(name="graph.identify_skills.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=generation_input) as generation:
-        resp = llm_json.invoke(
-            [SystemMessage(content=SKILL_IDENTIFICATION_PROMPT), HumanMessage(content=prompt)],
-        )
-        generation.update(output=serialize_message(resp), usage_details=extract_usage_details(resp))
-    raw = _message_content_text(resp)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        langfuse.update_current_span(metadata={"selected_skills": "", "selected_skill_count": 0}, status_message="Skill identification returned invalid JSON.")
+        try:
+            resp = llm_structured.invoke(
+                [SystemMessage(content=SKILL_IDENTIFICATION_PROMPT), HumanMessage(content=prompt)],
+            )
+        except Exception as e:
+            generation.update(output={"error": str(e)})
+            langfuse.update_current_span(metadata={"selected_skills": "", "selected_skill_count": 0}, status_message="Skill identification returned invalid structured output.")
+            return {"active_skills": [], "skill_context": ""}
+        generation.update(output=resp.model_dump())
+
+    if not isinstance(resp.skills, list):
         return {"active_skills": [], "skill_context": ""}
 
-    skills_raw = data.get("skills", [])
-    if not isinstance(skills_raw, list):
-        skills_raw = []
-    skills = [str(s) for s in skills_raw if s in _VALID_SKILL_IDS]
+    skills = [str(s) for s in resp.skills if s in _VALID_SKILL_IDS]
 
     skill_context = load_skills(skills) if skills else ""
     langfuse.update_current_span(metadata={"selected_skills": ",".join(skills), "selected_skill_count": len(skills)})
@@ -256,9 +263,19 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
         response = llm_with_tools.invoke(orchestrator_messages)
         generation.update(output=serialize_message(response), usage_details=extract_usage_details(response), metadata={"tool_call_count": len(response.tool_calls)})
 
+    tool_calls = list(getattr(response, "tool_calls", None) or [])
+    ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
+    if ask_user_calls and len(tool_calls) > 1:
+        # ``ask_user`` pauses the graph, so we trim mixed batches down to one interrupt call.
+        response = AIMessage(content="", tool_calls=[ask_user_calls[0]])
+        tool_calls = [ask_user_calls[0]]
+        langfuse.update_current_span(metadata={"ask_user_batch_trimmed": "true"})
+    else:
+        langfuse.update_current_span(metadata={"ask_user_batch_trimmed": "false"})
+
     # 4. Count tool calls in this orchestrator step (each tool_calls entry counts once).
-    new_count = tool_calls_so_far + len(response.tool_calls)
-    langfuse.update_current_span(metadata={"tool_calls_this_step": len(response.tool_calls), "tool_calls_total": new_count, "had_summary_context": "true" if bool(summary) else "false", "had_skill_context": "true" if bool(skill_ctx) else "false"})
+    new_count = tool_calls_so_far + len(tool_calls)
+    langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "tool_calls_total": new_count, "had_summary_context": "true" if bool(summary) else "false", "had_skill_context": "true" if bool(skill_ctx) else "false"})
 
     return {
         "messages": remove_ops + [response],
@@ -352,19 +369,10 @@ class AnalysisGraph:
             Graph invoke result dict (``messages``, ``message_summary``, etc.).
         """
         config = config or {}
-        # thread_id drives InMemorySaver checkpointing per session
+        # ``thread_id`` ties every turn for a session to the same checkpointed graph state.
         config["configurable"] = {"thread_id": session_id}
-        result = self.graph.invoke(
-            {
-                "messages": [HumanMessage(content=user_query)],
-                "message_summary": "",
-                "number_of_tool_calls": 0,
-                "data_schema": "",
-                "active_skills": [],
-                "skill_context": "",
-            },
-            config=config,
-        )
+        # On each turn we add only the new user message and let the checkpointer load prior state.
+        result = self.graph.invoke({"messages": [HumanMessage(content=user_query)]}, config=config)
         langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
 

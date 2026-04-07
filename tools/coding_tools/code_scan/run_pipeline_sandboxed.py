@@ -55,15 +55,19 @@ from runtime_patch_scan import apply_patches, remove_patches
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: run_pipeline_sandboxed.py <path_to_pipeline_run.py>", file=sys.stderr)
+    if len(sys.argv) < 3:
+        print(
+            "Usage: run_pipeline_sandboxed.py <path_to_pipeline_run.py> <session_workspace>",
+            file=sys.stderr,
+        )
         sys.exit(2)
     target = Path(sys.argv[1]).resolve()
+    session_workspace = Path(sys.argv[2]).resolve()
     if not target.is_file():
         print(f"Not a file: {target}", file=sys.stderr)
         sys.exit(2)
 
-    apply_patches()
+    apply_patches(session_workspace)
     try:
         # Mirrors ``python pipeline_run.py`` (``__name__ == "__main__"``, etc.).
         runpy.run_path(str(target), run_name="__main__")

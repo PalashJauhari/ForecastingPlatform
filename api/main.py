@@ -33,11 +33,12 @@ from langchain_core.messages import AIMessage
 
 from graph import AnalysisGraph
 from observability.langfuse_handler import build_request_metadata, get_langfuse_client
+from session_paths import ensure_session_dirs, resolve_agent_path
 
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-INPUT_DIR = PROJECT_ROOT / cfg["paths"]["input"]
+INPUT_DIR = cfg["paths"]["input"]
 
-ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
 
 app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
@@ -157,10 +158,13 @@ async def resume(
 
 @app.post("/upload-data")
 @observe(name="api.upload_data", as_type="tool")
-async def upload_data(files: list[UploadFile] = File(...)):
-    """Save uploaded CSV/Excel files to ``agent_filesystem/input/``."""
+async def upload_data(
+    files: list[UploadFile] = File(...),
+    session_id: str = Form("default"),
+):
+    """Save uploaded CSV/Excel files to the current session workspace."""
 
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_session_dirs(session_id)
     saved: list[str] = []
 
     for upload in files:
@@ -171,15 +175,16 @@ async def upload_data(files: list[UploadFile] = File(...)):
                 status_code=400,
                 content={
                     "error": (
-                        f"Only .csv, .xlsx, .xls allowed. Got: {upload.filename or name}"
+                        f"Only .csv and .xlsx allowed. Got: {upload.filename or name}"
                     )
                 },
             )
-        dest = INPUT_DIR / name
+        logical_path = f"{INPUT_DIR}/{name}"
+        dest = resolve_agent_path(session_id, logical_path)
         with open(dest, "wb") as f:
             shutil.copyfileobj(upload.file, f)
-        saved.append(f"agent_filesystem/input/{name}")
+        saved.append(logical_path)
 
     response = {"saved": saved, "count": len(saved)}
-    langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved)})
+    langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved), "session_id": session_id})
     return response

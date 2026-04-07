@@ -122,11 +122,12 @@ def new_session():
     st.rerun()
 
 
-def post_upload(file_obj) -> Optional[str]:
+def post_upload(file_obj, session_id: str) -> Optional[str]:
     """POST a file to /upload-data. Returns the saved path or None on error."""
     try:
         resp = requests.post(
             f"{API_URL}/upload-data",
+            data={"session_id": session_id},
             files={"files": (file_obj.name, file_obj.getvalue(), file_obj.type or "application/octet-stream")},
             timeout=30,
         )
@@ -164,7 +165,7 @@ def read_uploaded_file(file_obj) -> Optional[pd.DataFrame]:
         name = file_obj.name.lower()
         if name.endswith(".csv"):
             return pd.read_csv(file_obj)
-        if name.endswith((".xlsx", ".xls")):
+        if name.endswith(".xlsx"):
             return pd.read_excel(file_obj)
     except Exception:
         pass
@@ -207,19 +208,19 @@ def call_resume(answer: str) -> dict:
 
 def file_type_label(name: str) -> str:
     ext = Path(name).suffix.lower()
-    return {".csv": "CSV", ".xlsx": "XLSX", ".xls": "XLS",
+    return {".csv": "CSV", ".xlsx": "XLSX",
             ".png": "PNG", ".jpg": "JPG", ".pdf": "PDF",
             ".py": "PY"}.get(ext, "FILE")
 
 
 def file_type_color(label: str) -> str:
-    return {"CSV": "#EAF3DE", "XLSX": "#E6F1FB", "XLS": "#E6F1FB",
+    return {"CSV": "#EAF3DE", "XLSX": "#E6F1FB",
             "PNG": "#FAEEDA", "JPG": "#FAEEDA", "PDF": "#FCEBEB",
             "PY": "#EEEDFE"}.get(label, "#F1EFE8")
 
 
 def file_type_text_color(label: str) -> str:
-    return {"CSV": "#3B6D11", "XLSX": "#185FA5", "XLS": "#185FA5",
+    return {"CSV": "#3B6D11", "XLSX": "#185FA5",
             "PNG": "#633806", "JPG": "#633806", "PDF": "#791F1F",
             "PY": "#3C3489"}.get(label, "#5F5E5A")
 
@@ -248,7 +249,7 @@ with st.sidebar:
     st.caption("UPLOAD DATA")
     uploaded = st.file_uploader(
         "Upload",
-        type=["csv", "xlsx", "xls"],
+        type=["csv", "xlsx"],
         accept_multiple_files=True,
         label_visibility="collapsed",
         key="file_uploader_widget",
@@ -259,7 +260,7 @@ with st.sidebar:
             already = any(f["name"] == uf.name for f in st.session_state.uploaded_files)
             if not already:
                 with st.spinner(f"Uploading {uf.name}…"):
-                    saved_path = post_upload(uf)
+                    saved_path = post_upload(uf, st.session_state.session_id)
                 if saved_path:
                     df_head = read_uploaded_file(uf)
                     rows = len(df_head) if df_head is not None else 0

@@ -5,20 +5,17 @@ LangChain tool: list all .csv and .xlsx files inside agent_filesystem/.
 from __future__ import annotations
 
 import json
-import yaml
-from pathlib import Path
+from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langfuse import observe
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-AGENT_FILESYSTEM_ROOT = PROJECT_ROOT / cfg["paths"]["agent_filesystem"]
+from session_paths import session_id_from_config, session_root, to_agent_path
 
 
 @observe(name="tool.list_agent_filesystem_data", as_type="tool")
-def _list_agent_filesystem_data_impl() -> str:
+def _list_agent_filesystem_data_impl(runtime: ToolRuntime) -> str:
     """
-    Scan agent_filesystem/ recursively and return all .csv and .xlsx files found.
+    Scan the current session workspace and return all .csv and .xlsx files found.
 
     Call this first to discover what data files are available. Each path in the
     result starts with 'agent_filesystem/' so it can be passed directly to
@@ -32,16 +29,15 @@ def _list_agent_filesystem_data_impl() -> str:
             ]
       - "count": total number of files found (int).
 
-    If agent_filesystem/ does not exist, returns {"error": "...", "files": [], "count": 0}.
     If no .csv or .xlsx files are found, returns {"files": [], "count": 0}.
     """
-    base = AGENT_FILESYSTEM_ROOT.resolve()
-
+    session_id = session_id_from_config(runtime.config)
+    base = session_root(session_id)
     if not base.exists():
-        return json.dumps({"error": "agent_filesystem/ does not exist.", "files": [], "count": 0})
+        return json.dumps({"files": [], "count": 0})
 
     files = [
-        f"agent_filesystem/{f.relative_to(base).as_posix()}"
+        to_agent_path(session_id, f)
         for f in sorted(base.rglob("*"))
         if f.is_file() and f.suffix.lower() in {".csv", ".xlsx"}
     ]
@@ -50,6 +46,6 @@ def _list_agent_filesystem_data_impl() -> str:
 
 
 @tool
-def list_agent_filesystem_data() -> str:
+def list_agent_filesystem_data(runtime: ToolRuntime) -> str:
     """LangChain wrapper for the traced filesystem listing implementation."""
-    return _list_agent_filesystem_data_impl()
+    return _list_agent_filesystem_data_impl(runtime=runtime)

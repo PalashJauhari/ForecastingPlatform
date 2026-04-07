@@ -1,6 +1,6 @@
 # GaussianBlurr
 
-An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and an **`agent_filesystem/`** workspace for all data I/O and generated code.
+An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a logical **`agent_filesystem/`** workspace for all data I/O and generated code.
 
 ---
 
@@ -11,14 +11,15 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 - **Six tools** — `list_agent_filesystem_data`, `read_agent_filesystem_data`, `code_pipeline`, `ask_user`, `read_scratchpad`, `write_scratchpad`.
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
-- **Auto-refreshed file listing** — a `refresh_data_schema` node runs before every orchestrator call, scanning `agent_filesystem/` so the LLM always sees the current file listing without a tool call.
+- **Auto-refreshed file listing** — a `refresh_data_schema` node runs before every orchestrator call, scanning the current session workspace so the LLM always sees the current file listing without a tool call.
+- **Session-scoped storage** — the model still uses logical `agent_filesystem/...` paths, while the backend resolves them into a private physical workspace for each `session_id`.
 - **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/code/pipeline_run.py` → subprocess runner.
 - **Two-layer code sandbox** —
   - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
   - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
   - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
-- **Skills layer** — `identify_skills` (one JSON LLM call on each new user turn) picks from five curated skills (`eda`, `data_processing`, `feature_engineering`, `modeling`, `visualisation`). `skills/loader.py` loads `approach.md` + reference `.py` patterns into `skill_context`, injected into the orchestrator context as “Skill guidance” (budget: `skills.max_skill_context_tokens`).
+- **Skills layer** — `identify_skills` (one structured-output LLM call on each new user turn) picks from five curated skills (`eda`, `data_processing`, `feature_engineering`, `modeling`, `visualisation`). `skills/loader.py` loads `approach.md` + reference `.py` patterns into `skill_context`, injected into the orchestrator context as “Skill guidance” (budget: `skills.max_skill_context_tokens`).
 - **Sessions** — `thread_id = session_id` with `InMemorySaver` (per-session checkpoints; lost on restart).
 - **Observability** — optional Langfuse callbacks when `LANGFUSE_*` keys are set, propagated via `RunnableConfig`.
 
@@ -49,12 +50,13 @@ START → refresh_data_schema → identify_skills → reset_tool_budget → orch
 
 ```
 config.yaml                                  # Models, middleware, paths, code_pipeline, skills budget
-agent_filesystem/
-  input/                                     # Raw uploaded files (CSV, Excel)
-  output/                                    # Agent-written results and plots
-  processed/                                 # Intermediate cleaned/transformed data
-  scratchpad/                                # scratchpad.md — working notes
-  code/                                      # pipeline_run.py (generated; overwritten each run)
+agent_sessions/
+  <session_id>/
+    input/                                   # Raw uploaded files (CSV, Excel)
+    output/                                  # Agent-written results and plots
+    processed/                               # Intermediate cleaned/transformed data
+    scratchpad/                              # scratchpad.md — working notes
+    code/                                    # pipeline_run.py (generated; overwritten each run)
 graph/
   graph.py                                   # StateGraph, identify_skills, AnalysisGraph
   __init__.py
@@ -105,7 +107,7 @@ observability/
 | `truncate_and_summarize` | `middleware/context_editing.py` | Truncation + running summary when token estimate exceeds threshold. |
 | — | `code_pipeline` (tool) | Codegen → Semgrep → LLM judge → save → `run_pipeline_sandboxed.py` execution. |
 
-**Graph nodes (non-middleware):** `refresh_data_schema`, `identify_skills` (JSON skill picker + `load_skills`), `reset_tool_budget`, `orchestrator`, `tools`.
+**Graph nodes (non-middleware):** `refresh_data_schema`, `identify_skills` (structured skill picker + `load_skills`), `reset_tool_budget`, `orchestrator`, `tools`.
 
 ---
 
@@ -113,12 +115,12 @@ observability/
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| **list_agent_filesystem_data** | none | Scans `agent_filesystem/` recursively and returns all `.csv` and `.xlsx` files as `agent_filesystem/...` paths. |
+| **list_agent_filesystem_data** | none | Scans the current session workspace recursively and returns all `.csv` and `.xlsx` files as `agent_filesystem/...` paths. |
 | **read_agent_filesystem_data** | `path`, `n_rows` (optional, default 5, max 100) | Opens a `.csv` or `.xlsx` file and returns columns, preview rows, and total row count. Path must start with `agent_filesystem/`. |
-| **code_pipeline** | `task`, `data_schema`, optional `previous_code_violation` | Codegen (JSON) → Semgrep → LLM judge → writes `agent_filesystem/code/pipeline_run.py` → runs it via `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On Semgrep/judge failure, pass `previous_code_violation` on retry with the prior `code_safety_evaluation.detail`. |
+| **code_pipeline** | `task`, `data_schema`, optional `previous_code_violation` | Codegen (structured output) → Semgrep → LLM judge → writes `agent_filesystem/code/pipeline_run.py` → runs it via `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On Semgrep/judge failure, pass `previous_code_violation` on retry with the prior `code_safety_evaluation.detail`. |
 | **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
 | **read_scratchpad** | none | Reads `agent_filesystem/scratchpad/scratchpad.md`. |
-| **write_scratchpad** | `content` | Appends text to `agent_filesystem/scratchpad/scratchpad.md`. Cleared automatically on new sessions. |
+| **write_scratchpad** | `content` | Appends text to `agent_filesystem/scratchpad/scratchpad.md` in the current session workspace. |
 
 ---
 
@@ -147,6 +149,7 @@ skills:
 
 paths:
   agent_filesystem: "agent_filesystem"
+  sessions_root: "agent_sessions"
   input:      "agent_filesystem/input"
   output:     "agent_filesystem/output"
   processed:  "agent_filesystem/processed"
@@ -198,16 +201,13 @@ streamlit run ui/app.py
 | Field | Required | Description |
 |-------|----------|-------------|
 | `query` | Yes | User message |
-| `file` | No | CSV/Excel upload (stored under `agent_filesystem/input/<session_id>/`) |
-| `csv_path` | No | Path for follow-up when no new file |
-| `session_id` | No | Defaults to `"default"` |
+| `session_id` | No | Defaults to `"default"` and is used as the LangGraph `thread_id` |
 
 **Response (JSON):**
 
 | Field | Description |
 |-------|-------------|
 | `session_id` | Echoed session id |
-| `csv_path` | Resolved upload path |
 | `summary` | Last assistant reply |
 | `last_tool_result` | Content of last tool message |
 | `interrupted` | `true` if the agent is asking a clarifying question |
@@ -219,9 +219,22 @@ streamlit run ui/app.py
 |-------|----------|-------------|
 | `resume_value` | Yes | The user's answer to the clarifying question |
 | `session_id` | Yes | Same session that was interrupted |
-| `csv_path` | No | Carried forward from the original `/run` call |
 
 **Response:** same shape as `/run`.
+
+### `POST /upload-data` — `multipart/form-data`
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `files` | Yes | One or more `.csv` or `.xlsx` uploads |
+| `session_id` | No | Defaults to `"default"`; files are stored in that session's private physical workspace and returned as logical `agent_filesystem/input/...` paths |
+
+**Response (JSON):**
+
+| Field | Description |
+|-------|-------------|
+| `saved` | List of logical `agent_filesystem/input/...` paths |
+| `count` | Number of files saved |
 
 ---
 
@@ -229,4 +242,4 @@ streamlit run ui/app.py
 
 - **Production:** replace `InMemorySaver` with a persistent checkpointer (e.g. `PostgresSaver`) so conversations survive restarts.
 - If `code_pipeline` is blocked by Semgrep or the LLM judge, check `code_safety_evaluation.detail` in the tool result, pass `previous_code_violation` on retry, and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` if needed.
-- The Streamlit UI (`ui/app.py`) has not yet been updated for interrupt/resume — it still calls only `POST /run`.
+- The Streamlit UI (`ui/app.py`) supports upload, interrupt/resume, and per-session chat state.

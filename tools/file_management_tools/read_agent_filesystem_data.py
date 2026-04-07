@@ -5,16 +5,13 @@ LangChain tool: read a .csv or .xlsx file from agent_filesystem/ and return sche
 from __future__ import annotations
 
 import json
-import yaml
 import pandas as pd
-from pathlib import Path
+from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langfuse import observe
 from pydantic import BaseModel, Field
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-AGENT_FILESYSTEM_ROOT = (PROJECT_ROOT / cfg["paths"]["agent_filesystem"]).resolve()
+from session_paths import resolve_agent_path, session_id_from_config
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 
@@ -38,7 +35,7 @@ class ReadAgentFilesystemDataInput(BaseModel):
 
 
 @observe(name="tool.read_agent_filesystem_data", as_type="tool")
-def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5) -> str:
+def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRuntime | None = None) -> str:
     """
     Read a .csv or .xlsx file from agent_filesystem/ and return its schema and a sample of rows.
 
@@ -73,26 +70,15 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5) -> str:
       - File could not be parsed by pandas
     """
     p = path.strip()
+    session_id = session_id_from_config(runtime.config if runtime is not None else None)
 
     if not p.startswith("agent_filesystem/"):
         return json.dumps({"error": "Path must start with 'agent_filesystem/' (e.g. 'agent_filesystem/input/data.csv')."})
 
-    relative = p[len("agent_filesystem/"):]
-
-    if not relative:
-        return json.dumps({"error": "No file path provided after 'agent_filesystem/'."})
-
-    rel_path = Path(relative)
-
-    if rel_path.is_absolute():
-        return json.dumps({"error": "Path must be inside agent_filesystem/."})
-
-    target = (AGENT_FILESYSTEM_ROOT / rel_path).resolve()
-
     try:
-        target.relative_to(AGENT_FILESYSTEM_ROOT)
-    except ValueError:
-        return json.dumps({"error": "Path must be inside agent_filesystem/."})
+        target = resolve_agent_path(session_id, p)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
 
     if not target.exists():
         return json.dumps({"error": f"File not found: {p}"})
@@ -122,6 +108,10 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5) -> str:
 
 
 @tool(args_schema=ReadAgentFilesystemDataInput)
-def read_agent_filesystem_data(path: str, n_rows: int = 5) -> str:
+def read_agent_filesystem_data(
+    path: str,
+    n_rows: int = 5,
+    runtime: ToolRuntime | None = None,
+) -> str:
     """LangChain wrapper for the traced data-read implementation."""
-    return _read_agent_filesystem_data_impl(path=path, n_rows=n_rows)
+    return _read_agent_filesystem_data_impl(path=path, n_rows=n_rows, runtime=runtime)

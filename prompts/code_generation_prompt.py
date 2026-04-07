@@ -73,9 +73,10 @@ This list is **not** exhaustive—anything outside the allowed set is unsafe.
 ## Data paths under `agent_filesystem/`
 
 - Use **exact** paths from the user task. Do not invent paths not mentioned there.
+- `agent_filesystem/...` always refers to the **current session workspace**.
 - Read: `pd.read_csv("agent_filesystem/...")` or `pd.read_excel("agent_filesystem/...")`.
 - Write: `df.to_csv("agent_filesystem/output/...", index=False)` or `df.to_excel(..., index=False)`; plots: `plt.savefig("agent_filesystem/output/...")`.
-- **No `.json`** for data. Only `.csv` / `.xlsx` / `.xls` via pandas.
+- **No `.json`** for data. Only `.csv` / `.xlsx` via pandas.
 - **Inline literals only:**
 
 WRONG:

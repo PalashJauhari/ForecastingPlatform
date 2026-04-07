@@ -2,7 +2,7 @@
 ``code_pipeline`` tool implementation (generate → Semgrep → judge → save → run).
 
 Pipeline order
-    1. **Codegen** — OpenAI JSON mode with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
+    1. **Codegen** — structured output with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
        may include task, data schema, and optional ``## Previous code policy violations`` on retry.
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
@@ -28,16 +28,17 @@ from pathlib import Path
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from langchain.tools import ToolRuntime
 from langchain_openai import ChatOpenAI
 from langfuse import observe
 from pydantic import BaseModel, Field
 
 from observability.langfuse_handler import (
-    extract_usage_details,
     get_langfuse_client,
     serialize_message,
 )
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
+from session_paths import ensure_session_dirs, resolve_agent_path, session_id_from_config, session_root
 
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
@@ -53,8 +54,8 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 # Model names (``models.*`` in config.yaml).
 CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
 JUDGE_MODEL = cfg["models"].get("code_judge", cfg["models"].get("code_generation", "gpt-4o-mini"))
-# Where generated ``.py`` files are stored (``paths.code``, usually ``agent_filesystem/code``).
-CODE_DIR = PROJECT_ROOT / cfg["paths"]["code"]
+# Logical location for generated ``.py`` files. The real directory is session-scoped.
+CODE_DIR = cfg["paths"]["code"]
 
 # Execution limits: prefer ``code_pipeline``; fall back to legacy ``run_python_file`` for older configs.
 _pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
@@ -107,8 +108,21 @@ class CodePipelineInput(BaseModel):
     )
 
 
+class CodeGenerationOutput(BaseModel):
+    """Structured response returned by the code generation model."""
+
+    filename: str = Field(description="Descriptive Python filename ending in .py.")
+    explanation: str = Field(description="Short explanation of the generated script.")
+    code: str = Field(description="Full runnable Python source.")
+
+
 @observe(name="tool.code_pipeline", as_type="tool")
-def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
+def _code_pipeline_impl(
+    task: str,
+    data_schema: str = "",
+    previous_code_violation: str = "",
+    session_id: str = "default",
+) -> str:
     """Generate, validate, save, and run Python for a tabular-data task in one tool call.
 
     Use when the user needs **new** Python code written and executed against files under
@@ -145,13 +159,12 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     **task** if needed;     do not retry with an empty **previous_code_violation** as if nothing failed.
     """
     # ------------------------------------------------------------------
-    # Step 1 — Codegen (JSON object: filename, explanation, code)
+    # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
     llm = ChatOpenAI(
         model=CODING_MODEL,
         temperature=0,
-        model_kwargs={"response_format": {"type": "json_object"}},
-    )
+    ).with_structured_output(CodeGenerationOutput)
     # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (schema + retries).
     user_payload = "## Task\n" + task.strip() + "\n\n## Data schema\n" + data_schema.strip()
     if previous_code_violation.strip():
@@ -161,12 +174,30 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
         HumanMessage(content=user_payload),
     ]
     with langfuse.start_as_current_observation(name="code_pipeline.codegen", as_type="generation", model=CODING_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
-        resp = llm.invoke(prompt_messages)
-        generation.update(output=serialize_message(resp), usage_details=extract_usage_details(resp), metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
-    data = json.loads(resp.content if hasattr(resp, "content") else str(resp))
+        try:
+            resp = llm.invoke(prompt_messages)
+        except Exception as e:
+            generation.update(output={"error": str(e)}, metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
+            result = json.dumps(
+                {
+                    "code_generation": {
+                        "code": "",
+                        "explanation": "",
+                        "code_safety_evaluation": {
+                            "passed": False,
+                            "detail": f"Code generation failed to produce valid structured output: {e}",
+                        },
+                    },
+                    "execution": None,
+                },
+                default=str,
+            )
+            langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
+            return result
+        generation.update(output=resp.model_dump(), metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
 
-    code = (data.get("code") or "").strip()
-    explanation = (data.get("explanation") or "").strip()
+    code = resp.code.strip()
+    explanation = resp.explanation.strip()
 
     # ------------------------------------------------------------------
     # Step 2a — Empty codegen: skip expensive checks and disk I/O
@@ -232,9 +263,12 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     # ------------------------------------------------------------------
     # Step 3 — Persist only after both gates pass (fixed name for the runner)
     # ------------------------------------------------------------------
+    ensure_session_dirs(session_id)
+    code_dir = resolve_agent_path(session_id, CODE_DIR)
+    session_workspace = session_root(session_id)
     with langfuse.start_as_current_observation(name="code_pipeline.save_script", as_type="span", input={"target_dir": str(CODE_DIR)}) as save_span:
-        CODE_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = CODE_DIR / "pipeline_run.py"
+        code_dir.mkdir(parents=True, exist_ok=True)
+        out_path = code_dir / "pipeline_run.py"
         out_path.write_text(code, encoding="utf-8")
         save_span.update(output={"path": str(out_path)}, metadata={"bytes_written": len(code.encode("utf-8"))})
     gen = {
@@ -247,8 +281,8 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
     # Step 4 — Run script: subprocess, no shell, project root as cwd
     # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
     # ------------------------------------------------------------------
-    cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path)]
-    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT}) as execution_span:
+    cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path), str(session_workspace)]
+    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT, "session_id": session_id}) as execution_span:
         try:
             proc = subprocess.run(
                 cmd,
@@ -276,10 +310,17 @@ def _code_pipeline_impl(task: str, data_schema: str = "", previous_code_violatio
 
 
 @tool(args_schema=CodePipelineInput)
-def code_pipeline(task: str, data_schema: str = "", previous_code_violation: str = "") -> str:
+def code_pipeline(
+    task: str,
+    data_schema: str = "",
+    previous_code_violation: str = "",
+    runtime: ToolRuntime | None = None,
+) -> str:
     """LangChain wrapper for the traced code pipeline implementation."""
+    session_id = session_id_from_config(runtime.config if runtime is not None else None)
     return _code_pipeline_impl(
         task=task,
         data_schema=data_schema,
         previous_code_violation=previous_code_violation,
+        session_id=session_id,
     )

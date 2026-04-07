@@ -22,6 +22,7 @@ skills:
 
 paths:
   agent_filesystem: "agent_filesystem"
+  sessions_root: "agent_sessions"
   input:     "agent_filesystem/input"
   output:    "agent_filesystem/output"
   processed: "agent_filesystem/processed"
