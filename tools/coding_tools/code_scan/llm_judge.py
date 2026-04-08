@@ -8,22 +8,15 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
 
+from output_validation.judge_output import JudgeOutput
 from prompts.code_judge_prompt import CODE_JUDGE_SYSTEM_PROMPT
 
 langfuse = get_langfuse_client()
-
-
-class JudgeOutput(BaseModel):
-    """Structured accept/reject response from the judge model."""
-
-    passed: bool = Field(description="Whether the generated code is safe and on-spec.")
-    detail: str = Field(default="", description="Short rejection reason when passed is false.")
 
 
 def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
@@ -35,10 +28,7 @@ def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
         ``(False, detail)`` if rejected or the response is invalid; ``detail`` is safe to surface in
         ``code_safety_evaluation.detail``.
     """
-    llm = ChatOpenAI(
-        model=model_name,
-        temperature=0,
-    ).with_structured_output(JudgeOutput)
+    llm = ChatOpenAI(model=model_name, temperature=0).with_structured_output(JudgeOutput)
     # Fenced block helps the model locate the script; task is the same string codegen saw in ``code_pipeline``.
     human = (
         "## User task\n"

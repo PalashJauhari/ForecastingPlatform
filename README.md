@@ -8,7 +8,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
-- **Six tools** — `list_agent_filesystem_data`, `read_agent_filesystem_data`, `code_pipeline`, `ask_user`, `read_scratchpad`, `write_scratchpad`.
+- **Eight tools** — `list_agent_filesystem_data`, `read_agent_filesystem_data`, `profile_forecasting_data`, `build_codegen_requirement`, `code_pipeline`, `ask_user`, `read_scratchpad`, `write_scratchpad`.
+- **Forecast-readiness profiling** — `profile_forecasting_data` inspects one or more CSV/XLSX files, identifies likely time/target columns, surfaces ambiguity, and recommends the next forecasting step before heavier actions.
+- **Requirement planning before codegen** — `build_codegen_requirement` reads graph state, profiling findings, and the orchestrator brief to produce a validated execution requirement before `code_pipeline`.
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
 - **Auto-refreshed file listing** — a `refresh_data_schema` node runs before every orchestrator call, scanning the current session workspace so the LLM always sees the current file listing without a tool call.
@@ -41,6 +43,7 @@ START → refresh_data_schema → identify_skills → reset_tool_budget → orch
 | `message_summary` | `str` | Running summary of evicted messages. |
 | `number_of_tool_calls` | `int` | Total individual tool invocations in the current user turn (reset per invocation). |
 | `data_schema` | `str` | Newline-separated file listing from `agent_filesystem/` (excluding `scratchpad/`). |
+| `latest_profile_result` | `str` | Latest normalized result from `profile_forecasting_data`, overwritten on each new profiling call. |
 | `active_skills` | `list[str]` | Skill ids selected on the latest user turn (`identify_skills`). |
 | `skill_context` | `str` | Loaded guidance text from `skills/` for those ids. |
 
@@ -72,6 +75,7 @@ tools/
   human_in_loop/
     ask_user.py                              # Tool — interrupt-based clarifying question
   coding_tools/
+    build_codegen_requirement.py            # Requirement builder before code_pipeline
     code_pipeline.py                         # Codegen → Semgrep → judge → save → run
     code_scan/
       run_pipeline_sandboxed.py              # Runtime patches + RLIMIT + BLAS env + CPU pin (Linux)
@@ -86,9 +90,15 @@ tools/
     write_scratchpad.py
 prompts/
   graph_prompts.py                           # Orchestrator SYSTEM_PROMPT
+  build_codegen_requirement_prompt.py        # Requirement-builder system prompt
   skills_prompts.py                          # Skill identification (JSON) system prompt
   code_generation_prompt.py                  # Codegen system prompt
   code_judge_prompt.py                       # Judge system prompt
+output_validation/
+  build_codegen_requirement.py               # Pydantic output validation for requirement builder
+  code_generation.py                         # Pydantic output validation for code generation
+  judge_output.py                            # Pydantic output validation for the LLM judge
+  skill_selection.py                         # Pydantic output validation for orchestrator skill selection
 api/
   main.py                                    # POST /run, POST /resume
 ui/
@@ -117,6 +127,8 @@ observability/
 |------|-----------|--------------|
 | **list_agent_filesystem_data** | none | Scans the current session workspace recursively and returns all `.csv` and `.xlsx` files as `agent_filesystem/...` paths. |
 | **read_agent_filesystem_data** | `path`, `n_rows` (optional, default 5, max 100) | Opens a `.csv` or `.xlsx` file and returns columns, preview rows, and total row count. Path must start with `agent_filesystem/`. |
+| **profile_forecasting_data** | `paths`, optional `time_column`, optional `target_column`, optional `goal` | Profiles one or more tabular files for forecasting readiness, picks the most likely primary dataset, surfaces ambiguous time/target columns, suggests shared join keys, and returns a next-step recommendation. |
+| **build_codegen_requirement** | `brief` | Uses state context, available files, and the latest profiling result to draft a validated execution requirement before the orchestrator decides whether to call `code_pipeline` or ask the user for clarification. |
 | **code_pipeline** | `task`, `data_schema`, optional `previous_code_violation` | Codegen (structured output) → Semgrep → LLM judge → writes `agent_filesystem/code/pipeline_run.py` → runs it via `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On Semgrep/judge failure, pass `previous_code_violation` on retry with the prior `code_safety_evaluation.detail`. |
 | **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
 | **read_scratchpad** | none | Reads `agent_filesystem/scratchpad/scratchpad.md`. |

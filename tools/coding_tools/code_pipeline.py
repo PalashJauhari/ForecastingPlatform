@@ -37,6 +37,7 @@ from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
+from output_validation.code_generation import CodeGenerationOutput
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
 from session_paths import ensure_session_dirs, resolve_agent_path, session_id_from_config, session_root
 
@@ -106,16 +107,6 @@ class CodePipelineInput(BaseModel):
             "Empty on the first attempt. Helps the model fix the issue without repeating the violation."
         ),
     )
-
-
-class CodeGenerationOutput(BaseModel):
-    """Structured response returned by the code generation model."""
-
-    filename: str = Field(description="Descriptive Python filename ending in .py.")
-    explanation: str = Field(description="Short explanation of the generated script.")
-    code: str = Field(description="Full runnable Python source.")
-
-
 @observe(name="tool.code_pipeline", as_type="tool")
 def _code_pipeline_impl(
     task: str,
@@ -161,10 +152,7 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
-    llm = ChatOpenAI(
-        model=CODING_MODEL,
-        temperature=0,
-    ).with_structured_output(CodeGenerationOutput)
+    llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput)
     # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (schema + retries).
     user_payload = "## Task\n" + task.strip() + "\n\n## Data schema\n" + data_schema.strip()
     if previous_code_violation.strip():

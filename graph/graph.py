@@ -29,13 +29,16 @@ from observability.langfuse_handler import (
     serialize_messages,
 )
 from middleware.tool_call_limit import check_tool_call_limit
+from output_validation.skill_selection import SkillSelection
 from prompts.graph_prompts import SYSTEM_PROMPT
 from prompts.skills_prompts import SKILL_IDENTIFICATION_PROMPT
 from session_paths import session_id_from_config, session_root, to_agent_path
 from skills.loader import PRIORITY_ORDER, load_skills
 from tools.human_in_loop.ask_user import ask_user
+from tools.coding_tools.build_codegen_requirement import build_codegen_requirement
 from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
+from tools.file_management_tools.profile_forecasting_data import profile_forecasting_data
 from tools.file_management_tools.read_agent_filesystem_data import read_agent_filesystem_data
 from tools.file_management_tools.read_scratchpad import read_scratchpad
 from tools.file_management_tools.write_scratchpad import write_scratchpad
@@ -52,35 +55,6 @@ TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
 _VALID_SKILL_IDS = frozenset(PRIORITY_ORDER)
-
-
-class SkillSelection(BaseModel):
-    """Structured response for the skill selector."""
-
-    skills: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Subset of: eda, data_processing, feature_engineering, modeling, visualisation."
-        ),
-    )
-
-
-def _message_content_text(msg: Any) -> str:
-    """Normalize LangChain message content to a string for JSON parsing."""
-    c = getattr(msg, "content", "")
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        parts = []
-        for block in c:
-            if isinstance(block, dict) and "text" in block:
-                parts.append(block["text"])
-            else:
-                parts.append(str(block))
-        return "".join(parts)
-    return str(c)
-
-
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -102,6 +76,10 @@ class AgentState(TypedDict):
         data_schema          — newline-separated listing of data files currently in
                                ``agent_filesystem/`` (excluding ``scratchpad/``).
                                Refreshed before every orchestrator call.
+        latest_profile_result — latest structured result returned by
+                               ``profile_forecasting_data``. Overwritten on each
+                               new profiling call so planning tools can read a
+                               normalized current profile from state.
         active_skills        — skill ids chosen by ``identify_skills`` on the latest user turn.
         skill_context        — assembled ``approach.md`` + reference snippets for those skills.
     """
@@ -109,6 +87,7 @@ class AgentState(TypedDict):
     message_summary: str
     number_of_tool_calls: int
     data_schema: str
+    latest_profile_result: str
     active_skills: list[str]
     skill_context: str
 
@@ -120,6 +99,8 @@ class AgentState(TypedDict):
 TOOLS = [
     list_agent_filesystem_data,
     read_agent_filesystem_data,
+    profile_forecasting_data,
+    build_codegen_requirement,
     code_pipeline,
     ask_user,
     read_scratchpad,
@@ -165,17 +146,14 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
     if not messages or not isinstance(messages[-1], HumanMessage):
         return {}
 
-    user_query = _message_content_text(messages[-1])
+    user_query = str(messages[-1].content)
     data_schema = state.get("data_schema", "")
     prompt = (
         f"User query: {user_query}\n\n"
         f"Available data files:\n{data_schema}\n\n"
         "Which skills are needed?"
     )
-    llm_structured = ChatOpenAI(
-        model=cfg["models"]["orchestrator"],
-        temperature=0,
-    ).with_structured_output(SkillSelection)
+    llm_structured = ChatOpenAI(model=cfg["models"]["orchestrator"], temperature=0).with_structured_output(SkillSelection)
     generation_input = [
         serialize_message(SystemMessage(content=SKILL_IDENTIFICATION_PROMPT)),
         serialize_message(HumanMessage(content=prompt)),
