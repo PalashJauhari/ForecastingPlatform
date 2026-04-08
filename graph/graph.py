@@ -333,7 +333,6 @@ class AnalysisGraph:
         self,
         session_id: str,
         user_query: str,
-        config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Invoke the agent graph with one user message.
@@ -341,12 +340,11 @@ class AnalysisGraph:
         Parameters
             session_id  — ``configurable.thread_id`` (conversation key).
             user_query  — user text (may include appended upload paths).
-            config      — invoke config with LangGraph runtime options.
 
         Returns
             Graph invoke result dict (``messages``, ``message_summary``, etc.).
         """
-        config = config or {}
+        config: Dict[str, Any] = {}
         # ``thread_id`` ties every turn for a session to the same checkpointed graph state.
         config["configurable"] = {"thread_id": session_id}
         # On each turn we add only the new user message and let the checkpointer load prior state.
@@ -359,7 +357,6 @@ class AnalysisGraph:
         self,
         session_id: str,
         value: Any,
-        config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Resume a paused graph (after ``ask_user`` interrupt).
@@ -367,12 +364,11 @@ class AnalysisGraph:
         Parameters
             session_id — same session that was interrupted.
             value      — the user's answer to the clarifying question.
-            config     — invoke config with LangGraph runtime options.
 
         Returns
             Graph invoke result dict.
         """
-        config = config or {}
+        config: Dict[str, Any] = {}
         config["configurable"] = {"thread_id": session_id}
         result = self.graph.invoke(Command(resume=value), config=config)
         langfuse.update_current_span(input={"session_id": session_id, "resume_value": value}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})

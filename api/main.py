@@ -42,7 +42,11 @@ ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
 
 app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
-    description="Agent API: natural-language queries with optional human-in-the-loop.",
+    description=(
+        "HTTP API for the GaussianBlurr forecasting agent. Send natural-language tasks; the agent "
+        "reads workspace data, may ask clarifying questions (interrupt / resume), and can generate "
+        "and run analysis code under guardrails. Upload CSV or Excel into the session input area first when needed."
+    ),
 )
 analysis_graph = AnalysisGraph()
 langfuse = get_langfuse_client()
@@ -116,12 +120,8 @@ async def run(
         If the agent asks a clarifying question, ``interrupted`` is ``true``
         and ``question`` contains the text.
     """
-    with propagate_attributes(
-        session_id=session_id,
-        tags=["api", "run"],
-        metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query),
-    ):
-        result = analysis_graph.run_graph(session_id, query, config={})
+    with propagate_attributes(session_id=session_id, tags=["api", "run"], metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query)):
+        result = analysis_graph.run_graph(session_id, query)
         response = get_api_response(session_id, result)
         langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None})
         return response
@@ -143,14 +143,8 @@ async def resume(
     Returns
         Same shape as ``/run``.
     """
-    with propagate_attributes(
-        session_id=session_id,
-        tags=["api", "resume"],
-        metadata=build_request_metadata(
-            endpoint="/resume", interface="fastapi", query=resume_value,
-        ),
-    ):
-        result = analysis_graph.resume(session_id, resume_value, config={})
+    with propagate_attributes(session_id=session_id, tags=["api", "resume"], metadata=build_request_metadata(endpoint="/resume", interface="fastapi", query=resume_value)):
+        result = analysis_graph.resume(session_id, resume_value)
         response = get_api_response(session_id, result)
         langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None})
         return response
