@@ -13,7 +13,7 @@ class SkillSelection(BaseModel):
     skills: list[str] = Field(
         default_factory=list,
         description=(
-            "Subset of: eda, data_processing, feature_engineering, modeling, visualisation."
+            "Subset of the optional overlays: forecasting_strategy, visualization_strategy, "
+            "results_communication, data_processing_strategy."
         ),
     )
-

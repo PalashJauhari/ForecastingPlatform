@@ -33,7 +33,7 @@ from output_validation.skill_selection import SkillSelection
 from prompts.graph_prompts import SYSTEM_PROMPT
 from prompts.skills_prompts import SKILL_IDENTIFICATION_PROMPT
 from session_paths import session_id_from_config, session_root, to_agent_path
-from skills.loader import PRIORITY_ORDER, load_skills
+from skills.loader import OVERLAY_PRIORITY, load_skill_context
 from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.build_codegen_requirement import build_codegen_requirement
 from tools.coding_tools.code_pipeline import code_pipeline
@@ -54,7 +54,7 @@ KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
-_VALID_SKILL_IDS = frozenset(PRIORITY_ORDER)
+_VALID_SKILL_IDS = frozenset(OVERLAY_PRIORITY)
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -80,8 +80,8 @@ class AgentState(TypedDict):
                                ``profile_forecasting_data``. Overwritten on each
                                new profiling call so planning tools can read a
                                normalized current profile from state.
-        active_skills        — skill ids chosen by ``identify_skills`` on the latest user turn.
-        skill_context        — assembled ``approach.md`` + reference snippets for those skills.
+        active_skills        — optional overlay skill ids chosen by ``identify_skills`` on the latest user turn.
+        skill_context        — assembled core workflow guidance plus overlay ``approach.md`` guidance.
     """
     messages: Annotated[list, add_messages]
     message_summary: str
@@ -140,7 +140,8 @@ def refresh_data_schema(state: AgentState, config: RunnableConfig) -> Dict[str, 
 def identify_skills(state: AgentState) -> Dict[str, Any]:
     """
     One structured-output LLM call per **new user turn** (last message is ``HumanMessage``).
-    Sets ``active_skills`` and ``skill_context``; on tool-loop steps returns ``{}`` (unchanged).
+    Selects optional overlay skills, while ``load_skill_context`` always prepends
+    the core ``data_science_workflow`` skill. On tool-loop steps returns ``{}``.
     """
     messages = state["messages"]
     if not messages or not isinstance(messages[-1], HumanMessage):
@@ -166,15 +167,15 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
         except Exception as e:
             generation.update(output={"error": str(e)})
             langfuse.update_current_span(metadata={"selected_skills": "", "selected_skill_count": 0}, status_message="Skill identification returned invalid structured output.")
-            return {"active_skills": [], "skill_context": ""}
+            return {"active_skills": [], "skill_context": load_skill_context([])}
         generation.update(output=resp.model_dump())
 
     if not isinstance(resp.skills, list):
-        return {"active_skills": [], "skill_context": ""}
+        return {"active_skills": [], "skill_context": load_skill_context([])}
 
     skills = [str(s) for s in resp.skills if s in _VALID_SKILL_IDS]
 
-    skill_context = load_skills(skills) if skills else ""
+    skill_context = load_skill_context(skills)
     langfuse.update_current_span(metadata={"selected_skills": ",".join(skills), "selected_skill_count": len(skills)})
     return {"active_skills": skills, "skill_context": skill_context}
 
@@ -244,12 +245,27 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
     tool_calls = list(getattr(response, "tool_calls", None) or [])
     ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
     if ask_user_calls and len(tool_calls) > 1:
-        # ``ask_user`` pauses the graph, so we trim mixed batches down to one interrupt call.
-        response = AIMessage(content="", tool_calls=[ask_user_calls[0]])
-        tool_calls = [ask_user_calls[0]]
-        langfuse.update_current_span(metadata={"ask_user_batch_trimmed": "true"})
+        # ``ask_user`` pauses the graph, so mixed batches are rejected and must be regenerated.
+        response = AIMessage(
+            content=(
+                "Invalid tool batch: `ask_user` must be the only tool call in a step. "
+                "Reissue either a single `ask_user` call or a tool batch that does not include `ask_user`."
+            ),
+        )
+        tool_calls = []
+        langfuse.update_current_span(
+            metadata={
+                "ask_user_batch_rejected": "true",
+                "ask_user_batch_trimmed": "false",
+            },
+        )
     else:
-        langfuse.update_current_span(metadata={"ask_user_batch_trimmed": "false"})
+        langfuse.update_current_span(
+            metadata={
+                "ask_user_batch_rejected": "false",
+                "ask_user_batch_trimmed": "false",
+            },
+        )
 
     # 4. Count tool calls in this orchestrator step (each tool_calls entry counts once).
     new_count = tool_calls_so_far + len(tool_calls)
@@ -291,7 +307,7 @@ class AnalysisGraph:
           context editing, summarisation, and tool call limit checks run inside
           the orchestrator node.
         * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then sandbox runner.
-        * **Skills** — ``identify_skills`` injects ``skill_context`` (from ``skills/``) into the orchestrator context on new user turns.
+        * **Skills** — ``identify_skills`` injects the always-on ``data_science_workflow`` skill plus selected overlay skills into the orchestrator context on new user turns.
     """
 
     def __init__(self) -> None:
