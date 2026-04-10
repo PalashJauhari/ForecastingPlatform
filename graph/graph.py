@@ -9,6 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any, Dict
 
+from dotenv import load_dotenv
+
+# Ensure OPENAI_API_KEY (and other vars) from project-root .env are loaded before
+# module-level ChatOpenAI clients are constructed — even when graph is imported
+# without going through api.main (e.g. scripts, tests).
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -141,7 +148,9 @@ def identify_skills(state: AgentState) -> Dict[str, Any]:
     """
     One structured-output LLM call per **new user turn** (last message is ``HumanMessage``).
     Selects optional overlay skills, while ``load_skill_context`` always prepends
-    the core ``data_science_workflow`` skill. On tool-loop steps returns ``{}``.
+    the core ``data_science_workflow`` skill. Current overlays focus on
+    tabular prep, metric answering, visual answering, and one-shot forecasting.
+    On tool-loop steps returns ``{}``.
     """
     messages = state["messages"]
     if not messages or not isinstance(messages[-1], HumanMessage):
@@ -307,7 +316,7 @@ class AnalysisGraph:
           context editing, summarisation, and tool call limit checks run inside
           the orchestrator node.
         * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then sandbox runner.
-        * **Skills** — ``identify_skills`` injects the always-on ``data_science_workflow`` skill plus selected overlay skills into the orchestrator context on new user turns.
+        * **Skills** — ``identify_skills`` injects the always-on ``data_science_workflow`` skill plus selected overlay skills such as ``tabular_prep``, ``metric_answering``, ``visual_answering``, and ``one_shot_forecast`` into the orchestrator context on new user turns.
     """
 
     def __init__(self) -> None:

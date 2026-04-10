@@ -6,19 +6,23 @@ The core skill `data_science_workflow` is always loaded separately.
 Your job is to choose only the additional overlay skills needed for this task.
 
 Available overlay skills (use these exact id strings):
-- forecasting_strategy: reason about time column, target, horizon, chronology, leakage, baselines, and evaluation
-- visualization_strategy: choose effective charts and visual communication strategies for the question
-- results_communication: explain findings, assumptions, limitations, and business meaning clearly
-- data_processing_strategy: reason about cleaning, reshaping, aggregation, merging, and making the dataframe usable for the task
+- tabular_prep: select files, align grain, filter, join, aggregate, reshape, and create derived columns before answering
+- metric_answering: answer direct analytical questions such as sums, averages, ratios, grouped comparisons, and KPI-style outputs
+- visual_answering: choose and produce the right chart or visual summary for the user's question
+- one_shot_forecast: produce a fast, practical projection from time-series data without doing full model search or backtesting
 
 Rules:
 - Reply with ONLY a JSON object, no prose: {"skills": ["skill1", "skill2"]}
 - Include only overlay skills directly relevant to this specific task.
 - If the message is purely conversational with no data-analysis intent (greetings, chit-chat),
   return {"skills": []}.
-- If the task is forecasting or time-series oriented, include "forecasting_strategy".
-- If the task asks for charts, plots, dashboards, or visual communication, include "visualization_strategy".
-- If the task asks for explanations, conclusions, recommendations, or interpretation of outputs, include "results_communication".
-- If the task requires cleaning, reshaping, aggregation, joins, or dataframe preparation before analysis, include "data_processing_strategy".
+- Include "tabular_prep" when the task may require filtering, grouping, merging, reshaping, grain alignment, or derived metrics.
+- Include "metric_answering" for direct metric questions, KPI questions, comparisons, ratios, totals, averages, or grouped summaries.
+- Include "visual_answering" for charts, plots, visual summaries, or when the best answer is a visualization.
+- Include "one_shot_forecast" for projection / forecasting requests that ask what is likely to happen next, but not for full model search or backtesting.
+- Sample common pairings only; these are examples, not the only valid combinations:
+  - metric questions on one or more files: ["tabular_prep", "metric_answering"]
+  - chart requests: ["tabular_prep", "visual_answering"]
+  - quick forecasting with possible prep: ["tabular_prep", "one_shot_forecast"]
 - Do not return all four skills unless the query truly needs all of them.
 """

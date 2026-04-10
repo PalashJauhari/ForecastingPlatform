@@ -14,10 +14,10 @@ ALWAYS_LOADED_SKILLS = [
 ]
 
 OVERLAY_PRIORITY = [
-    "forecasting_strategy",
-    "visualization_strategy",
-    "results_communication",
-    "data_processing_strategy",
+    "tabular_prep",
+    "metric_answering",
+    "visual_answering",
+    "one_shot_forecast",
 ]
 
 

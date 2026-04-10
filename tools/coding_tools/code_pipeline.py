@@ -9,6 +9,8 @@ Pipeline order
     4. **Save** — ``pipeline_run.py`` under ``paths.code`` (overwrites).
     5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
        (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
+       The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
+       so generated scripts cannot read those variables even if static checks were bypassed.
 
 On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
 write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
@@ -66,6 +68,36 @@ TIMEOUT = float(_pipe.get("timeout_seconds", 120))
 # Subprocess always runs ``run_pipeline_sandboxed.py`` so ``runtime_patch_scan`` wraps I/O before user code.
 SANDBOX_RUNNER = Path(__file__).resolve().parent / "code_scan" / "run_pipeline_sandboxed.py"
 langfuse = get_langfuse_client()
+
+# Strip these from the codegen subprocess env (denylist — not a scan of user source).
+_SANDBOX_ENV_DENY_EXACT: frozenset[str] = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_ORG_ID",
+        "ANTHROPIC_API_KEY",
+        "COHERE_API_KEY",
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+        "HF_TOKEN",
+        "GOOGLE_API_KEY",
+    }
+)
+_SANDBOX_ENV_DENY_PREFIX: tuple[str, ...] = ("LANGFUSE_",)
+
+
+def _env_for_sandbox_subprocess() -> dict[str, str]:
+    """Parent ``os.environ`` minus credentials the generated script must not see."""
+    out = dict(os.environ)
+    for key in list(out):
+        if key in _SANDBOX_ENV_DENY_EXACT or key.startswith(_SANDBOX_ENV_DENY_PREFIX):
+            out.pop(key, None)
+    return out
 
 
 class CodePipelineInput(BaseModel):
@@ -275,7 +307,7 @@ def _code_pipeline_impl(
             proc = subprocess.run(
                 cmd,
                 cwd=str(PROJECT_ROOT),
-                env=os.environ.copy(),
+                env=_env_for_sandbox_subprocess(),
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT,

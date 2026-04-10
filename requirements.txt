@@ -1,7 +1,11 @@
-# Environment
+# Environment — loads project-root `.env` into the process (OPENAI_API_KEY, optional Langfuse, etc.)
+# Used by `api/main.py` and `graph/graph.py` before LLM clients are constructed.
 python-dotenv>=1.0.0
 
-# LangChain + LangGraph (v1.0+ required for create_agent and middleware)
+# Typing — `graph/graph.py` uses `typing_extensions.TypedDict` for `AgentState`
+typing-extensions>=4.8.0
+
+# LangChain + LangGraph — custom StateGraph agent (`graph/graph.py`), ToolNode, checkpoints
 langchain>=1.0.0
 langchain-core>=0.3.0
 langchain-openai>=0.3.0
@@ -22,10 +26,13 @@ requests>=2.28.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
 pyyaml>=6.0
 
-# Code safety scanning
+# Code safety scanning (`code_pipeline` Semgrep gate)
 semgrep>=1.50.0
 
-# Observability (optional — only needed if using Langfuse)
+# Observability — optional; no-op / unused keys fine if Langfuse is not configured
 langfuse>=2.0.0

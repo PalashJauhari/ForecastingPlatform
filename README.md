@@ -20,8 +20,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
   - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
   - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
+  - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
-- **Skills layer** — the core `data_science_workflow` skill is always loaded, and `identify_skills` (one structured-output LLM call on each new user turn) selects optional overlay skills from `forecasting_strategy`, `visualization_strategy`, `results_communication`, and `data_processing_strategy`. `skills/loader.py` loads only each skill’s `approach.md` into `skill_context` (budget: `skills.max_skill_context_tokens`).
+- **Skills layer** — the core `data_science_workflow` skill is always loaded, and `identify_skills` (one structured-output LLM call on each new user turn) selects optional overlay skills from `tabular_prep`, `metric_answering`, `visual_answering`, and `one_shot_forecast`. `skills/loader.py` loads only each skill’s `approach.md` into `skill_context` (budget: `skills.max_skill_context_tokens`).
 - **Sessions** — `thread_id = session_id` with `InMemorySaver` (per-session checkpoints; lost on restart).
 - **Observability** — optional Langfuse callbacks when `LANGFUSE_*` keys are set, propagated via `RunnableConfig`.
 
@@ -65,8 +66,8 @@ graph/
   __init__.py
 skills/                                      # Curated reasoning guidance (approach.md per skill)
   loader.py                                  # Assembles skill_context for the orchestrator
-  data_science_workflow/ … forecasting_strategy/ … visualization_strategy/ …
-  results_communication/ … data_processing_strategy/
+  data_science_workflow/ … tabular_prep/ … metric_answering/ …
+  visual_answering/ … one_shot_forecast/ …
 middleware/
   context_editing.py                         # Truncate messages at safe turn boundaries
   summarization.py                           # Running summary of evicted messages
@@ -176,11 +177,21 @@ Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` �
 
 ## Environment (`.env`)
 
-Copy `.env.example` → `.env` and fill in your keys. **Never commit `.env` to git.**
+- **`.env`** — your real secrets live here. It is listed in `.gitignore` (along with `*.env` / `.env.*`); **never commit it**.
+- **`.env.example`** — safe template committed to the repo: same variable **names**, placeholder or empty values, and short comments. New setups: `cp .env.example .env`, then edit `.env`.
+
+`python-dotenv` loads the project-root `.env` into the process environment at startup:
+
+- **`api/main.py`** — loads before the graph is imported (FastAPI / `uvicorn`).
+- **`graph/graph.py`** — loads at the top of the module so `OPENAI_API_KEY` is set **before** module-level `ChatOpenAI` clients are constructed (e.g. scripts or tests that import `graph` without going through `main`).
+
+LangChain’s `ChatOpenAI` reads **`OPENAI_API_KEY` from the environment** by default (OpenAI SDK convention); you do not pass the key in code.
+
+The Streamlit UI talks to the HTTP API only and does **not** need an OpenAI key in the browser.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `OPENAI_API_KEY` | Yes | OpenAI API key (loaded into `os.environ` for backend LLM calls) |
 | `LANGFUSE_PUBLIC_KEY` | No | Langfuse tracing |
 | `LANGFUSE_SECRET_KEY` | No | Langfuse tracing |
 

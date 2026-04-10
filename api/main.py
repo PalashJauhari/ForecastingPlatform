@@ -97,6 +97,27 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def get_unique_upload_name(session_id: str, filename: str) -> tuple[str, bool]:
+    """
+    Return a session-local upload filename that will not overwrite an existing file.
+
+    Duplicate names are preserved by appending ``_2``, ``_3``, ... before the suffix.
+    """
+    candidate = Path(filename).name or "data"
+    stem = Path(candidate).stem or "data"
+    suffix = Path(candidate).suffix
+    renamed = False
+    version = 1
+
+    while True:
+        logical_path = f"{INPUT_DIR}/{candidate}"
+        if not resolve_agent_path(session_id, logical_path).exists():
+            return candidate, renamed
+        version += 1
+        candidate = f"{stem}_{version}{suffix}"
+        renamed = True
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -160,6 +181,7 @@ async def upload_data(
 
     ensure_session_dirs(session_id)
     saved: list[str] = []
+    renamed: list[dict[str, str]] = []
 
     for upload in files:
         name = Path(upload.filename or "").name or "data"
@@ -173,12 +195,15 @@ async def upload_data(
                     )
                 },
             )
-        logical_path = f"{INPUT_DIR}/{name}"
+        stored_name, was_renamed = get_unique_upload_name(session_id, name)
+        logical_path = f"{INPUT_DIR}/{stored_name}"
         dest = resolve_agent_path(session_id, logical_path)
         with open(dest, "wb") as f:
             shutil.copyfileobj(upload.file, f)
         saved.append(logical_path)
+        if was_renamed:
+            renamed.append({"original_name": name, "stored_name": stored_name})
 
-    response = {"saved": saved, "count": len(saved)}
+    response = {"saved": saved, "count": len(saved), "renamed": renamed}
     langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved), "session_id": session_id})
     return response

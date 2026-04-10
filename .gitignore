@@ -1,5 +1,7 @@
-# --- Secrets — NEVER commit ---
+# --- Secrets — NEVER commit real keys or tokens ---
+# Block all env files; only the tracked template is allowed (see exception below).
 .env
+**/.env
 *.env
 .env.*
 !.env.example
