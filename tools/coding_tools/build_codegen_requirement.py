@@ -8,6 +8,7 @@ orchestrator can review before deciding whether to call ``code_pipeline``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -55,17 +56,21 @@ def _build_codegen_requirement_impl(
     """
     state = runtime.state if runtime is not None else {}
     messages = list(state.get("messages", []))
-    data_schema = state.get("data_schema", "")
+    data_profile = state.get("data_profile")
+    if not isinstance(data_profile, list):
+        data_profile = []
+    data_profile_text = (
+        json.dumps(data_profile, indent=2, default=str)
+        if data_profile
+        else "(empty data_profile list — no tabular files in session)"
+    )
     message_summary = state.get("message_summary", "")
-    latest_profile_result = state.get("latest_profile_result", "")
 
     human_payload = (
         "## Orchestrator Brief\n"
         f"{brief.strip()}\n\n"
-        "## Available Data Files\n"
-        f"{data_schema or '(no available data files)'}\n\n"
-        "## Latest Profiling Result\n"
-        f"{latest_profile_result or '(no profiling result available)'}\n\n"
+        "## Session workspace (data_profile list from graph state)\n"
+        f"{data_profile_text}\n\n"
         "## Conversation Summary\n"
         f"{message_summary or '(no summary available)'}"
     )

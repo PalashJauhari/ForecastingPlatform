@@ -11,8 +11,6 @@ middleware:
     keep_recent_messages: 10
   summarization:
     token_threshold: 100000
-  tool_call_limit:
-    max_calls: 15
 
 code_pipeline:
   timeout_seconds: 120

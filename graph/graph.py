@@ -1,13 +1,17 @@
 """
 LangGraph entrypoint for the data-analysis agent: orchestrator + tools + checkpointing.
 
-Flow: ``refresh_data_schema`` → ``identify_skills`` → ``reset_tool_budget`` → ``orchestrator`` → (optional) ``tools`` loop.
+Flow: ``profile_session_file`` runs **immediately before** ``orchestrator`` on every
+orchestrator turn: once from **START**, and again after **tools** (``tools`` →
+``profile_session_file`` → ``orchestrator``). Then ``orchestrator`` → (optional) ``tools`` loop.
 Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
 """
 
 from __future__ import annotations
+import json
+from operator import add
 from pathlib import Path
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, List, Literal
 
 from dotenv import load_dotenv
 
@@ -25,8 +29,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
-from pydantic import BaseModel, Field
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
 from observability.langfuse_handler import (
@@ -35,20 +38,14 @@ from observability.langfuse_handler import (
     serialize_message,
     serialize_messages,
 )
-from middleware.tool_call_limit import check_tool_call_limit
-from output_validation.skill_selection import SkillSelection
 from prompts.graph_prompts import SYSTEM_PROMPT
-from prompts.skills_prompts import SKILL_IDENTIFICATION_PROMPT
-from session_paths import session_id_from_config, session_root, to_agent_path
-from skills.loader import OVERLAY_PRIORITY, load_skill_context
+from session_paths import session_id_from_config
 from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.build_codegen_requirement import build_codegen_requirement
 from tools.coding_tools.code_pipeline import code_pipeline
-from tools.file_management_tools.list_agent_filesystem_data import list_agent_filesystem_data
-from tools.file_management_tools.profile_forecasting_data import profile_forecasting_data
-from tools.file_management_tools.read_agent_filesystem_data import read_agent_filesystem_data
-from tools.file_management_tools.read_scratchpad import read_scratchpad
-from tools.file_management_tools.write_scratchpad import write_scratchpad
+from tools.file_management_tools.profiling_data import profile_session_workspace
+from tools.planning.write_scratchpad import write_scratchpad
+from tools.planning.write_todos import write_todos
 
 # ---------------------------------------------------------------------------
 # Config
@@ -59,9 +56,15 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
-MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
-_VALID_SKILL_IDS = frozenset(OVERLAY_PRIORITY)
+
+class TodoEntry(TypedDict):
+    """Single item in ``AgentState["todos"]`` (mirrors ``output_validation.write_todos``)."""
+
+    content: str
+    status: Literal["pending", "in_progress", "completed"]
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -77,26 +80,19 @@ class AgentState(TypedDict):
                                honour ``RemoveMessage`` for truncation.
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles.
-        number_of_tool_calls — total individual tool invocations in the current
-                               user turn; reset in ``reset_tool_budget`` when the
-                               last message is a ``HumanMessage``.
-        data_schema          — newline-separated listing of data files currently in
-                               ``agent_filesystem/`` (excluding ``scratchpad/``).
-                               Refreshed before every orchestrator call.
-        latest_profile_result — latest structured result returned by
-                               ``profile_forecasting_data``. Overwritten on each
-                               new profiling call so planning tools can read a
-                               normalized current profile from state.
-        active_skills        — optional overlay skill ids chosen by ``identify_skills`` on the latest user turn.
-        skill_context        — assembled core workflow guidance plus overlay ``approach.md`` guidance.
+        data_profile         — list of per-file profiling dicts from ``profiling_data.profile_session_workspace``
+                               (invoked by ``profile_session_file``): ``file``, ``head`` (5 rows), ``time_columns``, per-column ``dtype``,
+                               ``null_pct``, ``numeric_pct``, ``cardinality``, ``possible_categorical``,
+                               ``continuous_stats`` for numeric columns). Empty list when no CSV/XLSX;
+                               refreshed before every orchestrator call.
+        todos                — session task list maintained via ``write_todos`` (full replace each call).
+        scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
     """
     messages: Annotated[list, add_messages]
     message_summary: str
-    number_of_tool_calls: int
-    data_schema: str
-    latest_profile_result: str
-    active_skills: list[str]
-    skill_context: str
+    data_profile: List[Any]
+    todos: NotRequired[list[TodoEntry]]
+    scratchpad: Annotated[list[str], add]
 
 
 # ---------------------------------------------------------------------------
@@ -104,14 +100,11 @@ class AgentState(TypedDict):
 # ---------------------------------------------------------------------------
 
 TOOLS = [
-    list_agent_filesystem_data,
-    read_agent_filesystem_data,
-    profile_forecasting_data,
     build_codegen_requirement,
     code_pipeline,
     ask_user,
-    read_scratchpad,
     write_scratchpad,
+    write_todos,
 ]
 
 llm = ChatOpenAI(model=cfg["models"]["orchestrator"], temperature=0)
@@ -123,87 +116,18 @@ langfuse = get_langfuse_client()
 # ---------------------------------------------------------------------------
 
 
-@observe(name="graph.refresh_data_schema", capture_input=False, capture_output=False)
-def refresh_data_schema(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+@observe(name="graph.profile_session_file", capture_input=False, capture_output=False)
+def profile_session_file(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    Scan the current session workspace for ``.csv`` and ``.xlsx`` files and
-    update ``state["data_schema"]`` with logical agent paths.
+    Delegate to ``profiling_data.profile_session_workspace``: discover session CSV/XLSX,
+    profile each file, and set ``data_profile`` (in-memory / checkpoint only).
+    Does not modify ``todos`` or ``scratchpad``.
     """
     session_id = session_id_from_config(config)
-    base = session_root(session_id)
-    files = [
-        to_agent_path(session_id, f)
-        for f in sorted(base.rglob("*"))
-        if f.is_file()
-        and f.suffix.lower() in {".csv", ".xlsx"}
-    ] if base.exists() else []
-
-    output = {"data_schema": "\n".join(files) if files else "(no data files found)"}
-    langfuse.update_current_span(metadata={"file_count": len(files), "session_id": session_id})
-    return output
-
-
-@observe(name="graph.identify_skills", capture_input=False, capture_output=False)
-def identify_skills(state: AgentState) -> Dict[str, Any]:
-    """
-    One structured-output LLM call per **new user turn** (last message is ``HumanMessage``).
-    Selects optional overlay skills, while ``load_skill_context`` always prepends
-    the core ``data_science_workflow`` skill. Current overlays focus on
-    tabular prep, metric answering, visual answering, and one-shot forecasting.
-    On tool-loop steps returns ``{}``.
-    """
-    messages = state["messages"]
-    if not messages or not isinstance(messages[-1], HumanMessage):
-        return {}
-
-    user_query = str(messages[-1].content)
-    data_schema = state.get("data_schema", "")
-    prompt = (
-        f"User query: {user_query}\n\n"
-        f"Available data files:\n{data_schema}\n\n"
-        "Which skills are needed?"
-    )
-    llm_structured = ChatOpenAI(model=cfg["models"]["orchestrator"], temperature=0).with_structured_output(SkillSelection)
-    generation_input = [
-        serialize_message(SystemMessage(content=SKILL_IDENTIFICATION_PROMPT)),
-        serialize_message(HumanMessage(content=prompt)),
-    ]
-    with langfuse.start_as_current_observation(name="graph.identify_skills.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=generation_input) as generation:
-        try:
-            resp = llm_structured.invoke(
-                [SystemMessage(content=SKILL_IDENTIFICATION_PROMPT), HumanMessage(content=prompt)],
-            )
-        except Exception as e:
-            generation.update(output={"error": str(e)})
-            langfuse.update_current_span(metadata={"selected_skills": "", "selected_skill_count": 0}, status_message="Skill identification returned invalid structured output.")
-            return {"active_skills": [], "skill_context": load_skill_context([])}
-        generation.update(output=resp.model_dump())
-
-    if not isinstance(resp.skills, list):
-        return {"active_skills": [], "skill_context": load_skill_context([])}
-
-    skills = [str(s) for s in resp.skills if s in _VALID_SKILL_IDS]
-
-    skill_context = load_skill_context(skills)
-    langfuse.update_current_span(metadata={"selected_skills": ",".join(skills), "selected_skill_count": len(skills)})
-    return {"active_skills": skills, "skill_context": skill_context}
-
-
-@observe(name="graph.reset_tool_budget", capture_input=False, capture_output=False)
-def reset_tool_budget(state: AgentState) -> Dict[str, Any]:
-    """
-    Zero ``number_of_tool_calls`` when the latest message is a new user turn.
-
-    Runs after ``refresh_data_schema`` on every path into the orchestrator (initial
-    invoke, post-tool loop). When the graph is mid-tool-loop the last message is not
-    a ``HumanMessage``, so the counter is left unchanged.
-    """
-    messages = state["messages"]
-    if messages and isinstance(messages[-1], HumanMessage):
-        langfuse.update_current_span(metadata={"reset_applied": "true"})
-        return {"number_of_tool_calls": 0}
-    langfuse.update_current_span(metadata={"reset_applied": "false"})
-    return {}
+    data_profile: List[Any] = profile_session_workspace(session_id)
+    update: Dict[str, Any] = {"data_profile": data_profile}
+    langfuse.update_current_span(metadata={"profile_entries": len(data_profile), "session_id": session_id})
+    return update
 
 
 @observe(name="graph.orchestrator", capture_input=False, capture_output=False)
@@ -212,39 +136,40 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
     Core agent node.
 
     Steps executed in order:
-        1. **Tool call limit** — return early ``AIMessage`` if exceeded (budget set
-           by ``reset_tool_budget`` on each new user message).
-        2. **Summarisation + truncation** — if token estimate exceeds the
+        1. **Summarisation + truncation** — if token estimate exceeds the
            threshold, evict old messages into a running summary and
            produce ``RemoveMessage`` ops for the ``add_messages`` reducer.
-        3. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with available
-           files (``data_schema``) + conversation summary, then prior ``messages``;
-           model has tools bound (``llm_with_tools``).
-        4. **Count tool calls** — increment ``number_of_tool_calls`` by this response’s
-           ``tool_calls`` length.
+        2. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with session
+           workspace profile list (``data_profile`` as JSON) + conversation summary,
+           then prior ``messages``; model has tools bound (``llm_with_tools``).
     """
     messages = state["messages"]
     summary = state.get("message_summary", "")
 
-    tool_calls_so_far = state.get("number_of_tool_calls", 0)
-
-    # 1. Hard cap on tool invocations per user turn (see ``reset_tool_budget``).
-    limit_msg = check_tool_call_limit(tool_calls_so_far, MAX_TOOL_CALLS)
-    if limit_msg:
-        return {"messages": [limit_msg]}
     remove_ops: list = []
 
-    # 2. Evict old turns into ``message_summary`` when estimated tokens exceed threshold.
+    # 1. Evict old turns into ``message_summary`` when estimated tokens exceed threshold.
     summary, messages, remove_ops = truncate_and_summarize(
         messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
     )
 
-    # 3. System prompt + dynamic context (file list, summary, optional skill guidance) + messages.
-    skill_ctx = state.get("skill_context", "")
+    # 2. System prompt + dynamic context (session workspace profile list, todos, scratchpad, summary) + messages.
+    raw_todos = state.get("todos") or []
+    todos_block = f"Current todo list:\n{json.dumps(raw_todos, indent=2)}\n\n"
+    raw_pad = state.get("scratchpad") or []
+    pad_block = f"Scratchpad (session notes, oldest to newest):\n{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
+    data_profile = state.get("data_profile")
+    if not isinstance(data_profile, list):
+        data_profile = []
+    workspace_block = (
+        "Session workspace (data_profile list, auto-refreshed before this turn):\n"
+        f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}\n\n"
+    )
     context = (
-        f"Available data files:\n{state.get('data_schema', '')}\n\n"
+        f"{workspace_block}"
+        f"{todos_block}"
+        f"{pad_block}"
         f"Conversation summary:\n{summary}\n\n"
-        + (f"Skill guidance:\n{skill_ctx}" if skill_ctx else "")
     )
     orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
     with langfuse.start_as_current_observation(name="graph.orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages)) as generation:
@@ -253,7 +178,8 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
 
     tool_calls = list(getattr(response, "tool_calls", None) or [])
     ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
-    if ask_user_calls and len(tool_calls) > 1:
+    ask_user_batch_rejected = bool(ask_user_calls and len(tool_calls) > 1)
+    if ask_user_batch_rejected:
         # ``ask_user`` pauses the graph, so mixed batches are rejected and must be regenerated.
         response = AIMessage(
             content=(
@@ -262,28 +188,13 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
             ),
         )
         tool_calls = []
-        langfuse.update_current_span(
-            metadata={
-                "ask_user_batch_rejected": "true",
-                "ask_user_batch_trimmed": "false",
-            },
-        )
-    else:
-        langfuse.update_current_span(
-            metadata={
-                "ask_user_batch_rejected": "false",
-                "ask_user_batch_trimmed": "false",
-            },
-        )
+    langfuse.update_current_span(metadata={"ask_user_batch_rejected": "true" if ask_user_batch_rejected else "false", "ask_user_batch_trimmed": "false"})
 
-    # 4. Count tool calls in this orchestrator step (each tool_calls entry counts once).
-    new_count = tool_calls_so_far + len(tool_calls)
-    langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "tool_calls_total": new_count, "had_summary_context": "true" if bool(summary) else "false", "had_skill_context": "true" if bool(skill_ctx) else "false"})
+    langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "had_summary_context": "true" if bool(summary) else "false"})
 
     return {
         "messages": remove_ops + [response],
         "message_summary": summary,
-        "number_of_tool_calls": new_count,
     }
 
 
@@ -311,12 +222,10 @@ class AnalysisGraph:
 
     Notes
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
-        * **Tools** — list/read filesystem, ``code_pipeline``, ask_user, read/write scratchpad.
-        * **Middleware logic** — tool budget reset in ``reset_tool_budget``;
-          context editing, summarisation, and tool call limit checks run inside
-          the orchestrator node.
+        * **Tools** — ``build_codegen_requirement``, ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos`` (tabular profiles live in ``data_profile`` from ``profile_session_file``).
+        * **Middleware logic** — context editing and summarisation run inside the orchestrator node.
         * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then sandbox runner.
-        * **Skills** — ``identify_skills`` injects the always-on ``data_science_workflow`` skill plus selected overlay skills such as ``tabular_prep``, ``metric_answering``, ``visual_answering``, and ``one_shot_forecast`` into the orchestrator context on new user turns.
+        * **Skills** — the ``skills/`` package and loader remain in the repo for future use; the graph does not load skill overlays into the orchestrator for now.
     """
 
     def __init__(self) -> None:
@@ -331,21 +240,19 @@ class AnalysisGraph:
         """Construct and compile the ``StateGraph``."""
         builder = StateGraph(AgentState)
 
-        builder.add_node("refresh_data_schema", refresh_data_schema)
-        builder.add_node("identify_skills", identify_skills)
-        builder.add_node("reset_tool_budget", reset_tool_budget)
+        builder.add_node("profile_session_file", profile_session_file)
         builder.add_node("orchestrator", orchestrator)
         builder.add_node("tools", ToolNode(TOOLS))
 
-        builder.set_entry_point("refresh_data_schema")
-        builder.add_edge("refresh_data_schema", "identify_skills")
-        builder.add_edge("identify_skills", "reset_tool_budget")
-        builder.add_edge("reset_tool_budget", "orchestrator")
+        # profile_session_file always runs immediately before orchestrator:
+        #   START → profile_session_file → orchestrator
+        #   tools → profile_session_file → orchestrator
+        builder.set_entry_point("profile_session_file")
+        builder.add_edge("profile_session_file", "orchestrator")
         builder.add_conditional_edges(
             "orchestrator", should_continue, {"tools": "tools", END: END},
         )
-        # After tools run, refresh file listing so the next orchestrator turn sees new outputs.
-        builder.add_edge("tools", "refresh_data_schema")
+        builder.add_edge("tools", "profile_session_file")
 
         return builder.compile(checkpointer=self.checkpointer)
 

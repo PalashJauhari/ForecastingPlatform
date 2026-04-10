@@ -1,5 +1,5 @@
 # System prompt for the **codegen** model (``code_pipeline`` Step 1). Not used by the orchestrator.
-# The human message is assembled in ``tools/coding_tools/code_pipeline.py`` (task, data schema,
+# The human message is assembled in ``tools/coding_tools/code_pipeline.py`` (task, data profile,
 # optional ``## Previous code policy violations``). Keep section headings aligned with that builder.
 
 CODE_GENERATION_SYSTEM_PROMPT = """\
@@ -100,9 +100,9 @@ df = pd.read_csv("agent_filesystem/input/sales.csv")
 
 ---
 
-## Data schema in the user message
+## Data profile in the user message
 
-If the user message includes a **Data schema** section, use it for exact column names/casing, dtypes, date parsing (`pd.to_datetime`), and numeric vs categorical columns. If schema says unknown, infer cautiously from the task and path hints.
+If the user message includes a **Data profile** section, use it for exact column names/casing, dtypes, date parsing (`pd.to_datetime`), and numeric vs categorical columns. If the profile says unknown, infer cautiously from the task and path hints.
 
 ---
 

@@ -43,7 +43,7 @@ Use tools deliberately, not by reflex.
 
 - Use `list_agent_filesystem_data` when you need to know what data is available.
 - Use `read_agent_filesystem_data` when you need to inspect a specific file.
-- Use `profile_forecasting_data` for one-shot forecasting tasks when target, time column, frequency, or dataset readiness is unclear.
+- Rely on session **`data_profile`** (auto-refreshed list in graph state) for columns, dtypes, head rows, and time-like columns before heavier steps; use **`code_pipeline`** when you need full scans or custom stats.
 - Use `build_codegen_requirement` before `code_pipeline` when execution is needed and the task should be translated into a precise implementation brief.
 - Use `ask_user` only when a blocking ambiguity remains and it cannot be resolved safely from context.
 

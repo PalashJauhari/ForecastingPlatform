@@ -140,24 +140,6 @@ def post_upload(file_obj, session_id: str) -> Optional[str]:
     return None
 
 
-def fetch_file_preview(agent_path: str) -> Optional[dict]:
-    """Call /read-data (via POST /run) to get columns + head rows for a file."""
-    try:
-        resp = requests.post(
-            f"{API_URL}/run",
-            data={
-                "query": f"read_agent_filesystem_data path={agent_path}",
-                "session_id": "__preview__",
-            },
-            timeout=20,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return None
-
-
 def read_uploaded_file(file_obj) -> Optional[pd.DataFrame]:
     """Read an uploaded file directly into a DataFrame for instant preview."""
     try:

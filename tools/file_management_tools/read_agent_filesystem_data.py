@@ -44,7 +44,7 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRu
     names, verify row counts, or preview values.
 
     Using it before ``code_pipeline`` is recommended so you can pass the returned columns and
-    sample rows as data_schema, giving the code-generation model precise knowledge of the
+            sample rows as a data profile snippet, giving the code-generation model precise knowledge of the
     file structure.
 
     Args:

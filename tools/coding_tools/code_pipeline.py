@@ -3,7 +3,7 @@
 
 Pipeline order
     1. **Codegen** — structured output with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
-       may include task, data schema, and optional ``## Previous code policy violations`` on retry.
+       may include task, data profile, and optional ``## Previous code policy violations`` on retry.
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
     4. **Save** — ``pipeline_run.py`` under ``paths.code`` (overwrites).
@@ -122,13 +122,14 @@ class CodePipelineInput(BaseModel):
             "'Input 1: … | Input 2: … | Output: … | Merge on date and compute variance.'"
         ),
     )
-    data_schema: str = Field(
+    data_profile: str = Field(
         default="",
         description=(
             "Optional. Structured description of each input file the script will read: column names, dtypes, "
             "date formats, nullability, and sample rows if helpful. "
-            "When possible, call read_agent_filesystem_data on each input path and paste the returned columns/samples here. "
-            "Use an empty string only when the schema is unknown and inspection was not possible."
+            "Derive this from the **Session workspace** ``data_profile`` list in context (and prior tool results); "
+            "or run a small exploratory **code_pipeline** step first and summarize findings here. "
+            "Use an empty string only when the profile is unknown."
         ),
     )
     previous_code_violation: str = Field(
@@ -142,7 +143,7 @@ class CodePipelineInput(BaseModel):
 @observe(name="tool.code_pipeline", as_type="tool")
 def _code_pipeline_impl(
     task: str,
-    data_schema: str = "",
+    data_profile: str = "",
     previous_code_violation: str = "",
     session_id: str = "default",
 ) -> str:
@@ -159,7 +160,7 @@ def _code_pipeline_impl(
 
     Args:
         task: Natural-language job plus all data paths (full ``agent_filesystem/...`` strings).
-        data_schema: Optional per-file schema and samples; empty if unknown.
+        data_profile: Optional per-file structure and samples; empty if unknown.
         previous_code_violation: Optional text describing a **prior** Semgrep/judge failure on a previous codegen attempt;
             included in the model prompt so the retry respects policy. Empty on first attempt.
 
@@ -185,8 +186,8 @@ def _code_pipeline_impl(
     # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
     llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput)
-    # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (schema + retries).
-    user_payload = "## Task\n" + task.strip() + "\n\n## Data schema\n" + data_schema.strip()
+    # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (data profile + retries).
+    user_payload = "## Task\n" + task.strip() + "\n\n## Data profile\n" + data_profile.strip()
     if previous_code_violation.strip():
         user_payload += "\n\n## Previous code policy violations\n" + previous_code_violation.strip()
     prompt_messages = [
@@ -197,7 +198,7 @@ def _code_pipeline_impl(
         try:
             resp = llm.invoke(prompt_messages)
         except Exception as e:
-            generation.update(output={"error": str(e)}, metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
+            generation.update(output={"error": str(e)}, metadata={"has_data_profile": bool(data_profile.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
             result = json.dumps(
                 {
                     "code_generation": {
@@ -214,7 +215,7 @@ def _code_pipeline_impl(
             )
             langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
             return result
-        generation.update(output=resp.model_dump(), metadata={"has_data_schema": bool(data_schema.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
+        generation.update(output=resp.model_dump(), metadata={"has_data_profile": bool(data_profile.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
 
     code = resp.code.strip()
     explanation = resp.explanation.strip()
@@ -332,7 +333,7 @@ def _code_pipeline_impl(
 @tool(args_schema=CodePipelineInput)
 def code_pipeline(
     task: str,
-    data_schema: str = "",
+    data_profile: str = "",
     previous_code_violation: str = "",
     runtime: ToolRuntime | None = None,
 ) -> str:
@@ -340,7 +341,7 @@ def code_pipeline(
     session_id = session_id_from_config(runtime.config if runtime is not None else None)
     return _code_pipeline_impl(
         task=task,
-        data_schema=data_schema,
+        data_profile=data_profile,
         previous_code_violation=previous_code_violation,
         session_id=session_id,
     )

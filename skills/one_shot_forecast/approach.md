@@ -15,7 +15,7 @@ Core rules:
 - Be explicit that this is a one-shot projection, not an exhaustive model search.
 
 How to reason:
-- Use `profile_forecasting_data` early when forecast readiness is unclear.
+- Use **Session workspace** `data_profile` (time columns, dtypes, cardinality) early when forecast readiness is unclear; clarify with the user or **`code_pipeline`** as needed.
 - Check whether the history length and frequency are adequate for a credible projection.
 - If multiple files are involved, only merge covariates that are actually available at forecast time.
 - Prefer baseline-first forecasting logic and plain assumptions.

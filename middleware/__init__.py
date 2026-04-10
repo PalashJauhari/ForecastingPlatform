@@ -7,5 +7,5 @@ every middleware step is visible in the node logic.
 
 Modules
     context_editing  — token-aware truncation + running summarisation.
-    tool_call_limit  — abort the agent loop when the budget is exceeded.
+    tool_call_limit  — helper module (not wired into the graph currently).
 """
