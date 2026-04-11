@@ -6,8 +6,6 @@ the latest profiling result to produce a precise requirement that the
 orchestrator can review before deciding whether to call ``code_pipeline``.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 

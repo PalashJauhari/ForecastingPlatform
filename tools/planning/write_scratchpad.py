@@ -5,8 +5,6 @@ Uses ``Command`` so ``ToolNode`` merges via the graph reducer and appends the
 full ``note`` to state; ``ToolMessage`` content is the caller-supplied ``summary``.
 """
 
-from __future__ import annotations
-
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool

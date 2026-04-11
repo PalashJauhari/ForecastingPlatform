@@ -4,8 +4,6 @@ LangGraph tool: replace session ``todos`` in state and append a ``ToolMessage``.
 Returns a ``Command`` so ``ToolNode`` merges ``todos`` and messages into graph state.
 """
 
-from __future__ import annotations
-
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool

@@ -21,8 +21,6 @@ The LangChain ``@tool`` docstring on ``code_pipeline`` is what the orchestrator 
 module docstring is for developers maintaining the implementation.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import subprocess
@@ -343,14 +341,13 @@ def _code_pipeline_impl(
 
 @tool(args_schema=CodePipelineInput)
 def code_pipeline(
+    runtime: ToolRuntime,
     task: str,
     data_profile: str = "",
     previous_code_violation: str = "",
-    *,
-    runtime: ToolRuntime,
 ) -> str:
     """LangChain wrapper for the traced code pipeline implementation."""
-    # ``ToolRuntime`` must be required (no ``= None``) or LangGraph never injects ``config`` → session ``default``.
+    # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
     return _code_pipeline_impl(
         task=task,

@@ -13,8 +13,9 @@ Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
 2. Paths resolve only under the current session sandbox directory.
 3. Only ``.csv`` and ``.xlsx`` file reads/writes are allowed.
 4. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere.
-5. ``open()`` is allowed only for paths that **resolve inside** the session workspace, and only for
-   ``.csv`` / ``.xlsx`` (so libraries such as pandas can open files internally). Plot/image file outputs stay blocked.
+5. ``open()`` is allowed for ``.csv`` / ``.xlsx`` / ``.xls`` only (plus the global blocklist), **without**
+   requiring the path to lie under the session dir — so pandas/openpyxl can use temp files and absolute paths.
+   Pandas high-level readers still require bare session filenames and resolve into the sandbox.
 """
 
 from __future__ import annotations
@@ -35,8 +36,8 @@ GLOBALLY_BLOCKED_EXTENSIONS = {
     ".pfx", ".der", ".cer", ".p8",
 }
 
-# ``open()`` may only touch tabular files under the session dir (pandas uses ``open`` internally).
-ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx"})
+# ``open()``: tabular extensions only; path not restricted to ``SANDBOX`` (pandas/openpyxl use temps/abs paths).
+ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls"})
 
 
 # -- Validators ---------------------------------------------------------------
@@ -174,12 +175,12 @@ original_figure_savefig = Figure.savefig if Figure is not None else None
 
 def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
     """
-    ``open()`` only inside the session workspace, ``.csv`` / ``.xlsx`` only (plus global blocklist).
+    ``open()`` allowed only for ``.csv`` / ``.xlsx`` / ``.xls`` (plus global blocklist), any path.
 
-    Lets pandas/openpyxl call ``open(absolute_path)`` after our read/write wrappers resolved paths;
-    still blocks arbitrary host paths and non-tabular files under the session folder.
+    Session containment is **not** enforced here so Excel engines can open temp copies and absolute paths.
+    User-facing I/O still goes through ``read_excel`` / ``read_csv`` / ``to_*``, which stay sandboxed.
     """
-    sandbox = _require_sandbox()
+    _require_sandbox()  # ensure patches are active in the runner process
 
     if isinstance(file, int):
         if file in (0, 1, 2):
@@ -208,20 +209,7 @@ def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
         )
 
     candidate = Path(file)
-    resolved = candidate.resolve() if candidate.is_absolute() else (sandbox / candidate).resolve()
-
-    try:
-        resolved.relative_to(sandbox)
-    except ValueError as exc:
-        raise PermissionError(
-            f"\n[SANDBOX VIOLATION]\n"
-            f"  Operation : open()\n"
-            f"  Path      : {file}\n"
-            f"  Reason    : path must resolve inside the session workspace\n"
-            f"  Allowed   : {sandbox}\n"
-        ) from exc
-
-    ext = resolved.suffix.lower()
+    ext = candidate.suffix.lower()
     if ext in GLOBALLY_BLOCKED_EXTENSIONS:
         raise PermissionError(
             f"\n[SANDBOX VIOLATION]\n"
@@ -235,25 +223,18 @@ def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
             f"\n[SANDBOX VIOLATION]\n"
             f"  Operation : open()\n"
             f"  Path      : {file}\n"
-            f"  Reason    : open() is only allowed for .csv and .xlsx under the session workspace\n"
+            f"  Reason    : open() is only allowed for .csv, .xlsx, and .xls\n"
             f"  Allowed   : {ALLOWED_OPEN_EXTENSIONS}\n"
         )
-    if resolved.name == "pipeline_run.py":
-        raise PermissionError(
-            f"\n[SANDBOX VIOLATION]\n"
-            f"  Operation : open()\n"
-            f"  Path      : {file}\n"
-            f"  Reason    : pipeline_run.py is the generated runner — do not open it as data\n"
-        )
 
-    return original_open(resolved, mode, *args, **kwargs)
+    return original_open(file, mode, *args, **kwargs)
 
 
 def safe_read_excel(*args, **kwargs):
     target, rest, kw = _pop_path_target(args, kwargs, ("io",))
     if target is _MISSING:
         return original_read_excel(*args, **kwargs)
-    resolved = _require_bare_path_file(target, "pd.read_excel()", {".xlsx"})
+    resolved = _require_bare_path_file(target, "pd.read_excel()", {".xlsx", ".xls"})
     return original_read_excel(resolved, *rest, **kw)
 
 
