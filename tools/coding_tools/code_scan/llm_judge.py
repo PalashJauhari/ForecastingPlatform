@@ -24,7 +24,6 @@ def run_llm_judge(
     code: str,
     task: str,
     model_name: str,
-    path_literal_prefix: str | None = None,
 ) -> tuple[bool, str]:
     """
     Ask the judge model to accept or reject the script.
@@ -35,22 +34,13 @@ def run_llm_judge(
         ``code_safety_evaluation.detail``.
     """
     llm = ChatOpenAI(model=model_name, temperature=0).with_structured_output(JudgeOutput)
-    # Fenced block helps the model locate the script; task is the same string codegen saw in ``code_pipeline``.
-    prefix_block = ""
-    if path_literal_prefix:
-        prefix_block = (
-            "## Required path prefix (every pandas/plot path literal must start with this)\n"
-            f"`{path_literal_prefix}`\n\n"
-        )
-    human = (
-        prefix_block
-        + "## User task (filenames only)\n"
-        + task.strip()
-        + "\n\n## Generated Python\n```python\n"
-        + code
-        + "\n```\n"
-    )
-    prompt_messages = [SystemMessage(content=CODE_JUDGE_SYSTEM_PROMPT), HumanMessage(content=human)]
+    # Policy in ``CODE_JUDGE_SYSTEM_PROMPT``; same task string codegen saw, then script only in the user turn.
+    system_content = CODE_JUDGE_SYSTEM_PROMPT + "\n\n" + task.strip()
+    human_content = f"```python\n{code}\n```"
+    prompt_messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content=human_content),
+    ]
     with langfuse.start_as_current_observation(name="code_pipeline.llm_judge", as_type="generation", model=model_name, input=[serialize_message(message) for message in prompt_messages]) as generation:
         try:
             resp = llm.invoke(prompt_messages)

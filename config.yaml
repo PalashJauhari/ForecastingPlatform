@@ -1,10 +1,10 @@
 # GaussianBlurr — models, middleware tuning, and workspace paths
 
 models:
-  orchestrator: "gpt-4o-mini"
-  code_generation: "gpt-4o-mini"
-  code_judge: "gpt-4o-mini"
-  summarization: "gpt-4o-mini"
+  orchestrator: "gpt-5.4-mini"
+  code_generation: "gpt-5.4-mini"
+  code_judge: "gpt-5.4-mini"
+  summarization: "gpt-5.4-mini"
 
 middleware:
   context_editing:

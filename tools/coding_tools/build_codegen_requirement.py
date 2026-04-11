@@ -46,7 +46,7 @@ class BuildCodegenRequirementInput(BaseModel):
 @observe(name="tool.build_codegen_requirement", as_type="tool")
 def _build_codegen_requirement_impl(
     brief: str,
-    runtime: ToolRuntime | None = None,
+    runtime: ToolRuntime,
 ) -> str:
     """
     Build a detailed execution requirement for potential code generation.

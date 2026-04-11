@@ -277,7 +277,6 @@ def _code_pipeline_impl(
         code=code,
         task=task,
         model_name=JUDGE_MODEL,
-        path_literal_prefix=f"{LOGICAL_AGENT_FS}/{session_dir_for_paths(session_id)}/",
     )
     if not judge_ok:
         result = json.dumps(
@@ -347,10 +346,11 @@ def code_pipeline(
     task: str,
     data_profile: str = "",
     previous_code_violation: str = "",
-    runtime: ToolRuntime | None = None,
+    runtime: ToolRuntime,
 ) -> str:
     """LangChain wrapper for the traced code pipeline implementation."""
-    session_id = session_id_from_config(runtime.config if runtime is not None else None)
+    # ``ToolRuntime`` must be required (no ``= None``) or LangGraph never injects ``config`` → session ``default``.
+    session_id = session_id_from_config(runtime.config)
     return _code_pipeline_impl(
         task=task,
         data_profile=data_profile,

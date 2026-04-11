@@ -13,12 +13,14 @@ Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
 2. Paths resolve only under the current session sandbox directory.
 3. Only ``.csv`` and ``.xlsx`` file reads/writes are allowed.
 4. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere.
-5. ``open()`` is blocked entirely; plot/image file outputs are blocked.
+5. ``open()`` is allowed only for paths that **resolve inside** the session workspace, and only for
+   ``.csv`` / ``.xlsx`` (so libraries such as pandas can open files internally). Plot/image file outputs stay blocked.
 """
 
 from __future__ import annotations
 
 import builtins
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,9 @@ GLOBALLY_BLOCKED_EXTENSIONS = {
     ".crt", ".json", ".pem", ".key", ".p12",
     ".pfx", ".der", ".cer", ".p8",
 }
+
+# ``open()`` may only touch tabular files under the session dir (pandas uses ``open`` internally).
+ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx"})
 
 
 # -- Validators ---------------------------------------------------------------
@@ -167,23 +172,81 @@ original_figure_savefig = Figure.savefig if Figure is not None else None
 
 # -- Patched replacements -----------------------------------------------------
 
-def safe_open(path, mode="r", *args, **kwargs):  # noqa: A001
-    """``open()`` is fully blocked -- checks globally blocked extensions first."""
-    ext = Path(str(path)).suffix.lower()
+def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
+    """
+    ``open()`` only inside the session workspace, ``.csv`` / ``.xlsx`` only (plus global blocklist).
+
+    Lets pandas/openpyxl call ``open(absolute_path)`` after our read/write wrappers resolved paths;
+    still blocks arbitrary host paths and non-tabular files under the session folder.
+    """
+    sandbox = _require_sandbox()
+
+    if isinstance(file, int):
+        if file in (0, 1, 2):
+            return original_open(file, mode, *args, **kwargs)
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : open()\n"
+            f"  Reason    : only file descriptors 0, 1, 2 are allowed\n"
+        )
+
+    if isinstance(file, bytes):
+        try:
+            file = os.fsdecode(file)
+        except Exception as exc:
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : open()\n"
+                f"  Reason    : could not decode bytes path for sandbox check\n"
+            ) from exc
+
+    if not isinstance(file, (str, Path)):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : open()\n"
+            f"  Reason    : only str, os.PathLike, or int (0–2) are allowed as the file target\n"
+        )
+
+    candidate = Path(file)
+    resolved = candidate.resolve() if candidate.is_absolute() else (sandbox / candidate).resolve()
+
+    try:
+        resolved.relative_to(sandbox)
+    except ValueError as exc:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : open()\n"
+            f"  Path      : {file}\n"
+            f"  Reason    : path must resolve inside the session workspace\n"
+            f"  Allowed   : {sandbox}\n"
+        ) from exc
+
+    ext = resolved.suffix.lower()
     if ext in GLOBALLY_BLOCKED_EXTENSIONS:
         raise PermissionError(
             f"\n[SANDBOX VIOLATION]\n"
             f"  Operation : open()\n"
-            f"  Path      : {path}\n"
+            f"  Path      : {file}\n"
             f"  Reason    : '{ext}' files are globally blocked -- no exceptions\n"
+            f"  Blocked   : {GLOBALLY_BLOCKED_EXTENSIONS}\n"
         )
-    raise PermissionError(
-        f"\n[SANDBOX VIOLATION]\n"
-        f"  Operation : open()\n"
-        f"  Path      : {path}\n"
-        f"  Reason    : open() is not allowed\n"
-        f"  Use       : pd.read_excel() or pd.read_csv() instead\n"
-    )
+    if ext not in ALLOWED_OPEN_EXTENSIONS:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : open()\n"
+            f"  Path      : {file}\n"
+            f"  Reason    : open() is only allowed for .csv and .xlsx under the session workspace\n"
+            f"  Allowed   : {ALLOWED_OPEN_EXTENSIONS}\n"
+        )
+    if resolved.name == "pipeline_run.py":
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : open()\n"
+            f"  Path      : {file}\n"
+            f"  Reason    : pipeline_run.py is the generated runner — do not open it as data\n"
+        )
+
+    return original_open(resolved, mode, *args, **kwargs)
 
 
 def safe_read_excel(*args, **kwargs):
