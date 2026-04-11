@@ -378,6 +378,8 @@ rules:
   - id: block-http-serving-socketserver
     pattern-either:
       - pattern: import http.server
+      - pattern: from http import server
+      - pattern: from http import server as $X
       - pattern: from http.server import $X
       - pattern: import socketserver
       - pattern: from socketserver import $X
