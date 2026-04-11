@@ -346,6 +346,7 @@ def code_pipeline(
     task: str,
     data_profile: str = "",
     previous_code_violation: str = "",
+    *,
     runtime: ToolRuntime,
 ) -> str:
     """LangChain wrapper for the traced code pipeline implementation."""

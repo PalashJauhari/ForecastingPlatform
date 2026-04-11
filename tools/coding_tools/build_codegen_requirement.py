@@ -54,7 +54,7 @@ def _build_codegen_requirement_impl(
     The tool reads the current graph state so the orchestrator does not need to
     pass long context as visible tool arguments.
     """
-    state = runtime.state if runtime is not None else {}
+    state = runtime.state
     messages = list(state.get("messages", []))
     data_profile = state.get("data_profile")
     if not isinstance(data_profile, list):
@@ -127,7 +127,8 @@ def _build_codegen_requirement_impl(
 @tool(args_schema=BuildCodegenRequirementInput)
 def build_codegen_requirement(
     brief: str,
-    runtime: ToolRuntime | None = None,
+    runtime: ToolRuntime,
 ) -> str:
     """Draft a validated execution requirement before potential code generation."""
+    # ``ToolRuntime`` must be required (no ``= None``) or LangGraph never injects graph state / config.
     return _build_codegen_requirement_impl(brief=brief, runtime=runtime)
