@@ -19,7 +19,7 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 LOGICAL_AGENT_FS = str(cfg["paths"]["agent_filesystem"]).rstrip("/")
 SESSIONS_ROOT = (PROJECT_ROOT / cfg["paths"].get("sessions_root", "agent_sessions")).resolve()
-SESSION_SUBDIRS = ("input", "output", "processed", "scratchpad", "code")
+SESSION_SUBDIRS = ("input", "output")
 
 
 def session_id_from_config(config: Any = None) -> str:

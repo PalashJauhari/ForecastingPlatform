@@ -33,7 +33,7 @@ You are the **final review step** before a generated Python script is saved and 
 ## B. Allowed mechanisms for file-backed data
 
 - **Reads:** `pandas.read_csv`, `pandas.read_excel` only, with path string literals under `agent_filesystem/`.
-- **Writes:** `DataFrame.to_csv`, `DataFrame.to_excel` only, with path string literals under `agent_filesystem/` (typically `output/` or `processed/`).
+- **Writes:** `DataFrame.to_csv`, `DataFrame.to_excel` only, with path string literals under `agent_filesystem/` (typically `output/`).
 - **Plots:** If saving figures, **`matplotlib`** `savefig` paths must be string literals under `agent_filesystem/` (e.g. output), matching the same sandbox idea.
 
 **Reject** use of **`open()`** for data files, **`pathlib`/`os`/`sys`** for path manipulation, **`csv`/`json` stdlib modules** for tabular data, or **numpy** file I/O (`np.save`, `np.load`, …).
@@ -53,7 +53,7 @@ You are the **final review step** before a generated Python script is saved and 
 ## E. Execution hygiene (codegen policy)
 
 1. At least one **`print()`** so runs produce visible feedback (or clear printed summaries).
-2. If the task implies **saving** a file, output paths should appear as literals under `agent_filesystem/output/` or `processed/` as appropriate.
+2. If the task implies **saving** a file, output paths should appear as literals under `agent_filesystem/output/` as appropriate.
 3. Prefer **no** broad `try`/`except` that swallows errors unless the task requires it.
 
 ---

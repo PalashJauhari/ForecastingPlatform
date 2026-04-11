@@ -32,6 +32,7 @@ from langgraph.types import Command
 from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
+from middleware.tool_call_limit import check_tool_call_limit
 from observability.langfuse_handler import (
     extract_usage_details,
     get_langfuse_client,
@@ -56,6 +57,7 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
+MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 
 
 class TodoEntry(TypedDict):
@@ -85,12 +87,14 @@ class AgentState(TypedDict):
                                Empty list when no CSV/XLSX; refreshed before every orchestrator call.
         todos                — session task list maintained via ``write_todos`` (full replace each call).
         scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
+        tool_call_count      — cumulative count of orchestrator-emitted tool calls this session (parallel calls count separately).
     """
     messages: Annotated[list, add_messages]
     message_summary: str
     data_profile: List[Any]
     todos: NotRequired[list[TodoEntry]]
     scratchpad: Annotated[list[str], add]
+    tool_call_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +138,29 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
     Core agent node.
 
     Steps executed in order:
+        0. **Tool call budget** — if ``tool_call_count`` has reached ``MAX_TOOL_CALLS``,
+           append a stop ``AIMessage`` and return (no LLM call).
         1. **Summarisation + truncation** — if token estimate exceeds the
            threshold, evict old messages into a running summary and
            produce ``RemoveMessage`` ops for the ``add_messages`` reducer.
         2. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with session
            workspace profile list (``data_profile`` as JSON) + conversation summary,
            then prior ``messages``; model has tools bound (``llm_with_tools``).
+
+    If ``middleware.tool_call_limit.max_calls`` is reached before the LLM step, returns a
+    plain ``AIMessage`` (no tool calls) so routing ends at ``END``.
     """
+    limit_msg = check_tool_call_limit(
+        state.get("tool_call_count", 0),
+        MAX_TOOL_CALLS,
+    )
+    if limit_msg:
+        return {
+            "messages": [limit_msg],
+            "message_summary": state.get("message_summary", ""),
+            "tool_call_count": state.get("tool_call_count", 0),
+        }
+
     messages = state["messages"]
     summary = state.get("message_summary", "")
 
@@ -193,6 +213,7 @@ def orchestrator(state: AgentState) -> Dict[str, Any]:
     return {
         "messages": remove_ops + [response],
         "message_summary": summary,
+        "tool_call_count": state.get("tool_call_count", 0) + len(tool_calls),
     }
 
 
@@ -221,8 +242,8 @@ class AnalysisGraph:
     Notes
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
         * **Tools** — ``build_codegen_requirement``, ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos`` (tabular profiles live in ``data_profile`` from ``profile_session_file``).
-        * **Middleware logic** — context editing and summarisation run inside the orchestrator node.
-        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/code/``, then sandbox runner.
+        * **Middleware logic** — context editing, summarisation, and per-session tool-call budget run inside the orchestrator node.
+        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/output/code/``, then sandbox runner.
         * **Skills** — the ``skills/`` package and loader remain in the repo for future use; the graph does not load skill overlays into the orchestrator for now.
     """
 

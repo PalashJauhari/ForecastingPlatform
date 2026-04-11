@@ -30,6 +30,9 @@ build/
 .coverage
 htmlcov/
 
+# --- Office / docs (local guides) ---
+*.docx
+
 # --- IDE ---
 .idea/
 .vscode/
@@ -42,9 +45,6 @@ agent_sessions/
 
 agent_filesystem/input/
 agent_filesystem/output/
-agent_filesystem/processed/
-agent_filesystem/scratchpad/
-agent_filesystem/code/
 
 # --- Logs ---
 *.log

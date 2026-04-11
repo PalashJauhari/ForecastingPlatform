@@ -6,7 +6,7 @@ Pipeline order
        may include task, data profile, and optional ``## Previous code policy violations`` on retry.
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
-    4. **Save** — ``pipeline_run.py`` under ``paths.code`` (overwrites).
+    4. **Save** — ``pipeline_run.py`` under ``agent_filesystem/output/code/`` (overwrites).
     5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
        (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
        The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
@@ -57,8 +57,8 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 # Model names (``models.*`` in config.yaml).
 CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
 JUDGE_MODEL = cfg["models"].get("code_judge", cfg["models"].get("code_generation", "gpt-4o-mini"))
-# Logical location for generated ``.py`` files. The real directory is session-scoped.
-CODE_DIR = cfg["paths"]["code"]
+# Logical location for generated ``.py`` files (under ``output/``; ``output/code/`` is created on save).
+CODE_DIR = "agent_filesystem/output/code"
 
 # Execution limits: prefer ``code_pipeline``; fall back to legacy ``run_python_file`` for older configs.
 _pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
@@ -113,7 +113,7 @@ class CodePipelineInput(BaseModel):
             "Required. Natural-language specification of the analysis: what to read, compute, print, and optionally save. "
             "Rules: every CSV/Excel path the generated script must use must appear as a full string starting with "
             "agent_filesystem/ (e.g. agent_filesystem/input/data.csv). Label multiple inputs clearly (Input 1:, Input 2:). "
-            "If the script writes a file, include the full output path under agent_filesystem/output/ or processed/. "
+            "If the script writes a file, include the full output path under agent_filesystem/output/ (including intermediates). "
             "If the script only prints statistics, no output path is required. "
             "Do not use bare filenames, ./, or paths outside agent_filesystem/. "
             "Examples: "
@@ -152,7 +152,7 @@ def _code_pipeline_impl(
     Use when the user needs **new** Python code written and executed against files under
     ``agent_filesystem/`` (transformations, models, reports). The tool runs a dedicated
     codegen model, applies a **Semgrep** scan and an **LLM judge** before saving, writes the script to
-    ``agent_filesystem/code/pipeline_run.py`` (overwritten each time), then executes it in a
+    ``agent_filesystem/output/code/pipeline_run.py`` (overwritten each time), then executes it in a
     subprocess with a wall-clock timeout and resource-related environment limits.
 
     Do not use for: answering from already-loaded data alone (use read tools), or when the

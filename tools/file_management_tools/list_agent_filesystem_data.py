@@ -25,7 +25,7 @@ def _list_agent_filesystem_data_impl(runtime: ToolRuntime) -> str:
       - "files": list of matching file paths, e.g.
             [
               "agent_filesystem/input/sales.csv",
-              "agent_filesystem/processed/clean.xlsx"
+              "agent_filesystem/output/clean.xlsx"
             ]
       - "count": total number of files found (int).
 

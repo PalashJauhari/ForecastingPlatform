@@ -24,11 +24,10 @@ Deliver accurate **data analysis**: explore, clean, transform, model, and report
 ## 5. Workspace layout
 | Location | Use |
 |----------|-----|
-| `agent_filesystem/input/` | Uploaded CSV/Excel to analyze |
-| `agent_filesystem/output/` | Final CSV/Excel results and predictions |
-| `agent_filesystem/processed/` | Intermediate CSV/Excel if needed |
-| `agent_filesystem/scratchpad/` | Optional on-disk folder; **agent working notes** live in session **scratchpad** state via **write_scratchpad** (shown each turn)—not for CSV/Excel |
-| `agent_filesystem/code/` | Generated `.py` scripts produced by the code-generation flow |
+| `agent_filesystem/input/` | Uploaded CSV/Excel files to analyze |
+| `agent_filesystem/output/` | All outputs: final results, plots, intermediate CSV/Excel, and generated `.py` scripts (under `output/code/`) |
+
+Agent working notes live in graph **scratchpad** state via **write_scratchpad**—not as a separate on-disk folder under `agent_filesystem/`.
 
 All `agent_filesystem/...` paths refer to the **current session workspace**. Use them exactly as written; do not invent session ids or alternate base folders.
 
@@ -38,7 +37,7 @@ Data previews (rows/columns) still consume **conversation context**. If a table 
 **What to do:** **Summarize** what matters (schema, key columns, ranges, sample patterns), **truncate** your own reasoning to a compact description, save with **write_scratchpad** if you need it across turns: put **full detail** in **note** (shown under **Scratchpad** in context) and a **1–2 line summary** in **summary** (tool result in chat; schema caps length), then **move forward**—do not stall waiting for impossible full in-context dumps. For work that truly needs **every row**, rely on **code execution** over the file on disk (generate and run a script) rather than inlining raw data in messages.
 
 ## 7. Saved files and answering the user
-You may see paths inside **Session workspace** (`data_profile` list) (or elsewhere in the task) that point to **already saved** CSV/Excel under `agent_filesystem/`—for example prior outputs in `output/` or `processed/`, or uploads in `input/`. The user’s question may only need you to interpret that context and answer—**not** to generate or run new code every time.
+You may see paths inside **Session workspace** (`data_profile` list) (or elsewhere in the task) that point to **already saved** CSV/Excel under `agent_filesystem/`—for example prior outputs under `output/`, or uploads in `input/`. The user’s question may only need you to interpret that context and answer—**not** to generate or run new code every time.
 
 When the question is about data at a path under `agent_filesystem/`, use the **Session workspace** list in context and **answer from that** when it suffices. For row-level detail or statistics, use **code_pipeline** (or a short clarifying question) rather than assuming a separate read tool exists.
 
