@@ -1,9 +1,8 @@
 """
-Session tabular profiling: per-file head sample, dtypes, time-like columns,
-cardinality, categorical hints, and numeric summaries.
+Session tabular profiling: minimal preview (``pandas.DataFrame.head``) per file.
 
 Used by ``profile_session_file`` in ``graph/graph.py``. Results live only in graph
-state ``data_profile`` (no snapshot file on disk).
+state ``data_profile`` (no snapshot file on disk). Extend with richer stats later if needed.
 """
 
 from __future__ import annotations
@@ -11,13 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from langfuse import observe
 
 from session_paths import ensure_session_dirs, resolve_agent_path, session_root, to_agent_path
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+_HEAD_ROWS = 5
 
 
 def _read_tabular_file(path: Path) -> pd.DataFrame:
@@ -29,25 +28,24 @@ def _read_tabular_file(path: Path) -> pd.DataFrame:
 def _jsonify_cell(v: Any) -> Any:
     if v is None:
         return None
-    if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, float) and (v != v or abs(v) == float("inf")):  # NaN / inf
         return None
     if hasattr(v, "isoformat"):
         try:
             return v.isoformat()
         except Exception:
             return str(v)
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        return float(v)
-    if isinstance(v, np.bool_):
-        return bool(v)
-    if pd.isna(v):
-        return None
+    if isinstance(v, (pd.Timestamp,)):
+        return str(v)
     return v
 
 
-def _head_records(df: pd.DataFrame, n: int = 5) -> list[dict[str, Any]]:
+def _head_records(df: pd.DataFrame, n: int = _HEAD_ROWS) -> list[dict[str, Any]]:
     sample = df.head(n)
     out: list[dict[str, Any]] = []
     for _, row in sample.iterrows():
@@ -55,98 +53,13 @@ def _head_records(df: pd.DataFrame, n: int = 5) -> list[dict[str, Any]]:
     return out
 
 
-def _datetime_candidate_columns(df: pd.DataFrame) -> list[str]:
-    """Column names that look like time dimensions (dtype or parse/heuristic)."""
-    found: list[str] = []
-    for col in df.columns:
-        series = df[col]
-        if pd.api.types.is_datetime64_any_dtype(series):
-            found.append(str(col))
-            continue
-        sample = series.dropna().head(50)
-        if sample.empty:
-            continue
-        parsed = pd.to_datetime(sample, errors="coerce")
-        parse_rate = float(parsed.notna().mean())
-        col_l = str(col).lower()
-        name_hint = any(t in col_l for t in ("date", "time", "timestamp", "ds"))
-        if parse_rate >= 0.7 or name_hint:
-            found.append(str(col))
-    return found
-
-
-def _possible_categorical(series: pd.Series, n_rows: int, cardinality: int) -> bool:
-    if n_rows == 0:
-        return False
-    if pd.api.types.is_bool_dtype(series):
-        return True
-    if pd.api.types.is_numeric_dtype(series):
-        # Low-cardinality integers often encode categories
-        if pd.api.types.is_integer_dtype(series) and cardinality <= min(50, max(5, n_rows // 20)):
-            return True
-        return False
-    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
-        cap = min(100, max(5, n_rows // 20))
-        return cardinality <= cap and cardinality < n_rows
-    if isinstance(series.dtype, pd.CategoricalDtype):
-        return True
-    return False
-
-
-def _continuous_stats(series: pd.Series) -> dict[str, float] | None:
-    if not pd.api.types.is_numeric_dtype(series):
-        return None
-    if pd.api.types.is_bool_dtype(series):
-        return None
-    clean = pd.to_numeric(series, errors="coerce").dropna()
-    if clean.empty:
-        return None
-    return {
-        "min": float(clean.min()),
-        "max": float(clean.max()),
-        "mean": float(clean.mean()),
-        "median": float(clean.median()),
-    }
-
-
 def _profile_one_file(logical_path: str, df: pd.DataFrame) -> dict[str, Any]:
-    n_rows = int(len(df))
-    time_columns = _datetime_candidate_columns(df)
-    time_set = set(time_columns)
-
-    column_profiles: list[dict[str, Any]] = []
-    for col in df.columns:
-        s = df[col]
-        cardinality = int(s.nunique(dropna=True))
-        null_pct = float(s.isna().mean() * 100.0) if n_rows else 0.0
-        numeric_pct: float | None = None
-        if pd.api.types.is_numeric_dtype(s):
-            coerced = pd.to_numeric(s, errors="coerce")
-            numeric_pct = float(coerced.notna().mean() * 100.0)
-        else:
-            coerced_num = pd.to_numeric(s, errors="coerce")
-            if coerced_num.notna().any():
-                numeric_pct = float(coerced_num.notna().mean() * 100.0)
-
-        column_profiles.append(
-            {
-                "name": str(col),
-                "dtype": str(s.dtype),
-                "null_pct": round(null_pct, 4),
-                "numeric_pct": None if numeric_pct is None else round(numeric_pct, 4),
-                "cardinality": cardinality,
-                "possible_categorical": _possible_categorical(s, n_rows, cardinality),
-                "time_like": str(col) in time_set,
-                "continuous_stats": _continuous_stats(s),
-            }
-        )
-
+    """Minimal profile: path, row count, column names, first ``n`` rows only."""
     return {
         "file": logical_path,
-        "row_count": n_rows,
-        "time_columns": time_columns,
-        "head": _head_records(df, 5),
-        "columns": column_profiles,
+        "row_count": int(len(df)),
+        "columns": [str(c) for c in df.columns],
+        "head": _head_records(df, _HEAD_ROWS),
     }
 
 

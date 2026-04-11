@@ -80,11 +80,9 @@ class AgentState(TypedDict):
                                honour ``RemoveMessage`` for truncation.
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles.
-        data_profile         — list of per-file profiling dicts from ``profiling_data.profile_session_workspace``
-                               (invoked by ``profile_session_file``): ``file``, ``head`` (5 rows), ``time_columns``, per-column ``dtype``,
-                               ``null_pct``, ``numeric_pct``, ``cardinality``, ``possible_categorical``,
-                               ``continuous_stats`` for numeric columns). Empty list when no CSV/XLSX;
-                               refreshed before every orchestrator call.
+        data_profile         — list of per-file preview dicts from ``profiling_data.profile_session_workspace``
+                               (``profile_session_file``): ``file``, ``row_count``, ``columns`` (names), ``head`` (5 rows).
+                               Empty list when no CSV/XLSX; refreshed before every orchestrator call.
         todos                — session task list maintained via ``write_todos`` (full replace each call).
         scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
     """

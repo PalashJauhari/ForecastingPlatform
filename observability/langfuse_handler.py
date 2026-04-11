@@ -1,14 +1,8 @@
-"""
-Shared Langfuse tracing helpers for the Forecasting Platform.
-
-This module intentionally does not expose LangChain callback handlers. The codebase
-uses Langfuse's SDK primitives directly: ``@observe`` for workflow boundaries,
-``propagate_attributes`` for request/session context, and manual observations for
-LLM generations and multi-step pipelines.
-"""
+"""Shared Langfuse tracing helpers for the Forecasting Platform."""
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -19,6 +13,10 @@ MAX_METADATA_VALUE_LEN = 200
 
 def get_langfuse_client():
     """Return the singleton Langfuse client configured from environment variables."""
+    # Langfuse Python SDK reads ``LANGFUSE_HOST``; some setups only set ``LANGFUSE_BASE_URL``.
+    base = os.getenv("LANGFUSE_BASE_URL", "").strip().rstrip("/")
+    if base and not (os.getenv("LANGFUSE_HOST") or "").strip():
+        os.environ["LANGFUSE_HOST"] = base
     return get_client()
 
 

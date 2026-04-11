@@ -6,7 +6,9 @@ python-dotenv>=1.0.0
 typing-extensions>=4.8.0
 
 # LangChain + LangGraph — custom StateGraph agent (`graph/graph.py`), ToolNode, checkpoints
-langchain>=1.0.0
+# LangChain 1.x (incl. ``ToolRuntime`` used by tools/) requires Python 3.10+. On 3.9, install stays on 0.3.x — recreate the venv with ``python3.10+`` for a full match to this repo.
+langchain>=1.0.0; python_version >= "3.10"
+langchain>=0.3.28,<1; python_version < "3.10"
 langchain-core>=0.3.0
 langchain-openai>=0.3.0
 langgraph>=0.3.0
@@ -34,5 +36,6 @@ pyyaml>=6.0
 # Code safety scanning (`code_pipeline` Semgrep gate)
 semgrep>=1.50.0
 
-# Observability — optional; no-op / unused keys fine if Langfuse is not configured
-langfuse>=2.0.0
+# Observability — ``langfuse`` 4.x (``propagate_attributes``, etc.) needs Python 3.10+; 3.9 stays on v3
+langfuse>=4.0.0; python_version >= "3.10"
+langfuse>=3.0.0,<4; python_version < "3.10"
