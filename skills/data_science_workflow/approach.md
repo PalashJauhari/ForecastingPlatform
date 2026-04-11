@@ -37,6 +37,10 @@ Always reason in this order:
 - Structure the answer around the user's goal, not around the tool sequence.
 - Prefer concise, useful outputs over showing unnecessary intermediate work.
 
+## Workspace paths
+
+All file paths in tasks and generated code: **reads** use **`agent_filesystem/<session-folder>/input/...`** or **`.../output/...`**; **writes** use **`.../output/...` only** (never save new files under `input/`). The orchestrator message states the `<session-folder>` to use. On disk: **`./agent_filesystem/<session-folder>/...`** at the project root.
+
 ## Tool-use guidance
 
 Use tools deliberately, not by reflex.

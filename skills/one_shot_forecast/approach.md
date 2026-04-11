@@ -28,6 +28,7 @@ Answer shape:
 - avoid overstating confidence when the data is thin or irregular
 
 Tooling implications:
+- In any saved CSV/plot paths, use **`agent_filesystem/<session-folder>/output/...`** (session folder from orchestrator context); same tree on disk under **`./agent_filesystem/<session-folder>/...`**.
 - Pair with `tabular_prep` if the forecasting dataset needs joining, aggregation, or cleanup before modeling.
 - Use `build_codegen_requirement` to describe the one-shot forecast workflow before `code_pipeline` when execution is needed.
 - Do not use this skill as a substitute for full backtesting or best-model selection.

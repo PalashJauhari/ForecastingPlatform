@@ -10,7 +10,7 @@ Sample question types include, but are not limited to:
 How to reason:
 - Identify the exact metric first.
 - Then identify the scope:
-  - which file or files
+  - which file or files (read paths: **`agent_filesystem/<session-folder>/input/...`** or **`.../output/...`**; any saves → **`.../output/...` only**)
   - which filters
   - which grouping level
   - which time slice

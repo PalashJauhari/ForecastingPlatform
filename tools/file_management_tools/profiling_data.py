@@ -1,8 +1,9 @@
 """
 Session tabular profiling: minimal preview (``pandas.DataFrame.head``) per file.
 
-Used by ``profile_session_file`` in ``graph/graph.py``. Results live only in graph
-state ``data_profile`` (no snapshot file on disk). Extend with richer stats later if needed.
+Used by ``profile_session_file`` in ``graph/graph.py``. Each profiled ``file`` key is a logical path
+``agent_filesystem/<session>/input|output/...`` (on disk under ``./agent_filesystem/<session>/...``).
+Results live only in graph state ``data_profile`` (no snapshot file on disk).
 """
 
 from __future__ import annotations
@@ -13,7 +14,13 @@ from typing import Any
 import pandas as pd
 from langfuse import observe
 
-from session_paths import ensure_session_dirs, resolve_agent_path, session_root, to_agent_path
+from session_paths import (
+    LOGICAL_AGENT_PREFIX,
+    ensure_session_dirs,
+    resolve_agent_path,
+    session_root,
+    to_agent_path,
+)
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 _HEAD_ROWS = 5
@@ -65,8 +72,8 @@ def _profile_one_file(logical_path: str, df: pd.DataFrame) -> dict[str, Any]:
 
 def _profile_path(session_id: str, logical_path: str) -> dict[str, Any]:
     clean = logical_path.strip()
-    if not clean.startswith("agent_filesystem/"):
-        return {"file": clean, "error": f"Path must start with 'agent_filesystem/': {clean}"}
+    if not clean.startswith(LOGICAL_AGENT_PREFIX):
+        return {"file": clean, "error": f"Path must start with '{LOGICAL_AGENT_PREFIX}': {clean}"}
     try:
         physical = resolve_agent_path(session_id, clean)
     except ValueError as e:

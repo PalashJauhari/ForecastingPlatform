@@ -448,15 +448,15 @@ if user_input and user_input.strip():
         tool_json = json.loads(last_tool) if last_tool else {}
         if isinstance(tool_json, dict):
             for v in tool_json.values():
-                if isinstance(v, str) and v.startswith("agent_filesystem/output/"):
+                if isinstance(v, str) and "/output/" in v and v.startswith("agent_filesystem/"):
                     output_files_mentioned.append(v)
     except Exception:
         pass
 
-    # Scan stdout for saved file paths (generated scripts print "Saved to agent_filesystem/output/...")
-    if last_tool and "agent_filesystem/output/" in last_tool:
+    # Scan stdout for saved file paths (e.g. "Saved to agent_filesystem/<session>/output/...")
+    if last_tool and "agent_filesystem/" in last_tool and "/output/" in last_tool:
         import re
-        found = re.findall(r"agent_filesystem/output/[\w./\-]+", last_tool)
+        found = re.findall(r"agent_filesystem/[^/\s]+/output/[\w./\-]+", last_tool)
         output_files_mentioned.extend(found)
     output_files_mentioned = list(dict.fromkeys(output_files_mentioned))  # dedupe
 

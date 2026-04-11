@@ -4,7 +4,7 @@ FastAPI HTTP API for the Forecasting Platform agent.
 Endpoints
     POST /run         — form: ``query``, ``session_id`` (``thread_id`` for the graph).
     POST /resume      — resume after an ``ask_user`` interrupt.
-    POST /upload-data — multipart: CSV/Excel files → ``agent_filesystem/input/``.
+    POST /upload-data — multipart: CSV/Excel files → ``agent_filesystem/<session>/input/``.
 
 Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
 Langfuse keys.
@@ -21,7 +21,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import yaml
 from dotenv import load_dotenv
 from langfuse import observe, propagate_attributes
 
@@ -33,10 +32,7 @@ from langchain_core.messages import AIMessage
 
 from graph import AnalysisGraph
 from observability.langfuse_handler import build_request_metadata, get_langfuse_client
-from session_paths import ensure_session_dirs, resolve_agent_path
-
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-INPUT_DIR = cfg["paths"]["input"]
+from session_paths import ensure_session_dirs, logical_input_file, resolve_agent_path
 
 ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
 
@@ -110,7 +106,7 @@ def get_unique_upload_name(session_id: str, filename: str) -> tuple[str, bool]:
     version = 1
 
     while True:
-        logical_path = f"{INPUT_DIR}/{candidate}"
+        logical_path = logical_input_file(session_id, candidate)
         if not resolve_agent_path(session_id, logical_path).exists():
             return candidate, renamed
         version += 1
@@ -196,7 +192,7 @@ async def upload_data(
                 },
             )
         stored_name, was_renamed = get_unique_upload_name(session_id, name)
-        logical_path = f"{INPUT_DIR}/{stored_name}"
+        logical_path = logical_input_file(session_id, stored_name)
         dest = resolve_agent_path(session_id, logical_path)
         with open(dest, "wb") as f:
             shutil.copyfileobj(upload.file, f)

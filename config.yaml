@@ -21,8 +21,5 @@ skills:
   max_skill_context_tokens: 3000
 
 paths:
+  # Logical prefix AND on-disk folder at repo root: ./agent_filesystem/<session>/input|output/
   agent_filesystem: "agent_filesystem"
-  sessions_root: "agent_sessions"
-  input:     "agent_filesystem/input"
-  output:    "agent_filesystem/output"
-  # Generated scripts: agent_filesystem/output/code/pipeline_run.py (created by code_pipeline; not a separate config key).

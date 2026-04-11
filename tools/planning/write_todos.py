@@ -73,7 +73,7 @@ def write_todos(todos: list[TodoItem], runtime: ToolRuntime) -> Command:
     1. Pass the **full** list each time — this tool **replaces** the stored list; it does not merge patches.
     2. Use **exactly** these statuses: `pending`, `in_progress`, `completed`.
     3. Mark a task `in_progress` **before** you start it; mark `completed` **right after** it is fully done (do not batch many completions).
-    4. Prefer **specific** task text (e.g. "Run code_pipeline to summarize agent_filesystem/input/sales.csv") over vague steps.
+    4. Prefer **specific** task text (e.g. "Run code_pipeline on agent_filesystem/demo/input/sales.csv") over vague steps.
     5. Keep at least one task `in_progress` while work remains (unless everything is `completed`).
     6. Do **not** call this tool in parallel with itself in the same step — one `write_todos` call per model turn.
 

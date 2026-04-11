@@ -6,7 +6,7 @@ Pipeline order
        may include task, data profile, and optional ``## Previous code policy violations`` on retry.
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
-    4. **Save** — ``pipeline_run.py`` under ``agent_filesystem/output/code/`` (overwrites).
+    4. **Save** — ``pipeline_run.py`` under ``agent_filesystem/<session>/output/code/`` (overwrites).
     5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
        (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
        The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
@@ -14,6 +14,9 @@ Pipeline order
 
 On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
 write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
+
+Logical paths and on-disk layout both use ``./agent_filesystem/<session-folder>/input|output/...`` at the
+repo root; generated ``pipeline_run.py`` is saved under ``.../output/code/``.
 
 The LangChain ``@tool`` docstring on ``code_pipeline`` is what the orchestrator model sees; this
 module docstring is for developers maintaining the implementation.
@@ -41,7 +44,13 @@ from observability.langfuse_handler import (
 )
 from output_validation.code_generation import CodeGenerationOutput
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
-from session_paths import ensure_session_dirs, resolve_agent_path, session_id_from_config, session_root
+from session_paths import (
+    ensure_session_dirs,
+    logical_output_code_dir,
+    resolve_agent_path,
+    session_id_from_config,
+    session_root,
+)
 
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
@@ -57,9 +66,6 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 # Model names (``models.*`` in config.yaml).
 CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
 JUDGE_MODEL = cfg["models"].get("code_judge", cfg["models"].get("code_generation", "gpt-4o-mini"))
-# Logical location for generated ``.py`` files (under ``output/``; ``output/code/`` is created on save).
-CODE_DIR = "agent_filesystem/output/code"
-
 # Execution limits: prefer ``code_pipeline``; fall back to legacy ``run_python_file`` for older configs.
 _pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
 # Hard stop for the child process (seconds); raises ``TimeoutExpired`` in the parent.
@@ -112,13 +118,15 @@ class CodePipelineInput(BaseModel):
         description=(
             "Required. Natural-language specification of the analysis: what to read, compute, print, and optionally save. "
             "Rules: every CSV/Excel path the generated script must use must appear as a full string starting with "
-            "agent_filesystem/ (e.g. agent_filesystem/input/data.csv). Label multiple inputs clearly (Input 1:, Input 2:). "
-            "If the script writes a file, include the full output path under agent_filesystem/output/ (including intermediates). "
+            "agent_filesystem/<session-folder>/ (see Session id for paths in context). "
+            "Example shape: agent_filesystem/my-session/input/data.csv and agent_filesystem/my-session/output/result.csv. "
+            "Label multiple inputs clearly (Input 1:, Input 2:). "
+            "If the script writes a file, include the full output path under the same session's output/ folder. "
             "If the script only prints statistics, no output path is required. "
             "Do not use bare filenames, ./, or paths outside agent_filesystem/. "
             "Examples: "
-            "'Input: agent_filesystem/input/sales.csv | Output: agent_filesystem/output/forecast.csv | Fit a regression and save predictions.' "
-            "'Input: agent_filesystem/input/sales.csv | Print summary statistics.' "
+            "'Input: agent_filesystem/demo/input/sales.csv | Output: agent_filesystem/demo/output/forecast.csv | Fit a regression and save predictions.' "
+            "'Input: agent_filesystem/demo/input/sales.csv | Print summary statistics.' "
             "'Input 1: … | Input 2: … | Output: … | Merge on date and compute variance.'"
         ),
     )
@@ -152,7 +160,7 @@ def _code_pipeline_impl(
     Use when the user needs **new** Python code written and executed against files under
     ``agent_filesystem/`` (transformations, models, reports). The tool runs a dedicated
     codegen model, applies a **Semgrep** scan and an **LLM judge** before saving, writes the script to
-    ``agent_filesystem/output/code/pipeline_run.py`` (overwritten each time), then executes it in a
+    ``agent_filesystem/<session>/output/code/pipeline_run.py`` (overwritten each time), then executes it in a
     subprocess with a wall-clock timeout and resource-related environment limits.
 
     Do not use for: answering from already-loaded data alone (use read tools), or when the
@@ -285,9 +293,12 @@ def _code_pipeline_impl(
     # Step 3 — Persist only after both gates pass (fixed name for the runner)
     # ------------------------------------------------------------------
     ensure_session_dirs(session_id)
-    code_dir = resolve_agent_path(session_id, CODE_DIR)
+    code_dir_logical = logical_output_code_dir(session_id)
+    code_dir = resolve_agent_path(session_id, code_dir_logical)
     session_workspace = session_root(session_id)
-    with langfuse.start_as_current_observation(name="code_pipeline.save_script", as_type="span", input={"target_dir": str(CODE_DIR)}) as save_span:
+    with langfuse.start_as_current_observation(
+        name="code_pipeline.save_script", as_type="span", input={"target_dir": code_dir_logical}
+    ) as save_span:
         code_dir.mkdir(parents=True, exist_ok=True)
         out_path = code_dir / "pipeline_run.py"
         out_path.write_text(code, encoding="utf-8")

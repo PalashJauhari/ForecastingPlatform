@@ -1,6 +1,6 @@
 # GaussianBlurr
 
-An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a logical **`agent_filesystem/`** workspace for all data I/O and generated code. Before each orchestrator turn, **`profile_session_file`** runs **`profiling_data.profile_session_workspace`**, which fills **`data_profile`** in checkpointed state with a **list** of per-file summaries (row counts, column names, preview rows). **Profiling does not write a snapshot file**—only graph state and the orchestrator prompt carry the profile. There is no list/read tool on the graph.
+An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and an **`agent_filesystem/`** workspace: logical paths **`agent_filesystem/<session>/input|output/...`** and the same layout on disk under **`./agent_filesystem/<session>/...`**. Before each orchestrator turn, **`profile_session_file`** runs **`profiling_data.profile_session_workspace`**, which fills **`data_profile`** in checkpointed state with a **list** of per-file summaries (row counts, column names, preview rows). **Profiling does not write a snapshot file**—only graph state and the orchestrator prompt carry the profile. There is no list/read tool on the graph.
 
 ---
 
@@ -14,9 +14,9 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 - **Requirement planning before codegen** — `build_codegen_requirement` reads the **`data_profile`** list (as JSON text in its planner prompt), messages, and **`message_summary`**, plus the orchestrator **`brief`**, before `code_pipeline`.
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
-- **Session-scoped storage** — the model still uses logical `agent_filesystem/...` paths, while the backend resolves them into a private physical workspace for each `session_id`.
+- **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root).
 - **Per-session tool budget** — `middleware.tool_call_limit.check_tool_call_limit` runs at the start of each `orchestrator` step; `tool_call_count` in graph state accumulates each batch of tool calls the model requests (parallel calls count separately). When the counter is already ≥ `max_calls`, the orchestrator returns a final `AIMessage` with **no** `tool_calls` **without invoking the LLM** on that step, so routing goes straight to `END`.
-- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/output/code/pipeline_run.py` → subprocess runner.
+- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/output/code/pipeline_run.py` → subprocess runner.
 - **Two-layer code sandbox** —
   - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
   - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
@@ -54,10 +54,10 @@ START → profile_session_file → orchestrator → [has tool calls?]
 
 ```
 config.yaml                                  # Models, middleware, paths, code_pipeline, skills budget
-agent_sessions/
+agent_filesystem/                          # Runtime data (gitignored); logical paths use the same names
   <session_id>/
     input/                                   # Raw uploaded files (CSV, Excel)
-    output/                                  # All agent outputs: results, plots, intermediates, and output/code/pipeline_run.py
+    output/                                  # Results, plots, intermediates, output/code/pipeline_run.py
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
@@ -161,12 +161,10 @@ skills:
   max_skill_context_tokens: 3000     # Reserved for future skill overlays (graph does not load skills today)
 
 paths:
-  agent_filesystem: "agent_filesystem"
-  sessions_root: "agent_sessions"
-  input:      "agent_filesystem/input"
-  output:     "agent_filesystem/output"
-  # Generated scripts: agent_filesystem/output/code/pipeline_run.py (created by code_pipeline)
+  agent_filesystem: "agent_filesystem"   # logical prefix + ./agent_filesystem/ on disk
 ```
+
+Logical paths: `agent_filesystem/<session-folder>/input/...` and `.../output/...`. On disk: `./agent_filesystem/<session-folder>/input|output/...` (same layout).
 
 Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` — edit to tune blocking. Memory limit (200 MiB), BLAS thread caps, and Linux CPU affinity are defined in `tools/coding_tools/code_scan/run_pipeline_sandboxed.py`, not in YAML.
 
@@ -249,13 +247,13 @@ streamlit run ui/app.py
 | Field | Required | Description |
 |-------|----------|-------------|
 | `files` | Yes | One or more `.csv` or `.xlsx` uploads |
-| `session_id` | No | Defaults to `"default"`; files are stored in that session's private physical workspace and returned as logical `agent_filesystem/input/...` paths |
+| `session_id` | No | Defaults to `"default"`; files are stored under `./agent_filesystem/<session-folder>/input/` and returned as the same path string the model uses |
 
 **Response (JSON):**
 
 | Field | Description |
 |-------|-------------|
-| `saved` | List of logical `agent_filesystem/input/...` paths |
+| `saved` | List of logical `agent_filesystem/<session-folder>/input/...` paths |
 | `count` | Number of files saved |
 | `renamed` | List of `{ "original_name", "stored_name" }` when a duplicate filename was avoided (`_2`, `_3`, … before the suffix); empty when no renames |
 
@@ -265,7 +263,7 @@ streamlit run ui/app.py
 
 - **`data_profile` vs `code_pipeline.data_profile`** — Graph state **`data_profile`** is the auto-refreshed **list** of per-file profiles. The **`code_pipeline`** tool exposes a separate **`data_profile`** **string** parameter for optional codegen hints (often a short summary pasted from the Session workspace list).
 - **Tool call cap** — per-session total via `middleware.tool_call_limit.max_calls` and `tool_call_count` state. The guard runs **before** the LLM on each orchestrator step; a single assistant step can still increment the counter by the full parallel batch size, so the running total can land **slightly above** `max_calls` if the model requests many tools in one turn when the counter was already near the limit. To reset the budget on every new user message instead, pass `tool_call_count: 0` in the dict passed to `graph.invoke` for that turn (overrides the checkpoint for that key).
-- **Ignored files** — `*.docx` is listed in `.gitignore` for local guides; `agent_sessions/` and `agent_filesystem/input/` / `output/` are ignored as runtime data.
+- **Ignored files** — `*.docx` is listed in `.gitignore` for local guides; `agent_filesystem/` is ignored as runtime data.
 - **Production:** replace `InMemorySaver` with a persistent checkpointer (e.g. `PostgresSaver`) so conversations survive restarts. Changing **`AgentState`** (field names or types such as **`data_profile`**) can break old checkpoints—use a new **`session_id`** after migrations.
 - If `code_pipeline` is blocked by Semgrep or the LLM judge, check `code_safety_evaluation.detail` in the tool result, pass `previous_code_violation` on retry, and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` if needed.
 - The Streamlit UI (`ui/app.py`) supports upload, interrupt/resume, and per-session chat state.

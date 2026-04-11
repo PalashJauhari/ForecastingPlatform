@@ -21,14 +21,14 @@ Return one JSON object with exactly these keys:
 | Key | Content |
 |-----|---------|
 | `detailed_requirement` | Structured plain-text execution brief. |
-| `dataset_paths` | List of logical workspace paths relevant to the planned work. Every entry must start with `agent_filesystem/`. |
+| `dataset_paths` | List of logical paths: `agent_filesystem/<session-folder>/input/...` or `.../output/...` (use the session folder from context). |
 | `assumptions` | List of explicit assumptions made while writing the requirement. |
 | `needs_clarification` | `true` if one blocking clarification is required before safe execution; otherwise `false`. |
 | `clarification_question` | One direct blocking question when `needs_clarification` is `true`; otherwise an empty string. |
 
 # Rules
 1. Preserve the orchestrator's actual intent.
-2. Use only logical file paths beginning with `agent_filesystem/`.
+2. Use only logical file paths with shape `agent_filesystem/<session-folder>/input|output/...` (same folders on disk under `./agent_filesystem/<session-folder>/...`). **Reads** may reference `input/` or `output/`. Any **saved artifacts** described in the requirement must use **`output/`** only.
 3. Treat the latest profiling result as a source of constraints, not background decoration.
 4. Do not silently guess business-critical facts such as the primary dataset, time column, target column, join keys, or forecast definition when they remain unclear.
 5. If clarification is needed, ask only the single most important blocking question.

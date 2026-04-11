@@ -1,5 +1,5 @@
 """
-LangChain tool: list all .csv and .xlsx files inside agent_filesystem/.
+LangChain tool: list all .csv and .xlsx under this session (logical paths ``agent_filesystem/<session>/input|output/...``, on disk ``./agent_filesystem/<session>/...``).
 """
 
 from __future__ import annotations
@@ -17,15 +17,15 @@ def _list_agent_filesystem_data_impl(runtime: ToolRuntime) -> str:
     """
     Scan the current session workspace and return all .csv and .xlsx files found.
 
-    Call this first to discover what data files are available. Each path in the
-    result starts with 'agent_filesystem/' so it can be passed directly to
-    read_agent_filesystem_data or used as an input path in ``code_pipeline``.
+    Call this first to discover what data files are available. Each path is
+    ``agent_filesystem/<session-folder>/input|output/...`` for this session and can be passed to
+    ``read_agent_filesystem_data`` or ``code_pipeline``.
 
     Returns a JSON string with two keys:
       - "files": list of matching file paths, e.g.
             [
-              "agent_filesystem/input/sales.csv",
-              "agent_filesystem/output/clean.xlsx"
+              "agent_filesystem/my-session/input/sales.csv",
+              "agent_filesystem/my-session/output/clean.xlsx"
             ]
       - "count": total number of files found (int).
 

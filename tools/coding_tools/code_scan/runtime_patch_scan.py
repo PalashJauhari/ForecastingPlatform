@@ -8,16 +8,18 @@ Intended for callers that execute LLM code in-process with ``exec`` (apply befor
 Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
 ``df.to_excel``, ``df.to_csv`` to enforce:
 
-1. All file paths resolve inside ``agent_filesystem/``
-2. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere
-3. Per-operation extension allow-lists
-4. ``open()`` is blocked entirely -- LLM must use pandas helpers
+1. Paths use ``agent_filesystem/<session-folder>/input/...`` or ``.../output/...`` and match the sandbox session directory name
+2. **Reads** may use **input** or **output**; **writes** (pandas saves + ``savefig``) may use **output** only
+3. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere
+4. Per-operation extension allow-lists
+5. ``open()`` is blocked entirely -- LLM must use pandas helpers
 """
 
 from __future__ import annotations
 
 import builtins
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 import yaml
@@ -42,7 +44,13 @@ def _require_sandbox() -> Path:
     return SANDBOX
 
 
-def _resolve_session_path(path: str, operation: str, allowed_extensions: set[str]) -> Path:
+def _resolve_session_path(
+    path: str,
+    operation: str,
+    allowed_extensions: set[str],
+    *,
+    io_mode: Literal["read", "write"],
+) -> Path:
     sandbox = _require_sandbox()
     ext = Path(path).suffix.lower()
 
@@ -72,16 +80,41 @@ def _resolve_session_path(path: str, operation: str, allowed_extensions: set[str
             f"  Reason    : path must start with {LOGICAL_AGENT_FS}/ for the current session\n"
         )
 
-    relative = Path(path[len(prefix):])
-    if relative.is_absolute():
+    rel = path[len(prefix) :].strip("/")
+    if "/" not in rel:
         raise PermissionError(
             f"\n[SANDBOX VIOLATION]\n"
             f"  Operation : {operation}\n"
             f"  Path      : {path}\n"
-            f"  Reason    : path must stay inside the current session workspace\n"
+            f"  Reason    : path must be {LOGICAL_AGENT_FS}/<session>/input|output/...\n"
+        )
+    session_key, rest = rel.split("/", 1)
+    if session_key != sandbox.name:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : path session folder {session_key!r} must match workspace {sandbox.name!r}\n"
         )
 
-    target = (sandbox / relative).resolve()
+    if io_mode == "read":
+        if not (rest.startswith("input/") or rest.startswith("output/")):
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : {operation}\n"
+                f"  Path      : {path}\n"
+                f"  Reason    : reads must use {LOGICAL_AGENT_FS}/<session>/input/... or .../output/...\n"
+            )
+    else:
+        if not rest.startswith("output/"):
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : {operation}\n"
+                f"  Path      : {path}\n"
+                f"  Reason    : writes and plots must use {LOGICAL_AGENT_FS}/<session>/output/... (not input/)\n"
+            )
+
+    target = (sandbox / rest).resolve()
     try:
         target.relative_to(sandbox)
     except ValueError as exc:
@@ -134,23 +167,31 @@ def safe_open(path, mode="r", *args, **kwargs):  # noqa: A001
 
 
 def safe_read_excel(path, *args, **kwargs):
-    resolved = _resolve_session_path(str(path), "pd.read_excel()", {".xlsx"})
+    resolved = _resolve_session_path(
+        str(path), "pd.read_excel()", {".xlsx"}, io_mode="read",
+    )
     return original_read_excel(resolved, *args, **kwargs)
 
 
 def safe_read_csv(path, *args, **kwargs):
-    resolved = _resolve_session_path(str(path), "pd.read_csv()", {".csv"})
+    resolved = _resolve_session_path(
+        str(path), "pd.read_csv()", {".csv"}, io_mode="read",
+    )
     return original_read_csv(resolved, *args, **kwargs)
 
 
 def safe_to_excel(self, path, *args, **kwargs):
-    resolved = _resolve_session_path(str(path), "df.to_excel()", {".xlsx"})
+    resolved = _resolve_session_path(
+        str(path), "df.to_excel()", {".xlsx"}, io_mode="write",
+    )
     return original_to_excel(self, resolved, *args, **kwargs)
 
 
 def safe_to_csv(self, path=None, *args, **kwargs):
     if path is not None:
-        path = _resolve_session_path(str(path), "df.to_csv()", {".csv"})
+        path = _resolve_session_path(
+            str(path), "df.to_csv()", {".csv"}, io_mode="write",
+        )
     return original_to_csv(self, path, *args, **kwargs)
 
 
@@ -159,11 +200,21 @@ def safe_pyplot_savefig(*args, **kwargs):
         raise RuntimeError("matplotlib is not available in this environment.")
     if args:
         new_args = list(args)
-        new_args[0] = _resolve_session_path(str(args[0]), "plt.savefig()", {".png", ".jpg", ".jpeg", ".pdf", ".svg"})
+        new_args[0] = _resolve_session_path(
+            str(args[0]),
+            "plt.savefig()",
+            {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
+            io_mode="write",
+        )
         return original_pyplot_savefig(*new_args, **kwargs)
     if "fname" in kwargs:
         new_kwargs = dict(kwargs)
-        new_kwargs["fname"] = _resolve_session_path(str(kwargs["fname"]), "plt.savefig()", {".png", ".jpg", ".jpeg", ".pdf", ".svg"})
+        new_kwargs["fname"] = _resolve_session_path(
+            str(kwargs["fname"]),
+            "plt.savefig()",
+            {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
+            io_mode="write",
+        )
         return original_pyplot_savefig(**new_kwargs)
     return original_pyplot_savefig(*args, **kwargs)
 
@@ -171,7 +222,12 @@ def safe_pyplot_savefig(*args, **kwargs):
 def safe_figure_savefig(self, fname, *args, **kwargs):
     if original_figure_savefig is None:
         raise RuntimeError("matplotlib is not available in this environment.")
-    resolved = _resolve_session_path(str(fname), "Figure.savefig()", {".png", ".jpg", ".jpeg", ".pdf", ".svg"})
+    resolved = _resolve_session_path(
+        str(fname),
+        "Figure.savefig()",
+        {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
+        io_mode="write",
+    )
     return original_figure_savefig(self, resolved, *args, **kwargs)
 
 

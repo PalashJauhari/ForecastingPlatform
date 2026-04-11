@@ -1,6 +1,7 @@
 # codegen_scan_semgrep.yaml
 # Complete semgrep rules for LLM generated code sandbox
-# Only allows: pd.read_excel, pd.read_csv, df.to_excel, df.to_csv inside agent_filesystem/
+# Reads: pd.read_* with agent_filesystem/<session>/input|output/...
+# Writes: df.to_* and savefig with agent_filesystem/<session>/output/... only (not input/)
 # Everything else blocked
 
 rules:
@@ -345,7 +346,7 @@ rules:
       - pattern: from urllib.error import $X
       - pattern: import urllib.robotparser
       - pattern: from urllib.robotparser import $X
-    message: "urllib submodules not allowed — use pandas with agent_filesystem paths only"
+    message: "urllib submodules not allowed — use pandas with agent_filesystem/<session>/input|output paths only"
     languages: [python]
     severity: ERROR
 
@@ -1058,28 +1059,65 @@ rules:
   - id: enforce-path-read-excel
     pattern: pd.read_excel($PATH, ...)
     pattern-not: pd.read_excel("agent_filesystem/...", ...)
-    message: "pd.read_excel must use agent_filesystem/"
+    message: "pd.read_excel must use agent_filesystem/<session>/input/ or .../output/ path string"
     languages: [python]
     severity: ERROR
 
   - id: enforce-path-read-csv
     pattern: pd.read_csv($PATH, ...)
     pattern-not: pd.read_csv("agent_filesystem/...", ...)
-    message: "pd.read_csv must use agent_filesystem/"
+    message: "pd.read_csv must use agent_filesystem/<session>/input/ or .../output/ path string"
     languages: [python]
     severity: ERROR
 
   - id: enforce-path-to-excel
     pattern: $DF.to_excel($PATH, ...)
     pattern-not: $DF.to_excel("agent_filesystem/...", ...)
-    message: "df.to_excel must use agent_filesystem/"
+    message: "df.to_excel must use agent_filesystem/<session>/output/ path string (never input/)"
     languages: [python]
     severity: ERROR
 
   - id: enforce-path-to-csv
     pattern: $DF.to_csv($PATH, ...)
     pattern-not: $DF.to_csv("agent_filesystem/...", ...)
-    message: "df.to_csv must use agent_filesystem/"
+    message: "df.to_csv must use agent_filesystem/<session>/output/ path string (never input/)"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-tabular-write-under-input
+    pattern-either:
+      - patterns:
+          - pattern: $DF.to_csv($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*\/input\/.*"$'
+      - patterns:
+          - pattern: $DF.to_excel($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*\/input\/.*"$'
+    message: "tabular writes must use .../output/..., not .../input/..."
+    languages: [python]
+    severity: ERROR
+
+  - id: block-savefig-under-input
+    pattern-either:
+      - patterns:
+          - pattern: plt.savefig($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*\/input\/.*"$'
+      - patterns:
+          - pattern: plt.savefig(..., fname=$PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*\/input\/.*"$'
+      - patterns:
+          - pattern: $FIG.savefig($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*\/input\/.*"$'
+    message: "plt.savefig/Figure.savefig must use .../output/..., not .../input/..."
     languages: [python]
     severity: ERROR
 

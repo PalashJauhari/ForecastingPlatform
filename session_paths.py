@@ -1,9 +1,17 @@
 """
-Session-aware path resolution for the agent workspace.
+Session-aware path resolution.
 
-The model keeps using logical ``agent_filesystem/...`` paths. This module maps
-those logical paths into a per-session physical workspace on disk so sessions do
-not read or overwrite each other's files.
+Logical paths (what the model and API use)::
+
+    agent_filesystem/<session-folder>/input/...   # reads (uploads); do not write new artifacts here
+    agent_filesystem/<session-folder>/output/...  # reads of prior results + all writes
+
+On disk (same shape, under the repo)::
+
+    <project>/agent_filesystem/<session-folder>/input/...
+    <project>/agent_filesystem/<session-folder>/output/...
+
+``paths.agent_filesystem`` in ``config.yaml`` sets the folder name (default ``agent_filesystem``).
 """
 
 from __future__ import annotations
@@ -18,7 +26,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 LOGICAL_AGENT_FS = str(cfg["paths"]["agent_filesystem"]).rstrip("/")
-SESSIONS_ROOT = (PROJECT_ROOT / cfg["paths"].get("sessions_root", "agent_sessions")).resolve()
+LOGICAL_AGENT_PREFIX = f"{LOGICAL_AGENT_FS}/"
+# All session workspaces live under this directory (same name as the logical root).
+SESSIONS_ROOT = (PROJECT_ROOT / LOGICAL_AGENT_FS).resolve()
 SESSION_SUBDIRS = ("input", "output")
 
 
@@ -29,47 +39,67 @@ def session_id_from_config(config: Any = None) -> str:
     return str(session_id)
 
 
-def _session_dir_name(session_id: str) -> str:
-    """Sanitize session ids before they become directory names."""
+def session_dir_for_paths(session_id: str) -> str:
+    """Directory name used in logical paths and on disk under ``agent_filesystem/``."""
     cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id.strip())
     return cleaned or "default"
 
 
 def session_root(session_id: str) -> Path:
-    """Return the physical workspace root for a session."""
-    return SESSIONS_ROOT / _session_dir_name(session_id)
+    """Physical workspace root for one session."""
+    return SESSIONS_ROOT / session_dir_for_paths(session_id)
 
 
 def ensure_session_dirs(session_id: str) -> Path:
-    """Create the standard workspace folders for a session and return its root."""
+    """Create ``input/`` and ``output/`` under the session root."""
     root = session_root(session_id)
     for subdir in SESSION_SUBDIRS:
         (root / subdir).mkdir(parents=True, exist_ok=True)
     return root
 
 
+def logical_input_file(session_id: str, filename: str) -> str:
+    """Logical path for an uploaded file in ``input/`` (basename only)."""
+    name = Path(filename).name or "data"
+    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/input/{name}"
+
+
+def logical_output_code_dir(session_id: str) -> str:
+    """Logical directory for generated ``pipeline_run.py``."""
+    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/output/code"
+
+
 def resolve_agent_path(session_id: str, logical_path: str) -> Path:
     """
-    Translate a logical ``agent_filesystem/...`` path into a session-local physical path.
-
-    The returned path is guaranteed to stay within that session's workspace root.
+    Map ``agent_filesystem/<session-folder>/...`` to a path under this session's
+    physical root. The first folder after ``agent_filesystem/`` must match the
+    current session (prevents cross-session access).
     """
     path = str(logical_path).strip()
-    prefix = f"{LOGICAL_AGENT_FS}/"
-
     if path == LOGICAL_AGENT_FS:
         return session_root(session_id)
-    if not path.startswith(prefix):
+    if not path.startswith(LOGICAL_AGENT_PREFIX):
         raise ValueError(
-            f"Path must start with '{LOGICAL_AGENT_FS}/' (got: {logical_path!r})."
+            f"Path must start with '{LOGICAL_AGENT_PREFIX}' (got: {logical_path!r}).",
         )
 
-    relative = Path(path[len(prefix):])
-    if relative.is_absolute():
-        raise ValueError("Path must stay inside agent_filesystem/.")
+    rel = path[len(LOGICAL_AGENT_PREFIX) :].strip("/")
+    if not rel:
+        raise ValueError(f"Missing session and file path after '{LOGICAL_AGENT_PREFIX}'.")
+
+    parts = rel.split("/", 1)
+    session_key = parts[0]
+    expected = session_dir_for_paths(session_id)
+    if session_key != expected:
+        raise ValueError(
+            f"Path session folder {session_key!r} must match current session {expected!r}.",
+        )
 
     root = session_root(session_id).resolve()
-    target = (root / relative).resolve()
+    if len(parts) == 1:
+        return root
+
+    target = (root / parts[1]).resolve()
     try:
         target.relative_to(root)
     except ValueError as exc:
@@ -78,8 +108,9 @@ def resolve_agent_path(session_id: str, logical_path: str) -> Path:
 
 
 def to_agent_path(session_id: str, physical_path: str | Path) -> str:
-    """Convert a session-local physical path back into the logical agent path form."""
+    """Physical path under the session root → logical ``agent_filesystem/<session>/...``."""
     root = session_root(session_id).resolve()
     target = Path(physical_path).resolve()
-    relative = target.relative_to(root)
-    return f"{LOGICAL_AGENT_FS}/{relative.as_posix()}"
+    rel = target.relative_to(root)
+    sid = session_dir_for_paths(session_id)
+    return f"{LOGICAL_AGENT_FS}/{sid}/{rel.as_posix()}"

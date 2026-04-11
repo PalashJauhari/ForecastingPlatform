@@ -1,5 +1,5 @@
 """
-LangChain tool: read a .csv or .xlsx file from agent_filesystem/ and return schema + a preview of rows.
+LangChain tool: read a .csv or .xlsx using a logical path ``agent_filesystem/<session>/input|output/...`` (same path on disk under ./agent_filesystem/).
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 from langfuse import observe
 from pydantic import BaseModel, Field
 
-from session_paths import resolve_agent_path, session_id_from_config
+from session_paths import LOGICAL_AGENT_PREFIX, resolve_agent_path, session_id_from_config
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 
@@ -19,8 +19,8 @@ ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 class ReadAgentFilesystemDataInput(BaseModel):
     path: str = Field(
         description=(
-            "Path to a .csv or .xlsx file starting with 'agent_filesystem/' "
-            "(e.g. 'agent_filesystem/input/data.csv'). Use list_agent_filesystem_data to discover files."
+            "Full logical path: agent_filesystem/<session-folder>/input|output/file "
+            "(session folder must match this session). Use list_agent_filesystem_data to discover paths."
         ),
     )
     n_rows: int = Field(
@@ -37,7 +37,7 @@ class ReadAgentFilesystemDataInput(BaseModel):
 @observe(name="tool.read_agent_filesystem_data", as_type="tool")
 def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRuntime | None = None) -> str:
     """
-    Read a .csv or .xlsx file from agent_filesystem/ and return its schema and a sample of rows.
+    Read a .csv or .xlsx via ``agent_filesystem/<session>/input|output/...``; returns schema and sample rows.
 
     Can be used any time you need to inspect or understand the contents of a data file —
     not just before ``code_pipeline``. Use it to answer questions about the data, check column
@@ -48,9 +48,8 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRu
     file structure.
 
     Args:
-        path: Full path to the file, must start with 'agent_filesystem/'
-              e.g. 'agent_filesystem/input/sales.csv'.
-              Use list_agent_filesystem_data first to get valid paths.
+        path: Logical path ``agent_filesystem/<session-folder>/input|output/...`` for this session.
+              Use list_agent_filesystem_data for valid paths.
         n_rows: Number of preview rows from the top of the file (default 5, max 100).
 
     Returns a JSON string with the following keys on success:
@@ -62,8 +61,8 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRu
       - "total_rows"      : total number of rows in the file (int).
 
     Returns a JSON string with an "error" key on failure:
-      - Path does not start with 'agent_filesystem/'
-      - Path resolves outside agent_filesystem/ (path traversal rejected)
+      - Path missing session folder or wrong session for this tool call
+      - Path escapes the session workspace (traversal rejected)
       - File not found
       - Path is a directory
       - File extension is not .csv or .xlsx
@@ -72,8 +71,10 @@ def _read_agent_filesystem_data_impl(path: str, n_rows: int = 5, runtime: ToolRu
     p = path.strip()
     session_id = session_id_from_config(runtime.config if runtime is not None else None)
 
-    if not p.startswith("agent_filesystem/"):
-        return json.dumps({"error": "Path must start with 'agent_filesystem/' (e.g. 'agent_filesystem/input/data.csv')."})
+    if not p.startswith(LOGICAL_AGENT_PREFIX):
+        return json.dumps(
+            {"error": f"Path must start with '{LOGICAL_AGENT_PREFIX}' (e.g. '{LOGICAL_AGENT_PREFIX}input/data.csv')."},
+        )
 
     try:
         target = resolve_agent_path(session_id, p)

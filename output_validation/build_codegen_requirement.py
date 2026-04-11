@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from session_paths import LOGICAL_AGENT_PREFIX
+
 
 class BuildCodegenRequirementOutput(BaseModel):
     """Validated output returned by the requirement-building tool."""
@@ -45,15 +47,15 @@ class BuildCodegenRequirementOutput(BaseModel):
     @field_validator("dataset_paths")
     @classmethod
     def validate_dataset_paths(cls, value: list[str]) -> list[str]:
-        """All referenced datasets must stay inside the logical agent workspace."""
+        """Paths must be ``agent_filesystem/<session-folder>/input|output/...`` (see planner context)."""
         cleaned: list[str] = []
         seen: set[str] = set()
 
         for path in value:
             path = path.strip()
-            if not path.startswith("agent_filesystem/"):
+            if not path.startswith(LOGICAL_AGENT_PREFIX):
                 raise ValueError(
-                    f"Dataset path must start with 'agent_filesystem/': {path!r}",
+                    f"Dataset path must start with '{LOGICAL_AGENT_PREFIX}': {path!r}",
                 )
             if path not in seen:
                 cleaned.append(path)

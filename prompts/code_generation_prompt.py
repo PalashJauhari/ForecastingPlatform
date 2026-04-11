@@ -16,7 +16,7 @@ From the **user message**, take the substantive work: analysis goal, `agent_file
 
 # Non-negotiables (check before you answer)
 1. **Response shape:** Reply with **only** a single JSON object—no markdown, no prose before/after, no code fences around the whole response.
-2. **Paths:** Every data path is a **string literal** inside `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel`, or `plt.savefig`—never assign paths to variables. All paths start with `"agent_filesystem/"`.
+2. **Paths:** Every file path is a **string literal** inside `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel`, or `plt.savefig`—never assign paths to variables. Copy `<session-folder>` from the task/context. **Reads** use **`agent_filesystem/<session-folder>/input/...`** or **`.../output/...`**. **Writes** (`to_csv`, `to_excel`, `savefig`) use **`.../output/...` only**—never write under `input/`. On disk the tree is **`./agent_filesystem/<session-folder>/...`** at the project root.
 3. **I/O:** Use **pandas** for CSV/Excel only—no `open()`, no `os`/`pathlib`/`sys`, no JSON/Parquet/pickle for data.
 4. **Scope:** One file, procedural code; do not import or run other `.py` files.
 
@@ -72,29 +72,28 @@ This list is **not** exhaustive—anything outside the allowed set is unsafe.
 
 ## Data paths under `agent_filesystem/`
 
-- Use **exact** paths from the user task. Do not invent paths not mentioned there.
-- `agent_filesystem/...` always refers to the **current session workspace**.
-- Read: `pd.read_csv("agent_filesystem/...")` or `pd.read_excel("agent_filesystem/...")`.
-- Write: `df.to_csv("agent_filesystem/output/...", index=False)` or `df.to_excel(..., index=False)`; plots: `plt.savefig("agent_filesystem/output/...")`.
+- Use **exact** paths from the user task. Every path must include the session folder.
+- **Read** from **`.../input/...`** or **`.../output/...`** (e.g. `pd.read_csv("agent_filesystem/demo/input/sales.csv")` or a prior result under `output/`).
+- **Write** only under **`.../output/...`** (e.g. `df.to_csv("agent_filesystem/demo/output/out.csv", index=False)`; `plt.savefig("agent_filesystem/demo/output/plot.png")`).
 - **No `.json`** for data. Only `.csv` / `.xlsx` via pandas.
 - **Inline literals only:**
 
 WRONG:
 ```python
-input_path = "agent_filesystem/input/sales.csv"
+input_path = "agent_filesystem/demo/input/sales.csv"
 df = pd.read_csv(input_path)
 ```
 
 CORRECT:
 ```python
-df = pd.read_csv("agent_filesystem/input/sales.csv")
+df = pd.read_csv("agent_filesystem/demo/input/sales.csv")
 ```
 
 ---
 
 ## Save vs print
 
-- **Save** when the task gives an explicit output path. After saving, print confirmation, e.g. `print("Saved to agent_filesystem/output/...")`.
+- **Save** when the task gives an explicit output path. After saving, print confirmation, e.g. `print("Saved to agent_filesystem/demo/output/...")`.
 - **Print** when there is no output path or the task asks for stats/summaries—use labelled `print` output; for DataFrames prefer `print(df.to_string())` or `print(df.head(10).to_string())`.
 - Always include **at least one** `print()` so execution produces visible feedback. When saving, also print a short summary (e.g. row count or key metrics).
 
