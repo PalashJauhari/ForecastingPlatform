@@ -1,48 +1,94 @@
 """
-Layer 2 — **Runtime patch scan**: monkey-patching for LLM-generated code execution.
+Runtime I/O sandbox for **LLM-generated pipeline code** (Layer 2).
 
-Lives under ``tools/coding_tools/`` alongside codegen and static scans.
-Intended for callers that execute LLM code in-process with ``exec`` (apply before
-``exec``, remove in ``finally``).
+Applied in the subprocess that runs ``pipeline_run.py`` (see ``run_pipeline_sandboxed.py``):
+call ``apply_patches(session_root)`` before user code runs and ``remove_patches()`` in a
+``finally`` block so the interpreter returns to normal behavior.
 
-Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
-``df.to_excel``, ``df.to_csv`` to enforce:
+**Two enforcement layers**
 
-1. **Bare filename only** for every pandas path string (e.g. ``sales.csv``). No
-   folders, no ``agent_filesystem/...`` prefixes, no silent rewriting.
-2. Paths resolve only under the current session sandbox directory.
-3. Only ``.csv`` and ``.xlsx`` file reads/writes are allowed.
-4. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere.
-5. ``open()`` is allowed for ``.csv`` / ``.xlsx`` / ``.xls`` only (plus the global blocklist), **without**
-   requiring the path to lie under the session dir — so pandas/openpyxl can use temp files and absolute paths.
-   Pandas high-level readers still require bare session filenames and resolve into the sandbox.
+1. **Pandas entry points** (``read_excel``, ``read_csv``, ``to_excel``, ``to_csv``): the model
+   must pass a **bare filename** (e.g. ``sales.csv``). The path is joined with ``session_root``,
+   resolved, and checked to stay inside that directory. Allowed extensions depend on the call
+   (Excel vs CSV); see each ``safe_*`` wrapper.
+
+2. **``builtins.open``** (used by pandas, openpyxl, and temp files): str/Path opens are allowed
+   only for ``.csv``, ``.xlsx``, and ``.xls``, **anywhere** on the host, so engines
+   can open temp copies and absolute paths. Sensitive extensions (``.pem``, ``.json``, …) are
+   always rejected.
+
+**Mimetype database passthrough**
+
+On import, openpyxl constructs ``mimetypes.MimeTypes()``, which opens files listed in
+``mimetypes.knownfiles`` (e.g. ``/etc/apache2/mime.types``). Those paths are not tabular; we
+allow **read-only** access to exactly that CPython allowlist so Excel works without widening
+arbitrary ``open()`` to other system files.
+
+**Plots**
+
+``plt.savefig`` / ``Figure.savefig`` are replaced with stubs that raise: tabular outputs only.
 """
 
 from __future__ import annotations
 
 import builtins
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+# Sentinel: ``_pop_path_target`` returns this when no path argument is present.
 _MISSING = object()
 
+# Session workspace root (``agent_filesystem/<session>/``), set by ``apply_patches``.
 SANDBOX: Path | None = None
 
+# Rejected for every I/O path (credentials, keys, arbitrary JSON reads of secrets, etc.).
 GLOBALLY_BLOCKED_EXTENSIONS = {
     ".crt", ".json", ".pem", ".key", ".p12",
     ".pfx", ".der", ".cer", ".p8",
 }
 
-# ``open()``: tabular extensions only; path not restricted to ``SANDBOX`` (pandas/openpyxl use temps/abs paths).
+# Allowed suffixes for patched ``open()`` on str/Path (not used for mimetype DB passthrough).
 ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls"})
+
+
+def _norm_open_path_key(path: str | Path) -> str:
+    """Return a canonical string key so two spellings of the same file compare equal."""
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+
+def _mimetype_knownfile_path_keys() -> frozenset[str]:
+    """Collect normalized paths from ``mimetypes.knownfiles`` plus ``realpath`` when resolvable."""
+    keys: set[str] = set()
+    for raw in getattr(mimetypes, "knownfiles", ()) or ():
+        if not raw or not isinstance(raw, str):
+            continue
+        keys.add(_norm_open_path_key(raw))
+        try:
+            real = os.path.realpath(raw)
+        except OSError:
+            continue
+        keys.add(_norm_open_path_key(real))
+    return frozenset(keys)
+
+
+# Frozen at import time; mirrors what ``mimetypes.init()`` iterates on Unix/macOS.
+MIMETYPE_DB_PATH_KEYS: frozenset[str] = _mimetype_knownfile_path_keys()
+
+
+def _open_mode_allows_write(mode: object) -> bool:
+    """Return True if the mode string can write, append, create exclusively, or update via ``+``."""
+    m = str(mode) if mode is not None else "r"
+    return any(ch in m for ch in "wWaax+")
 
 
 # -- Validators ---------------------------------------------------------------
 
 def _require_sandbox() -> Path:
+    """Return the active session root, or raise if ``apply_patches`` has not run."""
     if SANDBOX is None:
         raise RuntimeError("Session sandbox is not configured.")
     return SANDBOX
@@ -67,6 +113,7 @@ def _resolve_session_path(
     operation: str,
     allowed_extensions: set[str],
 ) -> Path:
+    """Map a bare filename to an absolute path under ``SANDBOX``; validate extension and traversal."""
     sandbox = _require_sandbox()
     raw = str(path).strip()
 
@@ -175,12 +222,19 @@ original_figure_savefig = Figure.savefig if Figure is not None else None
 
 def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
     """
-    ``open()`` allowed only for ``.csv`` / ``.xlsx`` / ``.xls`` (plus global blocklist), any path.
+    Restricted replacement for ``builtins.open`` while patches are active.
 
-    Session containment is **not** enforced here so Excel engines can open temp copies and absolute paths.
-    User-facing I/O still goes through ``read_excel`` / ``read_csv`` / ``to_*``, which stay sandboxed.
+    Evaluation order:
+
+    1. File descriptors ``0``, ``1``, ``2`` pass through (stdio).
+    2. Paths in ``MIMETYPE_DB_PATH_KEYS`` pass through **read-only** (stdlib / openpyxl).
+    3. Other str/Path targets: suffix must be in ``ALLOWED_OPEN_EXTENSIONS`` and not in
+       ``GLOBALLY_BLOCKED_EXTENSIONS``.
+
+    Session directory rules apply to **pandas** helpers, not to every ``open()`` call.
     """
-    _require_sandbox()  # ensure patches are active in the runner process
+    # Fail closed if patches were not installed (caller bug).
+    _require_sandbox()
 
     if isinstance(file, int):
         if file in (0, 1, 2):
@@ -209,6 +263,18 @@ def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
         )
 
     candidate = Path(file)
+    path_key = _norm_open_path_key(candidate)
+    # openpyxl → mimetypes reads fixed host paths; never allow writes there.
+    if path_key in MIMETYPE_DB_PATH_KEYS:
+        if _open_mode_allows_write(mode):
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : open()\n"
+                f"  Path      : {file}\n"
+                f"  Reason    : system MIME database paths are read-only passthrough\n"
+            )
+        return original_open(file, mode, *args, **kwargs)
+
     ext = candidate.suffix.lower()
     if ext in GLOBALLY_BLOCKED_EXTENSIONS:
         raise PermissionError(
@@ -231,6 +297,7 @@ def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
 
 
 def safe_read_excel(*args, **kwargs):
+    """``pd.read_excel`` with ``io`` restricted to a bare ``.xlsx`` / ``.xls`` under the session."""
     target, rest, kw = _pop_path_target(args, kwargs, ("io",))
     if target is _MISSING:
         return original_read_excel(*args, **kwargs)
@@ -239,6 +306,7 @@ def safe_read_excel(*args, **kwargs):
 
 
 def safe_read_csv(*args, **kwargs):
+    """``pd.read_csv`` with ``filepath_or_buffer`` restricted to a bare ``.csv`` under the session."""
     target, rest, kw = _pop_path_target(args, kwargs, ("filepath_or_buffer",))
     if target is _MISSING:
         return original_read_csv(*args, **kwargs)
@@ -247,6 +315,7 @@ def safe_read_csv(*args, **kwargs):
 
 
 def safe_to_excel(self, *args, **kwargs):
+    """``DataFrame.to_excel`` with ``excel_writer`` restricted to a bare ``.xlsx`` under the session."""
     target, rest, kw = _pop_path_target(args, kwargs, ("excel_writer",))
     if target is _MISSING:
         return original_to_excel(self, *args, **kwargs)
@@ -255,6 +324,7 @@ def safe_to_excel(self, *args, **kwargs):
 
 
 def safe_to_csv(self, *args, **kwargs):
+    """``DataFrame.to_csv`` with ``path_or_buf`` restricted to a bare ``.csv`` under the session (or ``None``)."""
     target, rest, kw = _pop_path_target(args, kwargs, ("path_or_buf",))
     if target is _MISSING:
         return original_to_csv(self, *args, **kwargs)
@@ -265,25 +335,32 @@ def safe_to_csv(self, *args, **kwargs):
 
 
 def safe_pyplot_savefig(*args, **kwargs):
+    """Block image export; use CSV/Excel writers for artifacts."""
     raise PermissionError(
         "\n[SANDBOX VIOLATION]\n"
         "  Operation : plt.savefig()\n"
-        "  Reason    : only .csv and .xlsx file outputs are allowed\n"
+        "  Reason    : image output is disabled; use DataFrame.to_csv / to_excel only\n"
     )
 
 
 def safe_figure_savefig(self, fname, *args, **kwargs):
+    """Block image export; use CSV/Excel writers for artifacts."""
     raise PermissionError(
         "\n[SANDBOX VIOLATION]\n"
         "  Operation : Figure.savefig()\n"
-        "  Reason    : only .csv and .xlsx file outputs are allowed\n"
+        "  Reason    : image output is disabled; use DataFrame.to_csv / to_excel only\n"
     )
 
 
 # -- Public API ---------------------------------------------------------------
 
 def apply_patches(session_root: str | Path) -> None:
-    """Swap real functions with sandboxed versions for the current session workspace."""
+    """
+    Install sandbox wrappers for ``open``, selected pandas methods, and matplotlib savefig.
+
+    ``session_root`` must be the absolute or resolvable directory for the current run
+    (typically ``agent_filesystem/<session_id>/``).
+    """
     global SANDBOX
     SANDBOX = Path(session_root).resolve()
     builtins.open = safe_open  # type: ignore[assignment]
@@ -297,7 +374,10 @@ def apply_patches(session_root: str | Path) -> None:
 
 
 def remove_patches() -> None:
-    """Restore originals. **Always** call in a ``finally`` block."""
+    """
+    Undo ``apply_patches``; always run in a ``finally`` so a failed script does not leave
+    patched globals in the subprocess interpreter.
+    """
     global SANDBOX
     SANDBOX = None
     builtins.open = original_open  # type: ignore[assignment]
