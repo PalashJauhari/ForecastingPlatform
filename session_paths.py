@@ -1,15 +1,14 @@
 """
 Session-aware path resolution.
 
-Logical paths (what the model and API use)::
+Everything for a session lives in one folder — no ``input/``, ``output/``, or ``code/`` subfolders::
 
-    agent_filesystem/<session-folder>/input/...   # reads (uploads); do not write new artifacts here
-    agent_filesystem/<session-folder>/output/...  # reads of prior results + all writes
+    agent_filesystem/<session-folder>/<filename>   # uploads, data, plots, script outputs
+    agent_filesystem/<session-folder>/pipeline_run.py  # generated runner (tool-managed; not tabular data)
 
-On disk (same shape, under the repo)::
+On disk (under the repo)::
 
-    <project>/agent_filesystem/<session-folder>/input/...
-    <project>/agent_filesystem/<session-folder>/output/...
+    <project>/agent_filesystem/<session-folder>/...
 
 ``paths.agent_filesystem`` in ``config.yaml`` sets the folder name (default ``agent_filesystem``).
 """
@@ -27,9 +26,7 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 LOGICAL_AGENT_FS = str(cfg["paths"]["agent_filesystem"]).rstrip("/")
 LOGICAL_AGENT_PREFIX = f"{LOGICAL_AGENT_FS}/"
-# All session workspaces live under this directory (same name as the logical root).
 SESSIONS_ROOT = (PROJECT_ROOT / LOGICAL_AGENT_FS).resolve()
-SESSION_SUBDIRS = ("input", "output")
 
 
 def session_id_from_config(config: Any = None) -> str:
@@ -51,22 +48,21 @@ def session_root(session_id: str) -> Path:
 
 
 def ensure_session_dirs(session_id: str) -> Path:
-    """Create ``input/`` and ``output/`` under the session root."""
+    """Create the session directory if missing."""
     root = session_root(session_id)
-    for subdir in SESSION_SUBDIRS:
-        (root / subdir).mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def logical_input_file(session_id: str, filename: str) -> str:
-    """Logical path for an uploaded file in ``input/`` (basename only)."""
+    """Logical path for an uploaded file at the session root (basename only)."""
     name = Path(filename).name or "data"
-    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/input/{name}"
+    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/{name}"
 
 
-def logical_output_code_dir(session_id: str) -> str:
-    """Logical directory for generated ``pipeline_run.py``."""
-    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/output/code"
+def logical_pipeline_run_path(session_id: str) -> str:
+    """Logical path for the generated ``pipeline_run.py`` (session root)."""
+    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/pipeline_run.py"
 
 
 def resolve_agent_path(session_id: str, logical_path: str) -> Path:

@@ -40,7 +40,7 @@ from observability.langfuse_handler import (
     serialize_messages,
 )
 from prompts.graph_prompts import SYSTEM_PROMPT
-from session_paths import LOGICAL_AGENT_FS, session_dir_for_paths, session_id_from_config
+from session_paths import session_id_from_config
 from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.build_codegen_requirement import build_codegen_requirement
 from tools.coding_tools.code_pipeline import code_pipeline
@@ -82,10 +82,13 @@ class AgentState(TypedDict):
                                honour ``RemoveMessage`` for truncation.
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles.
-        data_profile         — list of per-file preview dicts from ``profiling_data.profile_session_workspace``
-                               (``profile_session_file``). Each ``file`` is logical ``agent_filesystem/<session>/input|output/...``
-                               with keys ``file``, ``row_count``, ``columns`` (names), ``head`` (5 rows).
-                               Empty list when no CSV/XLSX; refreshed before every orchestrator call.
+        data_profile         — list of per-file profiling dicts from
+                               ``profiling_data.profile_session_workspace`` (``profile_session_file``).
+                               Each entry uses ``file`` = basename only and includes
+                               ``row_count``, ``column_count``, ``columns``, ``dtypes``,
+                               ``null_counts``, ``head``, ``column_profiles``, and
+                               ``numeric_summary``. Empty list when no CSV/XLSX;
+                               refreshed before every orchestrator call.
         todos                — session task list maintained via ``write_todos`` (full replace each call).
         scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
         tool_call_count      — cumulative count of orchestrator-emitted tool calls this session (parallel calls count separately).
@@ -122,8 +125,8 @@ langfuse = get_langfuse_client()
 @observe(name="graph.profile_session_file", capture_input=False, capture_output=False)
 def profile_session_file(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    Delegate to ``profiling_data.profile_session_workspace``: discover session CSV/XLSX,
-    profile each file, and set ``data_profile`` (in-memory / checkpoint only).
+    Delegate to ``profiling_data.profile_session_workspace``: read every top-level
+    session CSV/XLSX file, build a rich in-memory profile, and set ``data_profile``.
     Does not modify ``todos`` or ``scratchpad``.
     """
     session_id = session_id_from_config(config)
@@ -176,13 +179,9 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     )
 
     # 2. System prompt + dynamic context (session workspace profile list, todos, scratchpad, summary) + messages.
-    sid = session_dir_for_paths(session_id_from_config(config))
     paths_block = (
-        f"Session id for paths (folder name under {LOGICAL_AGENT_FS}/; special chars → underscore): `{sid}`\n"
-        f"Use only:\n"
-        f"  - {LOGICAL_AGENT_FS}/{sid}/input/... or .../output/... for reads\n"
-        f"  - {LOGICAL_AGENT_FS}/{sid}/output/... for all writes and plots (never write under input/)\n"
-        f"Same tree on disk: ./agent_filesystem/{sid}/input|output/... (project root).\n\n"
+        "Refer to every CSV/Excel by **filename only** (e.g. `sales.csv`) in messages and tool arguments. "
+        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
     )
     raw_todos = state.get("todos") or []
     todos_block = f"Current todo list:\n{json.dumps(raw_todos, indent=2)}\n\n"
@@ -256,7 +255,7 @@ class AnalysisGraph:
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
         * **Tools** — ``build_codegen_requirement``, ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos`` (tabular profiles live in ``data_profile`` from ``profile_session_file``).
         * **Middleware logic** — context editing, summarisation, and per-session tool-call budget run inside the orchestrator node.
-        * **code_pipeline** — LLM codegen, Semgrep, judge, save under ``agent_filesystem/<session>/output/code/``, then sandbox runner.
+        * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
         * **Skills** — the ``skills/`` package and loader remain in the repo for future use; the graph does not load skill overlays into the orchestrator for now.
     """
 

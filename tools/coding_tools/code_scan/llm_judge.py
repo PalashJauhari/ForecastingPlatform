@@ -19,7 +19,13 @@ from prompts.code_judge_prompt import CODE_JUDGE_SYSTEM_PROMPT
 langfuse = get_langfuse_client()
 
 
-def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
+def run_llm_judge(
+    *,
+    code: str,
+    task: str,
+    model_name: str,
+    path_literal_prefix: str | None = None,
+) -> tuple[bool, str]:
     """
     Ask the judge model to accept or reject the script.
 
@@ -30,8 +36,15 @@ def run_llm_judge(*, code: str, task: str, model_name: str) -> tuple[bool, str]:
     """
     llm = ChatOpenAI(model=model_name, temperature=0).with_structured_output(JudgeOutput)
     # Fenced block helps the model locate the script; task is the same string codegen saw in ``code_pipeline``.
+    prefix_block = ""
+    if path_literal_prefix:
+        prefix_block = (
+            "## Required path prefix (every pandas/plot path literal must start with this)\n"
+            f"`{path_literal_prefix}`\n\n"
+        )
     human = (
-        "## User task\n"
+        prefix_block
+        + "## User task (filenames only)\n"
         + task.strip()
         + "\n\n## Generated Python\n```python\n"
         + code

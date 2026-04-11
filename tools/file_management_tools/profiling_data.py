@@ -1,9 +1,10 @@
 """
-Session tabular profiling: minimal preview (``pandas.DataFrame.head``) per file.
+Session tabular profiling for the flat per-session workspace.
 
-Used by ``profile_session_file`` in ``graph/graph.py``. Each profiled ``file`` key is a logical path
-``agent_filesystem/<session>/input|output/...`` (on disk under ``./agent_filesystem/<session>/...``).
-Results live only in graph state ``data_profile`` (no snapshot file on disk).
+Used by ``profile_session_file`` in ``graph/graph.py``. Profiling reads every
+top-level ``.csv`` / ``.xlsx`` file in ``agent_filesystem/<session>/`` and
+returns a list of per-file summaries stored only in graph state
+(``data_profile``).
 """
 
 from __future__ import annotations
@@ -14,108 +15,137 @@ from typing import Any
 import pandas as pd
 from langfuse import observe
 
-from session_paths import (
-    LOGICAL_AGENT_PREFIX,
-    ensure_session_dirs,
-    resolve_agent_path,
-    session_root,
-    to_agent_path,
-)
+from session_paths import ensure_session_dirs, session_root
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 _HEAD_ROWS = 5
+_LOW_CARDINALITY_MAX_UNIQUE = 20
 
 
 def _read_tabular_file(path: Path) -> pd.DataFrame:
+    """Read one supported tabular file into a DataFrame."""
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path)
     return pd.read_excel(path)
 
 
-def _jsonify_cell(v: Any) -> Any:
-    if v is None:
+def _to_json_value(value: Any) -> Any:
+    """Convert pandas / numpy values into JSON-friendly Python values."""
+    if value is None:
         return None
     try:
-        if pd.isna(v):
+        if pd.isna(value):
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(v, float) and (v != v or abs(v) == float("inf")):  # NaN / inf
-        return None
-    if hasattr(v, "isoformat"):
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
         try:
-            return v.isoformat()
+            value = value.item()
         except Exception:
-            return str(v)
-    if isinstance(v, (pd.Timestamp,)):
-        return str(v)
-    return v
+            pass
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return value
 
 
-def _head_records(df: pd.DataFrame, n: int = _HEAD_ROWS) -> list[dict[str, Any]]:
-    sample = df.head(n)
-    out: list[dict[str, Any]] = []
-    for _, row in sample.iterrows():
-        out.append({str(c): _jsonify_cell(row[c]) for c in df.columns})
-    return out
+def _head_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Return the first few rows as JSON-safe records."""
+    records = df.head(_HEAD_ROWS).to_dict(orient="records")
+    return [
+        {str(column): _to_json_value(cell) for column, cell in row.items()}
+        for row in records
+    ]
 
 
-def _profile_one_file(logical_path: str, df: pd.DataFrame) -> dict[str, Any]:
-    """Minimal profile: path, row count, column names, first ``n`` rows only."""
+def _numeric_summary(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Return ``describe()`` output for numeric columns only."""
+    numeric_df = df.select_dtypes(include="number")
+    if numeric_df.empty:
+        return {}
+
+    summary = numeric_df.describe().transpose()
     return {
-        "file": logical_path,
-        "row_count": int(len(df)),
-        "columns": [str(c) for c in df.columns],
-        "head": _head_records(df, _HEAD_ROWS),
+        str(column_name): {
+            str(metric): _to_json_value(metric_value)
+            for metric, metric_value in row.items()
+        }
+        for column_name, row in summary.iterrows()
     }
 
 
-def _profile_path(session_id: str, logical_path: str) -> dict[str, Any]:
-    clean = logical_path.strip()
-    if not clean.startswith(LOGICAL_AGENT_PREFIX):
-        return {"file": clean, "error": f"Path must start with '{LOGICAL_AGENT_PREFIX}': {clean}"}
-    try:
-        physical = resolve_agent_path(session_id, clean)
-    except ValueError as e:
-        return {"file": clean, "error": str(e)}
-    if not physical.exists():
-        return {"file": clean, "error": f"File not found: {clean}"}
-    if physical.is_dir():
-        return {"file": clean, "error": f"Path is a directory: {clean}"}
-    if physical.suffix.lower() not in ALLOWED_EXTENSIONS:
-        return {"file": clean, "error": f"Only .csv and .xlsx supported: {clean}"}
-    try:
-        df = _read_tabular_file(physical)
-    except Exception as e:
-        return {"file": clean, "error": f"Read failed: {e}"}
-    return _profile_one_file(clean, df)
+def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Build per-column stats, including low-cardinality value lists."""
+    row_count = int(len(df))
+    profiles: list[dict[str, Any]] = []
+
+    for column in df.columns:
+        series = df[column]
+        non_null = series.dropna()
+        null_count = int(series.isna().sum())
+        non_null_count = int(series.notna().sum())
+        unique_count = int(non_null.nunique(dropna=True))
+        is_low_cardinality = unique_count <= _LOW_CARDINALITY_MAX_UNIQUE
+
+        profile: dict[str, Any] = {
+            "name": str(column),
+            "dtype": str(series.dtype),
+            "non_null_count": non_null_count,
+            "null_count": null_count,
+            "null_fraction": round((null_count / row_count), 6) if row_count else 0.0,
+            "unique_count": unique_count,
+            "is_low_cardinality": is_low_cardinality,
+        }
+        if is_low_cardinality:
+            unique_values = non_null.drop_duplicates().tolist()
+            profile["unique_values"] = [_to_json_value(value) for value in unique_values]
+
+        profiles.append(profile)
+
+    return profiles
+
+
+def _profile_one_file(file_name: str, df: pd.DataFrame) -> dict[str, Any]:
+    """Return the full profile schema used in graph state ``data_profile``."""
+    columns = [str(column) for column in df.columns]
+    dtypes = {str(column): str(dtype) for column, dtype in df.dtypes.items()}
+    null_counts = {str(column): int(df[column].isna().sum()) for column in df.columns}
+
+    return {
+        "file": file_name,
+        "row_count": int(len(df)),
+        "column_count": int(len(columns)),
+        "columns": columns,
+        "dtypes": dtypes,
+        "null_counts": null_counts,
+        "head": _head_records(df),
+        "column_profiles": _column_profiles(df),
+        "numeric_summary": _numeric_summary(df),
+    }
 
 
 def profile_session_workspace(session_id: str) -> list[dict[str, Any]]:
     """
-    Discover every ``.csv`` / ``.xlsx`` under the session workspace and profile each path.
+    Profile every top-level CSV/XLSX file in the flat session workspace.
 
-    This is the entry point used by ``graph.profile_session_file``; it delegates to
-    ``build_session_data_profile``.
-    """
-    base = session_root(session_id)
-    logical_paths = [
-        to_agent_path(session_id, f)
-        for f in sorted(base.rglob("*"))
-        if f.is_file()
-        and f.suffix.lower() in {".csv", ".xlsx"}
-    ] if base.exists() else []
-    return build_session_data_profile(session_id, logical_paths)
-
-
-@observe(name="profiling_data.build_session_data_profile", capture_input=False, capture_output=False)
-def build_session_data_profile(session_id: str, logical_paths: list[str]) -> list[dict[str, Any]]:
-    """
-    Profile every logical path and return a **list** of per-file dicts (or single-entry error dicts).
+    The session layout is ``agent_filesystem/<session>/<filename>``, so this
+    function reads only files directly under that folder and reports each file by
+    basename only.
     """
     ensure_session_dirs(session_id)
+    base = session_root(session_id)
     profiles: list[dict[str, Any]] = []
-    for p in logical_paths:
-        profiles.append(_profile_path(session_id, p))
+
+    for path in sorted(base.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.suffix.lower() not in ALLOWED_EXTENSIONS:
+            continue
+        try:
+            df = _read_tabular_file(path)
+        except Exception as exc:
+            profiles.append({"file": path.name, "error": f"Read failed: {exc}"})
+            continue
+        profiles.append(_profile_one_file(path.name, df))
 
     return profiles

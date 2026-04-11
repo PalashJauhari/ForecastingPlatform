@@ -8,25 +8,23 @@ Intended for callers that execute LLM code in-process with ``exec`` (apply befor
 Patches ``builtins.open``, ``pd.read_excel``, ``pd.read_csv``,
 ``df.to_excel``, ``df.to_csv`` to enforce:
 
-1. Paths use ``agent_filesystem/<session-folder>/input/...`` or ``.../output/...`` and match the sandbox session directory name
-2. **Reads** may use **input** or **output**; **writes** (pandas saves + ``savefig``) may use **output** only
-3. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere
-4. Per-operation extension allow-lists
-5. ``open()`` is blocked entirely -- LLM must use pandas helpers
+1. **Bare filename only** for every pandas path string (e.g. ``sales.csv``). No
+   folders, no ``agent_filesystem/...`` prefixes, no silent rewriting.
+2. Paths resolve only under the current session sandbox directory.
+3. Only ``.csv`` and ``.xlsx`` file reads/writes are allowed.
+4. Globally blocked extensions (``.key``, ``.pem``, ...) are rejected everywhere.
+5. ``open()`` is blocked entirely; plot/image file outputs are blocked.
 """
 
 from __future__ import annotations
 
 import builtins
 from pathlib import Path
-from typing import Literal
+from typing import Any
 
 import pandas as pd
-import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-LOGICAL_AGENT_FS = str(cfg["paths"]["agent_filesystem"]).rstrip("/")
+_MISSING = object()
 
 SANDBOX: Path | None = None
 
@@ -44,15 +42,37 @@ def _require_sandbox() -> Path:
     return SANDBOX
 
 
+def _is_bare_session_filename(path: str) -> bool:
+    """Single path segment only — no directories, traversal, or URL/drive tricks."""
+    p = str(path).strip()
+    if not p or ".." in p:
+        return False
+    if "/" in p or "\\" in p:
+        return False
+    if p.startswith("~"):
+        return False
+    if ":" in p:
+        return False
+    return Path(p).name == p
+
+
 def _resolve_session_path(
     path: str,
     operation: str,
     allowed_extensions: set[str],
-    *,
-    io_mode: Literal["read", "write"],
 ) -> Path:
     sandbox = _require_sandbox()
-    ext = Path(path).suffix.lower()
+    raw = str(path).strip()
+
+    if not _is_bare_session_filename(raw):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : only a bare filename is allowed (e.g. sales.csv) — no folders, prefixes, or paths\n"
+        )
+
+    ext = Path(raw).suffix.lower()
 
     if ext in GLOBALLY_BLOCKED_EXTENSIONS:
         raise PermissionError(
@@ -71,50 +91,15 @@ def _resolve_session_path(
             f"  Allowed   : {allowed_extensions}\n"
         )
 
-    prefix = f"{LOGICAL_AGENT_FS}/"
-    if not path.startswith(prefix):
+    if raw == "pipeline_run.py":
         raise PermissionError(
             f"\n[SANDBOX VIOLATION]\n"
             f"  Operation : {operation}\n"
             f"  Path      : {path}\n"
-            f"  Reason    : path must start with {LOGICAL_AGENT_FS}/ for the current session\n"
+            f"  Reason    : pipeline_run.py is the generated runner — do not read/write it as data\n"
         )
 
-    rel = path[len(prefix) :].strip("/")
-    if "/" not in rel:
-        raise PermissionError(
-            f"\n[SANDBOX VIOLATION]\n"
-            f"  Operation : {operation}\n"
-            f"  Path      : {path}\n"
-            f"  Reason    : path must be {LOGICAL_AGENT_FS}/<session>/input|output/...\n"
-        )
-    session_key, rest = rel.split("/", 1)
-    if session_key != sandbox.name:
-        raise PermissionError(
-            f"\n[SANDBOX VIOLATION]\n"
-            f"  Operation : {operation}\n"
-            f"  Path      : {path}\n"
-            f"  Reason    : path session folder {session_key!r} must match workspace {sandbox.name!r}\n"
-        )
-
-    if io_mode == "read":
-        if not (rest.startswith("input/") or rest.startswith("output/")):
-            raise PermissionError(
-                f"\n[SANDBOX VIOLATION]\n"
-                f"  Operation : {operation}\n"
-                f"  Path      : {path}\n"
-                f"  Reason    : reads must use {LOGICAL_AGENT_FS}/<session>/input/... or .../output/...\n"
-            )
-    else:
-        if not rest.startswith("output/"):
-            raise PermissionError(
-                f"\n[SANDBOX VIOLATION]\n"
-                f"  Operation : {operation}\n"
-                f"  Path      : {path}\n"
-                f"  Reason    : writes and plots must use {LOGICAL_AGENT_FS}/<session>/output/... (not input/)\n"
-            )
-
-    target = (sandbox / rest).resolve()
+    target = (sandbox / raw).resolve()
     try:
         target.relative_to(sandbox)
     except ValueError as exc:
@@ -126,6 +111,41 @@ def _resolve_session_path(
             f"  Allowed   : {sandbox}\n"
         ) from exc
     return target
+
+
+def _require_bare_path_file(candidate: Any, operation: str, allowed_extensions: set[str]) -> Path:
+    """Reject buffers, URLs, and non-path types; only str/Path with basename-only rules."""
+    if not isinstance(candidate, (str, Path)):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Reason    : only a bare filename as str or pathlib.Path is allowed — not buffers, URLs, or file objects\n"
+        )
+    return _resolve_session_path(str(candidate), operation, allowed_extensions)
+
+
+def _pop_path_target(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    kw_names: tuple[str, ...],
+) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+    """
+    Pandas path target: first positional wins; else first matching keyword (popped).
+
+    Removes duplicate keyword entries so the original function is not called with
+    two sources for the same argument.
+    """
+    kwargs = dict(kwargs)
+    if args:
+        target = args[0]
+        rest = args[1:]
+        for name in kw_names:
+            kwargs.pop(name, None)
+        return target, rest, kwargs
+    for name in kw_names:
+        if name in kwargs:
+            return kwargs.pop(name), (), kwargs
+    return _MISSING, args, kwargs
 
 
 # -- Originals (captured at import time) --------------------------------------
@@ -166,69 +186,54 @@ def safe_open(path, mode="r", *args, **kwargs):  # noqa: A001
     )
 
 
-def safe_read_excel(path, *args, **kwargs):
-    resolved = _resolve_session_path(
-        str(path), "pd.read_excel()", {".xlsx"}, io_mode="read",
-    )
-    return original_read_excel(resolved, *args, **kwargs)
+def safe_read_excel(*args, **kwargs):
+    target, rest, kw = _pop_path_target(args, kwargs, ("io",))
+    if target is _MISSING:
+        return original_read_excel(*args, **kwargs)
+    resolved = _require_bare_path_file(target, "pd.read_excel()", {".xlsx"})
+    return original_read_excel(resolved, *rest, **kw)
 
 
-def safe_read_csv(path, *args, **kwargs):
-    resolved = _resolve_session_path(
-        str(path), "pd.read_csv()", {".csv"}, io_mode="read",
-    )
-    return original_read_csv(resolved, *args, **kwargs)
+def safe_read_csv(*args, **kwargs):
+    target, rest, kw = _pop_path_target(args, kwargs, ("filepath_or_buffer",))
+    if target is _MISSING:
+        return original_read_csv(*args, **kwargs)
+    resolved = _require_bare_path_file(target, "pd.read_csv()", {".csv"})
+    return original_read_csv(resolved, *rest, **kw)
 
 
-def safe_to_excel(self, path, *args, **kwargs):
-    resolved = _resolve_session_path(
-        str(path), "df.to_excel()", {".xlsx"}, io_mode="write",
-    )
-    return original_to_excel(self, resolved, *args, **kwargs)
+def safe_to_excel(self, *args, **kwargs):
+    target, rest, kw = _pop_path_target(args, kwargs, ("excel_writer",))
+    if target is _MISSING:
+        return original_to_excel(self, *args, **kwargs)
+    resolved = _require_bare_path_file(target, "df.to_excel()", {".xlsx"})
+    return original_to_excel(self, resolved, *rest, **kw)
 
 
-def safe_to_csv(self, path=None, *args, **kwargs):
-    if path is not None:
-        path = _resolve_session_path(
-            str(path), "df.to_csv()", {".csv"}, io_mode="write",
-        )
-    return original_to_csv(self, path, *args, **kwargs)
+def safe_to_csv(self, *args, **kwargs):
+    target, rest, kw = _pop_path_target(args, kwargs, ("path_or_buf",))
+    if target is _MISSING:
+        return original_to_csv(self, *args, **kwargs)
+    if target is None:
+        return original_to_csv(self, None, *rest, **kw)
+    resolved = _require_bare_path_file(target, "df.to_csv()", {".csv"})
+    return original_to_csv(self, resolved, *rest, **kw)
 
 
 def safe_pyplot_savefig(*args, **kwargs):
-    if original_pyplot_savefig is None:
-        raise RuntimeError("matplotlib is not available in this environment.")
-    if args:
-        new_args = list(args)
-        new_args[0] = _resolve_session_path(
-            str(args[0]),
-            "plt.savefig()",
-            {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
-            io_mode="write",
-        )
-        return original_pyplot_savefig(*new_args, **kwargs)
-    if "fname" in kwargs:
-        new_kwargs = dict(kwargs)
-        new_kwargs["fname"] = _resolve_session_path(
-            str(kwargs["fname"]),
-            "plt.savefig()",
-            {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
-            io_mode="write",
-        )
-        return original_pyplot_savefig(**new_kwargs)
-    return original_pyplot_savefig(*args, **kwargs)
+    raise PermissionError(
+        "\n[SANDBOX VIOLATION]\n"
+        "  Operation : plt.savefig()\n"
+        "  Reason    : only .csv and .xlsx file outputs are allowed\n"
+    )
 
 
 def safe_figure_savefig(self, fname, *args, **kwargs):
-    if original_figure_savefig is None:
-        raise RuntimeError("matplotlib is not available in this environment.")
-    resolved = _resolve_session_path(
-        str(fname),
-        "Figure.savefig()",
-        {".png", ".jpg", ".jpeg", ".pdf", ".svg"},
-        io_mode="write",
+    raise PermissionError(
+        "\n[SANDBOX VIOLATION]\n"
+        "  Operation : Figure.savefig()\n"
+        "  Reason    : only .csv and .xlsx file outputs are allowed\n"
     )
-    return original_figure_savefig(self, resolved, *args, **kwargs)
 
 
 # -- Public API ---------------------------------------------------------------

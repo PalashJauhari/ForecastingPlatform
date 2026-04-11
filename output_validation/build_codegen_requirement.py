@@ -8,6 +8,8 @@ call ``code_pipeline``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from session_paths import LOGICAL_AGENT_PREFIX
@@ -21,7 +23,7 @@ class BuildCodegenRequirementOutput(BaseModel):
     )
     dataset_paths: list[str] = Field(
         default_factory=list,
-        description="Logical workspace paths relevant to the planned code generation task.",
+        description="Dataset basenames (.csv / .xlsx), or legacy full logical paths for compatibility.",
     )
     assumptions: list[str] = Field(
         default_factory=list,
@@ -47,16 +49,29 @@ class BuildCodegenRequirementOutput(BaseModel):
     @field_validator("dataset_paths")
     @classmethod
     def validate_dataset_paths(cls, value: list[str]) -> list[str]:
-        """Paths must be ``agent_filesystem/<session-folder>/input|output/...`` (see planner context)."""
+        """Each entry is a **filename** (e.g. ``sales.csv``) or a legacy full logical path under ``agent_filesystem/``."""
+        allowed_suffixes = {".csv", ".xlsx"}
         cleaned: list[str] = []
         seen: set[str] = set()
 
         for path in value:
             path = path.strip()
-            if not path.startswith(LOGICAL_AGENT_PREFIX):
-                raise ValueError(
-                    f"Dataset path must start with '{LOGICAL_AGENT_PREFIX}': {path!r}",
-                )
+            if not path:
+                continue
+            if path.startswith(LOGICAL_AGENT_PREFIX):
+                pass
+            else:
+                if any(sep in path for sep in ("/", "\\")) or ".." in path:
+                    raise ValueError(
+                        f"dataset_paths must be a bare filename (e.g. sales.csv) or full logical path: {path!r}",
+                    )
+                name = Path(path).name
+                if name != path:
+                    raise ValueError(f"dataset_paths filename must be a single basename: {path!r}")
+                if Path(path).suffix.lower() not in allowed_suffixes:
+                    raise ValueError(
+                        f"dataset_paths filename must end with .csv or .xlsx: {path!r}",
+                    )
             if path not in seen:
                 cleaned.append(path)
                 seen.add(path)

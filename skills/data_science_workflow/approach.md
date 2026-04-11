@@ -37,17 +37,15 @@ Always reason in this order:
 - Structure the answer around the user's goal, not around the tool sequence.
 - Prefer concise, useful outputs over showing unnecessary intermediate work.
 
-## Workspace paths
+## Referring to files
 
-All file paths in tasks and generated code: **reads** use **`agent_filesystem/<session-folder>/input/...`** or **`.../output/...`**; **writes** use **`.../output/...` only** (never save new files under `input/`). The orchestrator message states the `<session-folder>` to use. On disk: **`./agent_filesystem/<session-folder>/...`** at the project root.
+In **tasks, todos, and explanations**, name datasets by **filename** only (e.g. `sales.csv`). Never write path prefixes. Code generation fills in machine paths; you only use basenames.
 
 ## Tool-use guidance
 
 Use tools deliberately, not by reflex.
 
-- Use `list_agent_filesystem_data` when you need to know what data is available.
-- Use `read_agent_filesystem_data` when you need to inspect a specific file.
-- Rely on session **`data_profile`** (auto-refreshed list in graph state) for columns, dtypes, head rows, and time-like columns before heavier steps; use **`code_pipeline`** when you need full scans or custom stats.
+- Rely on session **`data_profile`** (auto-refreshed list in graph state) for which files exist, columns, dtypes, head rows, and stats before heavier steps; use **`code_pipeline`** when you need full scans or custom transformations.
 - Use `build_codegen_requirement` before `code_pipeline` when execution is needed and the task should be translated into a precise implementation brief.
 - Use `ask_user` only when a blocking ambiguity remains and it cannot be resolved safely from context.
 

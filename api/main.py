@@ -4,7 +4,7 @@ FastAPI HTTP API for the Forecasting Platform agent.
 Endpoints
     POST /run         — form: ``query``, ``session_id`` (``thread_id`` for the graph).
     POST /resume      — resume after an ``ask_user`` interrupt.
-    POST /upload-data — multipart: CSV/Excel files → ``agent_filesystem/<session>/input/``.
+    POST /upload-data — multipart: CSV/Excel files → ``agent_filesystem/<session>/<filename>`` (session root).
 
 Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
 Langfuse keys.

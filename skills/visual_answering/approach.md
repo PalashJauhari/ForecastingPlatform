@@ -20,7 +20,7 @@ How to reason:
 - Titles, axes, legends, and labels should make the answer understandable without extra decoding.
 
 Tooling implications:
-- Save figures only under **`agent_filesystem/<session-folder>/output/...`** (see orchestrator context); on disk **`./agent_filesystem/<session-folder>/output/...`**.
+- Name output figures by **filename** in tasks (e.g. `plot.png`); codegen saves at the **session root** next to other session files.
 - Pair with `tabular_prep` whenever aggregation, filtering, reshaping, or merging may be required first.
 - If the user wants a visual and a short interpretation, produce both, but keep the interpretation tied to what the chart shows.
 - When execution is needed, make the plotting requirement explicit before `code_pipeline`.

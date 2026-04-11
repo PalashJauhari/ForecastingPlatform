@@ -442,22 +442,31 @@ if user_input and user_input.strip():
     summary = data.get("summary") or ""
     last_tool = data.get("last_tool_result") or ""
 
-    # Try to extract output file paths from the tool result
+    # Extract saved data/plot paths (flat: agent_filesystem/<session>/<file>)
     output_files_mentioned = []
     try:
         tool_json = json.loads(last_tool) if last_tool else {}
         if isinstance(tool_json, dict):
             for v in tool_json.values():
-                if isinstance(v, str) and "/output/" in v and v.startswith("agent_filesystem/"):
-                    output_files_mentioned.append(v)
+                if isinstance(v, str) and v.startswith("agent_filesystem/"):
+                    low = v.lower()
+                    if low.endswith("pipeline_run.py"):
+                        continue
+                    if low.endswith((".csv", ".xlsx", ".png", ".pdf", ".svg", ".jpg", ".jpeg")):
+                        output_files_mentioned.append(v)
     except Exception:
         pass
 
-    # Scan stdout for saved file paths (e.g. "Saved to agent_filesystem/<session>/output/...")
-    if last_tool and "agent_filesystem/" in last_tool and "/output/" in last_tool:
+    if last_tool and "agent_filesystem/" in last_tool:
         import re
-        found = re.findall(r"agent_filesystem/[^/\s]+/output/[\w./\-]+", last_tool)
-        output_files_mentioned.extend(found)
+        found = re.findall(
+            r"agent_filesystem/[^/\s]+/[\w./\-]+\.(?:csv|xlsx|png|pdf|svg|jpg|jpeg)",
+            last_tool,
+            flags=re.IGNORECASE,
+        )
+        output_files_mentioned.extend(
+            p for p in found if not p.lower().endswith("pipeline_run.py")
+        )
     output_files_mentioned = list(dict.fromkeys(output_files_mentioned))  # dedupe
 
     reply_content = summary if summary else ("Done." if not data.get("error") else data["error"])

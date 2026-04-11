@@ -1,7 +1,7 @@
 # codegen_scan_semgrep.yaml
 # Complete semgrep rules for LLM generated code sandbox
-# Reads: pd.read_* with agent_filesystem/<session>/input|output/...
-# Writes: df.to_* and savefig with agent_filesystem/<session>/output/... only (not input/)
+# Reads/writes: only pd.read_* / df.to_* with .csv / .xlsx path literals; any other file extension is blocked
+# Do not use pipeline_run.py as a data/plot path (tool-managed runner)
 # Everything else blocked
 
 rules:
@@ -346,7 +346,7 @@ rules:
       - pattern: from urllib.error import $X
       - pattern: import urllib.robotparser
       - pattern: from urllib.robotparser import $X
-    message: "urllib submodules not allowed — use pandas with agent_filesystem/<session>/input|output paths only"
+    message: "urllib submodules not allowed — use pandas read_csv/read_excel/to_csv/to_excel with local .csv/.xlsx paths only"
     languages: [python]
     severity: ERROR
 
@@ -370,6 +370,29 @@ rules:
       - pattern: aiohttp.ClientSession(...)
       - pattern: urllib.request.urlopen(...)
     message: "HTTP client calls not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK HTTP.SERVER / SOCKETSERVER (listen/bind — beyond raw socket import) ─
+
+  - id: block-http-serving-socketserver
+    pattern-either:
+      - pattern: import http.server
+      - pattern: from http.server import $X
+      - pattern: import socketserver
+      - pattern: from socketserver import $X
+      - pattern: http.server.HTTPServer(...)
+      - pattern: http.server.ThreadingHTTPServer(...)
+      - pattern: http.server.BaseHTTPRequestHandler
+      - pattern: http.server.SimpleHTTPRequestHandler
+      - pattern: http.server.CGIHTTPRequestHandler
+      - pattern: socketserver.TCPServer(...)
+      - pattern: socketserver.UDPServer(...)
+      - pattern: socketserver.ThreadingTCPServer(...)
+      - pattern: socketserver.ForkingTCPServer(...)
+      - pattern: socketserver.UnixStreamServer(...)
+      - pattern: socketserver.UnixDatagramServer(...)
+    message: "HTTP serving / socketserver not allowed"
     languages: [python]
     severity: ERROR
 
@@ -477,7 +500,20 @@ rules:
       - pattern: import imp
       - pattern: from imp import $X
       - pattern: __import__($X)
+      - pattern: importlib.import_module(...)
     message: "dynamic imports not allowed — no loading other .py files"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CONCURRENT.FUTURES (threads / process pools — bypass process ban) ─
+
+  - id: block-concurrent-futures
+    pattern-either:
+      - pattern: import concurrent
+      - pattern: import concurrent.futures
+      - pattern: from concurrent import $X
+      - pattern: from concurrent.futures import $X
+    message: "concurrent.futures not allowed — no thread/process pools"
     languages: [python]
     severity: ERROR
 
@@ -587,7 +623,33 @@ rules:
       - pattern: import sqlalchemy
       - pattern: from sqlalchemy import $X
       - pattern: sqlite3.connect($X, ...)
-    message: "database not allowed"
+      - pattern: import psycopg2
+      - pattern: from psycopg2 import $X
+      - pattern: import psycopg
+      - pattern: from psycopg import $X
+      - pattern: import pymysql
+      - pattern: from pymysql import $X
+      - pattern: import mysql.connector
+      - pattern: from mysql.connector import $X
+      - pattern: import MySQLdb
+      - pattern: from MySQLdb import $X
+      - pattern: import pymssql
+      - pattern: from pymssql import $X
+      - pattern: import cx_Oracle
+      - pattern: from cx_Oracle import $X
+      - pattern: import oracledb
+      - pattern: from oracledb import $X
+      - pattern: import asyncpg
+      - pattern: from asyncpg import $X
+      - pattern: import aiomysql
+      - pattern: from aiomysql import $X
+      - pattern: import pyodbc
+      - pattern: from pyodbc import $X
+      - pattern: import duckdb
+      - pattern: from duckdb import $X
+      - pattern: import cassandra
+      - pattern: from cassandra import $X
+    message: "database / SQL drivers not allowed"
     languages: [python]
     severity: ERROR
 
@@ -780,6 +842,34 @@ rules:
       - pattern: open($PATH, ...)
       - pattern: builtins.open($PATH, ...)
     message: "open() / builtins.open() not allowed"
+    languages: [python]
+    severity: ERROR
+
+  # ── PANDAS READ + open() FILE OBJECT (review-friendly; open() also blocked alone) ─
+
+  - id: block-pandas-read-with-open-fileobj
+    pattern-either:
+      - pattern: pd.read_csv(open(...), ...)
+      - pattern: pd.read_csv(open(...))
+      - pattern: pd.read_csv(..., filepath_or_buffer=open(...), ...)
+      - pattern: pd.read_csv(filepath_or_buffer=open(...), ...)
+      - pattern: pd.read_csv(..., filepath_or_buffer=builtins.open(...), ...)
+      - pattern: pd.read_csv(filepath_or_buffer=builtins.open(...), ...)
+      - pattern: pandas.read_csv(open(...), ...)
+      - pattern: pandas.read_csv(open(...))
+      - pattern: pandas.read_csv(..., filepath_or_buffer=open(...), ...)
+      - pattern: pandas.read_csv(filepath_or_buffer=open(...), ...)
+      - pattern: pd.read_excel(open(...), ...)
+      - pattern: pd.read_excel(open(...))
+      - pattern: pd.read_excel(..., io=open(...), ...)
+      - pattern: pd.read_excel(io=open(...), ...)
+      - pattern: pd.read_excel(..., io=builtins.open(...), ...)
+      - pattern: pd.read_excel(io=builtins.open(...), ...)
+      - pattern: pandas.read_excel(open(...), ...)
+      - pattern: pandas.read_excel(open(...))
+      - pattern: pandas.read_excel(..., io=open(...), ...)
+      - pattern: pandas.read_excel(io=open(...), ...)
+    message: "do not pass open() or builtins.open() into pandas readers — use a basename string literal and pd.read_csv / pd.read_excel only"
     languages: [python]
     severity: ERROR
 
@@ -978,6 +1068,73 @@ rules:
     languages: [python]
     severity: ERROR
 
+  # ── BLOCK SCIPY.IO (scipy is allowed for numerics — not arbitrary file I/O) ─
+
+  - id: block-scipy-io
+    pattern-either:
+      - pattern: import scipy.io
+      - pattern: from scipy.io import $X
+      - pattern: scipy.io.loadmat(...)
+      - pattern: scipy.io.savemat(...)
+      - pattern: scipy.io.readsav(...)
+      - pattern: scipy.io.wavfile.read(...)
+      - pattern: scipy.io.wavfile.write(...)
+      - pattern: scipy.io.mmread(...)
+      - pattern: scipy.io.mmwrite(...)
+      - pattern: scipy.io.hb_read(...)
+      - pattern: scipy.io.hb_write(...)
+    message: "scipy.io file I/O not allowed — use pandas read_csv/read_excel/to_csv/to_excel only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK CLOUD / FUSE FILESYSTEMS (S3/GCS paths via pandas engine) ────────
+
+  - id: block-cloud-filesystems
+    pattern-either:
+      - pattern: import fsspec
+      - pattern: from fsspec import $X
+      - pattern: import s3fs
+      - pattern: from s3fs import $X
+      - pattern: import gcsfs
+      - pattern: from gcsfs import $X
+      - pattern: import adlfs
+      - pattern: from adlfs import $X
+    message: "cloud filesystem libraries not allowed — local basename CSV/XLSX only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK PANDAS EXCELFILE / EXCELWRITER (alternate readers/writers vs patched API)
+
+  - id: block-pandas-excel-containers
+    pattern-either:
+      - pattern: pd.ExcelFile(...)
+      - pattern: pandas.ExcelFile(...)
+      - pattern: pd.ExcelWriter(...)
+      - pattern: pandas.ExcelWriter(...)
+    message: "pd.ExcelFile / pd.ExcelWriter not allowed — use pd.read_excel and df.to_excel with basename literals only"
+    languages: [python]
+    severity: ERROR
+
+  # ── BLOCK NON-MATPLOTLIB IMAGE / ARRAY FILE WRITES (plots allowed; files not) ─
+
+  - id: block-image-file-writes
+    pattern-either:
+      - pattern: import PIL
+      - pattern: from PIL import $X
+      - pattern: import PIL.Image
+      - pattern: from PIL.Image import $X
+      - pattern: import imageio
+      - pattern: from imageio import $X
+      - pattern: imageio.imwrite(...)
+      - pattern: imageio.v3.imwrite(...)
+      - pattern: import cv2
+      - pattern: from cv2 import $X
+      - pattern: cv2.imwrite(...)
+      - pattern: torchvision.utils.save_image(...)
+    message: "image file writes not allowed — only .csv and .xlsx outputs"
+    languages: [python]
+    severity: ERROR
+
   # ── BLOCK NUMPY READ/WRITE ────────────────────────────────────────────────
 
   - id: block-numpy-readwrite
@@ -1054,70 +1211,484 @@ rules:
     languages: [python]
     severity: ERROR
 
-  # ── ENFORCE agent_filesystem ON 4 ALLOWED OPS ────────────────────────────
+  # ── Path traversal / absolute / dynamic paths on allowed I/O ───────────────
 
-  - id: enforce-path-read-excel
-    pattern: pd.read_excel($PATH, ...)
-    pattern-not: pd.read_excel("agent_filesystem/...", ...)
-    message: "pd.read_excel must use agent_filesystem/<session>/input/ or .../output/ path string"
+  - id: block-pandas-io-fstring-path
+    pattern-either:
+      - pattern: pd.read_csv(f"...", ...)
+      - pattern: pd.read_csv(f"...")
+      - pattern: pd.read_excel(f"...", ...)
+      - pattern: pd.read_excel(f"...")
+      - pattern: $DF.to_csv(f"...", ...)
+      - pattern: $DF.to_csv(f"...")
+      - pattern: $DF.to_excel(f"...", ...)
+      - pattern: $DF.to_excel(f"...")
+    message: "f-string paths not allowed — use a plain basename string literal for pandas I/O"
     languages: [python]
     severity: ERROR
 
-  - id: enforce-path-read-csv
-    pattern: pd.read_csv($PATH, ...)
-    pattern-not: pd.read_csv("agent_filesystem/...", ...)
-    message: "pd.read_csv must use agent_filesystem/<session>/input/ or .../output/ path string"
+  - id: block-savefig-fstring-path
+    pattern-either:
+      - pattern: plt.savefig(f"...", ...)
+      - pattern: plt.savefig(f"...")
+      - pattern: plt.savefig(..., fname=f"...", ...)
+      - pattern: $FIG.savefig(f"...", ...)
+    message: "f-string paths not allowed — use a plain string literal for savefig"
     languages: [python]
     severity: ERROR
 
-  - id: enforce-path-to-excel
-    pattern: $DF.to_excel($PATH, ...)
-    pattern-not: $DF.to_excel("agent_filesystem/...", ...)
-    message: "df.to_excel must use agent_filesystem/<session>/output/ path string (never input/)"
+  - id: block-savefig
+    pattern-either:
+      - pattern: plt.savefig(...)
+      - pattern: $FIG.savefig(...)
+    message: "only .csv and .xlsx file outputs are allowed — savefig is not allowed"
     languages: [python]
     severity: ERROR
 
-  - id: enforce-path-to-csv
-    pattern: $DF.to_csv($PATH, ...)
-    pattern-not: $DF.to_csv("agent_filesystem/...", ...)
-    message: "df.to_csv must use agent_filesystem/<session>/output/ path string (never input/)"
+  - id: block-pandas-io-posix-absolute-literal
+    pattern-either:
+      - pattern: pd.read_csv("/...", ...)
+      - pattern: pd.read_csv("/...")
+      - pattern: pd.read_csv(filepath_or_buffer="/...", ...)
+      - pattern: pd.read_csv(filepath_or_buffer="/...")
+      - pattern: pd.read_excel("/...", ...)
+      - pattern: pd.read_excel("/...")
+      - pattern: pd.read_excel(io="/...", ...)
+      - pattern: pd.read_excel(io="/...")
+      - pattern: $DF.to_csv("/...", ...)
+      - pattern: $DF.to_csv("/...")
+      - pattern: $DF.to_csv(path_or_buf="/...", ...)
+      - pattern: $DF.to_csv(path_or_buf="/...")
+      - pattern: $DF.to_excel("/...", ...)
+      - pattern: $DF.to_excel("/...")
+      - pattern: $DF.to_excel(excel_writer="/...", ...)
+      - pattern: $DF.to_excel(excel_writer="/...")
+    message: "absolute paths not allowed — use a basename only"
     languages: [python]
     severity: ERROR
 
-  - id: block-tabular-write-under-input
+  - id: block-savefig-posix-absolute-literal
+    pattern-either:
+      - pattern: plt.savefig("/...", ...)
+      - pattern: plt.savefig("/...")
+      - pattern: plt.savefig(..., fname="/...", ...)
+      - pattern: $FIG.savefig("/...", ...)
+    message: "absolute paths not allowed — use a basename or allowed relative shape only"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-pandas-io-dotdot-in-literal
+    pattern-either:
+      - patterns:
+          - pattern: pd.read_csv($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_csv($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_excel($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_excel($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_csv($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_csv($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_excel($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_excel($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+    message: "path traversal (..) not allowed in pandas path literals"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-pandas-io-home-literal
+    pattern-either:
+      - pattern: pd.read_csv("~...", ...)
+      - pattern: pd.read_csv("~...")
+      - pattern: pd.read_csv(filepath_or_buffer="~...", ...)
+      - pattern: pd.read_csv(filepath_or_buffer="~...")
+      - pattern: pd.read_excel("~...", ...)
+      - pattern: pd.read_excel("~...")
+      - pattern: pd.read_excel(io="~...", ...)
+      - pattern: pd.read_excel(io="~...")
+      - pattern: $DF.to_csv("~...", ...)
+      - pattern: $DF.to_csv("~...")
+      - pattern: $DF.to_csv(path_or_buf="~...", ...)
+      - pattern: $DF.to_csv(path_or_buf="~...")
+      - pattern: $DF.to_excel("~...", ...)
+      - pattern: $DF.to_excel("~...")
+      - pattern: $DF.to_excel(excel_writer="~...", ...)
+      - pattern: $DF.to_excel(excel_writer="~...")
+    message: "home-directory paths are not allowed — use a basename only"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-pandas-io-windows-absolute-literal
+    pattern-either:
+      - patterns:
+          - pattern: pd.read_csv($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_csv($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_excel($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_excel($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_csv($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_csv($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_excel($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_excel($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^"[A-Za-z]:.*"$'
+    message: "absolute Windows-style paths are not allowed — use a basename only"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-savefig-dotdot-in-literal
+    pattern-either:
+      - patterns:
+          - pattern: plt.savefig($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: plt.savefig($P)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: plt.savefig(..., fname=$P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+      - patterns:
+          - pattern: $FIG.savefig($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '^".*\.\..*"$'
+    message: "path traversal (..) not allowed in savefig path literals"
+    languages: [python]
+    severity: ERROR
+
+  # ── Tabular I/O: basename string literal only (.csv / .xlsx); no / \\ : in name ─
+
+  - id: enforce-read-csv-csv-extension
+    pattern-either:
+      - patterns:
+          - pattern: pd.read_csv($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_csv($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: pd.read_csv($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_csv($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_csv(filepath_or_buffer=$PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: pd.read_csv(filepath_or_buffer=$PATH)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_csv(filepath_or_buffer=$PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+    message: "pd.read_csv path must be a basename string literal ending in .csv — only .csv and .xlsx file extensions are allowed"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-read-excel-xlsx-extension
+    pattern-either:
+      - patterns:
+          - pattern: pd.read_excel($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_excel($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: pd.read_excel($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_excel($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_excel(io=$PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: pd.read_excel(io=$PATH)
+          - pattern-not:
+              patterns:
+                - pattern: pd.read_excel(io=$PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+    message: "pd.read_excel path must be a basename string literal ending in .xlsx — only .csv and .xlsx file extensions are allowed"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-to-csv-csv-extension
+    pattern-either:
+      - patterns:
+          - pattern: $DF.to_csv($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_csv($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: $DF.to_csv($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_csv($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_csv(path_or_buf=$PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+      - patterns:
+          - pattern: $DF.to_csv(path_or_buf=$PATH)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_csv(path_or_buf=$PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[cC][sS][vV]"$'
+    message: "df.to_csv path must be a basename string literal ending in .csv — only .csv and .xlsx file extensions are allowed"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-to-excel-xlsx-extension
+    pattern-either:
+      - patterns:
+          - pattern: $DF.to_excel($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_excel($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: $DF.to_excel($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_excel($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_excel(excel_writer=$PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+      - patterns:
+          - pattern: $DF.to_excel(excel_writer=$PATH)
+          - pattern-not:
+              patterns:
+                - pattern: $DF.to_excel(excel_writer=$PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.[xX][lL][sS][xX]"$'
+    message: "df.to_excel path must be a basename string literal ending in .xlsx — only .csv and .xlsx file extensions are allowed"
+    languages: [python]
+    severity: ERROR
+
+  - id: block-io-targeting-pipeline-runner
     pattern-either:
       - patterns:
           - pattern: $DF.to_csv($PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '^".*\/input\/.*"$'
+              regex: '^".*pipeline_run\.py"$'
       - patterns:
           - pattern: $DF.to_excel($PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '^".*\/input\/.*"$'
-    message: "tabular writes must use .../output/..., not .../input/..."
-    languages: [python]
-    severity: ERROR
-
-  - id: block-savefig-under-input
-    pattern-either:
+              regex: '^".*pipeline_run\.py"$'
+      - patterns:
+          - pattern: pd.read_csv($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*pipeline_run\.py"$'
+      - patterns:
+          - pattern: pd.read_excel($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^".*pipeline_run\.py"$'
       - patterns:
           - pattern: plt.savefig($PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '^".*\/input\/.*"$'
+              regex: '^".*pipeline_run\.py"$'
       - patterns:
           - pattern: plt.savefig(..., fname=$PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '^".*\/input\/.*"$'
+              regex: '^".*pipeline_run\.py"$'
       - patterns:
           - pattern: $FIG.savefig($PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '^".*\/input\/.*"$'
-    message: "plt.savefig/Figure.savefig must use .../output/..., not .../input/..."
+              regex: '^".*pipeline_run\.py"$'
+    message: "do not use pipeline_run.py as a data or plot path"
     languages: [python]
     severity: ERROR
 

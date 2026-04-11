@@ -12,6 +12,7 @@ Available overlay skills (use these exact id strings):
 - one_shot_forecast: produce a fast, practical projection from time-series data without doing full model search or backtesting
 
 Rules:
+- When the task refers to data files, use **filenames only** (e.g. sales.csv)—never paths or `agent_filesystem`.
 - Reply with ONLY a JSON object, no prose: {"skills": ["skill1", "skill2"]}
 - Include only overlay skills directly relevant to this specific task.
 - If the message is purely conversational with no data-analysis intent (greetings, chit-chat),

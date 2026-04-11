@@ -1,6 +1,6 @@
 # GaussianBlurr
 
-An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and an **`agent_filesystem/`** workspace: logical paths **`agent_filesystem/<session>/input|output/...`** and the same layout on disk under **`./agent_filesystem/<session>/...`**. Before each orchestrator turn, **`profile_session_file`** runs **`profiling_data.profile_session_workspace`**, which fills **`data_profile`** in checkpointed state with a **list** of per-file summaries (row counts, column names, preview rows). **Profiling does not write a snapshot file**—only graph state and the orchestrator prompt carry the profile. There is no list/read tool on the graph.
+An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **flat `agent_filesystem/<session>/`** workspace (uploads, outputs, and `pipeline_run.py` share one folder per session). Logical paths look like **`agent_filesystem/<session>/<filename>`**. Before each orchestrator turn, **`profile_session_file`** runs **`profiling_data.profile_session_workspace`**, which fills **`data_profile`** in checkpointed state with a **list** of per-file summaries (row counts, column names, preview rows). **Profiling does not write a snapshot file**—only graph state and the orchestrator prompt carry the profile. There is no list/read tool on the graph.
 
 ---
 
@@ -8,7 +8,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
-- **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`. Optional modules `list_agent_filesystem_data` / `read_agent_filesystem_data` exist in the repo but are **not** bound to the orchestrator.
+- **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`.
 - **Workspace profiling (`data_profile`)** — **`profile_session_file`** runs from **START** and again after **`tools`** (`tools` → `profile_session_file` → `orchestrator`). It only updates **`data_profile`** (not `todos` / `scratchpad` / `tool_call_count`). **`profiling_data.profile_session_workspace`** walks the whole session directory tree, collects every `.csv`/`.xlsx`, and returns **`build_session_data_profile`**’s list (one dict per path). Success entries include `file`, `row_count`, `columns` (names), and `head` (first five rows as dicts); failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage (same idea in **`build_codegen_requirement`**).
 - **Session planning in state** — `write_todos` replaces the full todo list (`content` + `status` per item); `write_scratchpad` appends a full **`note`** to state while the tool return shown in chat is a short **`summary`** (length-capped). Both merge via `Command`. The orchestrator sees **Current todo list** and **Scratchpad** as JSON each turn.
 - **Requirement planning before codegen** — `build_codegen_requirement` reads the **`data_profile`** list (as JSON text in its planner prompt), messages, and **`message_summary`**, plus the orchestrator **`brief`**, before `code_pipeline`.
@@ -16,7 +16,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
 - **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root).
 - **Per-session tool budget** — `middleware.tool_call_limit.check_tool_call_limit` runs at the start of each `orchestrator` step; `tool_call_count` in graph state accumulates each batch of tool calls the model requests (parallel calls count separately). When the counter is already ≥ `max_calls`, the orchestrator returns a final `AIMessage` with **no** `tool_calls` **without invoking the LLM** on that step, so routing goes straight to `END`.
-- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/output/code/pipeline_run.py` → subprocess runner.
+- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/pipeline_run.py` → subprocess runner.
 - **Two-layer code sandbox** —
   - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
   - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
@@ -54,10 +54,8 @@ START → profile_session_file → orchestrator → [has tool calls?]
 
 ```
 config.yaml                                  # Models, middleware, paths, code_pipeline, skills budget
-agent_filesystem/                          # Runtime data (gitignored); logical paths use the same names
-  <session_id>/
-    input/                                   # Raw uploaded files (CSV, Excel)
-    output/                                  # Results, plots, intermediates, output/code/pipeline_run.py
+agent_filesystem/                          # Runtime data (gitignored); flat per session
+  <session_id>/                              # Uploads, CSV/XLSX outputs, plots, pipeline_run.py
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
@@ -86,9 +84,7 @@ tools/
       runtime_patch_scan.py                  # Layer 2 — I/O monkey-patches
       codegen_scan_semgrep.yaml              # Semgrep rules
   file_management_tools/
-    profiling_data.py                        # profile_session_workspace + build_session_data_profile (graph profiling)
-    list_agent_filesystem_data.py            # Standalone; not bound to the graph
-    read_agent_filesystem_data.py            # Standalone; not bound to the graph
+    profiling_data.py                        # profile_session_workspace (graph profiling → data_profile)
 prompts/
   graph_prompts.py                           # Orchestrator SYSTEM_PROMPT
   build_codegen_requirement_prompt.py        # Requirement-builder system prompt
@@ -164,7 +160,7 @@ paths:
   agent_filesystem: "agent_filesystem"   # logical prefix + ./agent_filesystem/ on disk
 ```
 
-Logical paths: `agent_filesystem/<session-folder>/input/...` and `.../output/...`. On disk: `./agent_filesystem/<session-folder>/input|output/...` (same layout).
+Logical paths: `agent_filesystem/<session-folder>/<file>` (flat folder on disk under `./agent_filesystem/<session-folder>/`).
 
 Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` — edit to tune blocking. Memory limit (200 MiB), BLAS thread caps, and Linux CPU affinity are defined in `tools/coding_tools/code_scan/run_pipeline_sandboxed.py`, not in YAML.
 
@@ -247,13 +243,13 @@ streamlit run ui/app.py
 | Field | Required | Description |
 |-------|----------|-------------|
 | `files` | Yes | One or more `.csv` or `.xlsx` uploads |
-| `session_id` | No | Defaults to `"default"`; files are stored under `./agent_filesystem/<session-folder>/input/` and returned as the same path string the model uses |
+| `session_id` | No | Defaults to `"default"`; files are stored under `./agent_filesystem/<session-folder>/` and returned as logical `agent_filesystem/<session-folder>/<filename>` |
 
 **Response (JSON):**
 
 | Field | Description |
 |-------|-------------|
-| `saved` | List of logical `agent_filesystem/<session-folder>/input/...` paths |
+| `saved` | List of logical `agent_filesystem/<session-folder>/<filename>` paths |
 | `count` | Number of files saved |
 | `renamed` | List of `{ "original_name", "stored_name" }` when a duplicate filename was avoided (`_2`, `_3`, … before the suffix); empty when no renames |
 

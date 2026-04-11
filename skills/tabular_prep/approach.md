@@ -23,7 +23,7 @@ Sample situations where this skill is especially relevant include:
 - the user asks for a forecast but the raw data is split across files or not yet forecast-ready
 
 Tooling implications:
-- Paths in code: **read** from **`agent_filesystem/<session-folder>/input/...`** or **`.../output/...`**; **write** only under **`.../output/...`** (see orchestrator context for `<session-folder>`); on disk **`./agent_filesystem/<session-folder>/...`**.
+- In tool **tasks**, use **filenames** only for CSV/XLSX—never path strings.
 - Inspect available files first when the relevant inputs are not obvious.
 - Read the specific file schemas you need before planning code.
 - If the prep is simple and can be reasoned from inspection, keep it simple.

@@ -25,7 +25,6 @@ from observability.langfuse_handler import (
 )
 from output_validation.build_codegen_requirement import BuildCodegenRequirementOutput
 from prompts.build_codegen_requirement_prompt import BUILD_CODEGEN_REQUIREMENT_SYSTEM_PROMPT
-from session_paths import LOGICAL_AGENT_FS, session_dir_for_paths, session_id_from_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
@@ -67,11 +66,10 @@ def _build_codegen_requirement_impl(
     )
     message_summary = state.get("message_summary", "")
 
-    sid = session_dir_for_paths(session_id_from_config(runtime.config if runtime is not None else None))
     human_payload = (
-        "## Session path prefix\n"
-        f"Dataset paths must look like `{LOGICAL_AGENT_FS}/{sid}/input/...` or `{LOGICAL_AGENT_FS}/{sid}/output/...` "
-        f"(reads may use either; planned file **writes** must be under `{LOGICAL_AGENT_FS}/{sid}/output/...` only).\n\n"
+        "## Files\n"
+        "In **every** field of your JSON and in `detailed_requirement`, use **filename only** "
+        "(e.g. `sales.csv`). Never write `agent_filesystem/`, session ids, slashes, or paths.\n\n"
         "## Orchestrator Brief\n"
         f"{brief.strip()}\n\n"
         "## Session workspace (data_profile list from graph state)\n"

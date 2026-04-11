@@ -21,5 +21,5 @@ skills:
   max_skill_context_tokens: 3000
 
 paths:
-  # Logical prefix AND on-disk folder at repo root: ./agent_filesystem/<session>/input|output/
+  # On-disk: ./agent_filesystem/<session>/ — flat folder (uploads, outputs, pipeline_run.py)
   agent_filesystem: "agent_filesystem"

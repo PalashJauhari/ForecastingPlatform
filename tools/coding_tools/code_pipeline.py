@@ -6,7 +6,7 @@ Pipeline order
        may include task, data profile, and optional ``## Previous code policy violations`` on retry.
     2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
     3. **LLM judge** — semantic/policy check (``run_llm_judge``).
-    4. **Save** — ``pipeline_run.py`` under ``agent_filesystem/<session>/output/code/`` (overwrites).
+    4. **Save** — ``pipeline_run.py`` at ``agent_filesystem/<session>/pipeline_run.py`` (overwrites).
     5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
        (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
        The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
@@ -15,8 +15,7 @@ Pipeline order
 On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
 write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
 
-Logical paths and on-disk layout both use ``./agent_filesystem/<session-folder>/input|output/...`` at the
-repo root; generated ``pipeline_run.py`` is saved under ``.../output/code/``.
+All session files, including generated ``pipeline_run.py``, live at ``./agent_filesystem/<session-folder>/``.
 
 The LangChain ``@tool`` docstring on ``code_pipeline`` is what the orchestrator model sees; this
 module docstring is for developers maintaining the implementation.
@@ -46,7 +45,7 @@ from output_validation.code_generation import CodeGenerationOutput
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
 from session_paths import (
     ensure_session_dirs,
-    logical_output_code_dir,
+    logical_pipeline_run_path,
     resolve_agent_path,
     session_id_from_config,
     session_root,
@@ -116,18 +115,14 @@ class CodePipelineInput(BaseModel):
 
     task: str = Field(
         description=(
-            "Required. Natural-language specification of the analysis: what to read, compute, print, and optionally save. "
-            "Rules: every CSV/Excel path the generated script must use must appear as a full string starting with "
-            "agent_filesystem/<session-folder>/ (see Session id for paths in context). "
-            "Example shape: agent_filesystem/my-session/input/data.csv and agent_filesystem/my-session/output/result.csv. "
-            "Label multiple inputs clearly (Input 1:, Input 2:). "
-            "If the script writes a file, include the full output path under the same session's output/ folder. "
-            "If the script only prints statistics, no output path is required. "
-            "Do not use bare filenames, ./, or paths outside agent_filesystem/. "
+            "Required. Natural-language analysis spec. Name every dataset by **filename** only (.csv / .xlsx), "
+            "e.g. `Input: sales.csv` or `Input1: a.csv | Input 2: b.xlsx`. "
+            "If saving, give the **output filename** (e.g. `Output: forecast.csv`). "
+            "If only printing stats, omit output. No full workspace paths, no `./`. "
             "Examples: "
-            "'Input: agent_filesystem/demo/input/sales.csv | Output: agent_filesystem/demo/output/forecast.csv | Fit a regression and save predictions.' "
-            "'Input: agent_filesystem/demo/input/sales.csv | Print summary statistics.' "
-            "'Input 1: … | Input 2: … | Output: … | Merge on date and compute variance.'"
+            "'Input: sales.csv | Output: forecast.csv | Fit a regression and save predictions.' "
+            "'Input: sales.csv | Print summary statistics.' "
+            "'Input 1: orders.csv | Input 2: returns.csv | Output: merged.csv | Merge on date.'"
         ),
     )
     data_profile: str = Field(
@@ -160,14 +155,14 @@ def _code_pipeline_impl(
     Use when the user needs **new** Python code written and executed against files under
     ``agent_filesystem/`` (transformations, models, reports). The tool runs a dedicated
     codegen model, applies a **Semgrep** scan and an **LLM judge** before saving, writes the script to
-    ``agent_filesystem/<session>/output/code/pipeline_run.py`` (overwritten each time), then executes it in a
+    ``agent_filesystem/<session>/pipeline_run.py`` (overwritten each time), then executes it in a
     subprocess with a wall-clock timeout and resource-related environment limits.
 
     Do not use for: answering from already-loaded data alone (use read tools), or when the
     user only needs a file listing.
 
     Args:
-        task: Natural-language job plus all data paths (full ``agent_filesystem/...`` strings).
+        task: Natural-language job naming inputs/outputs by **filename** (see tool schema); codegen expands to full paths in code.
         data_profile: Optional per-file structure and samples; empty if unknown.
         previous_code_violation: Optional text describing a **prior** Semgrep/judge failure on a previous codegen attempt;
             included in the model prompt so the retry respects policy. Empty on first attempt.
@@ -195,7 +190,12 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput)
     # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (data profile + retries).
-    user_payload = "## Task\n" + task.strip() + "\n\n## Data profile\n" + data_profile.strip()
+    user_payload = (
+        "## Task\n"
+        + task.strip()
+        + "\n\n## Data profile\n"
+        + data_profile.strip()
+    )
     if previous_code_violation.strip():
         user_payload += "\n\n## Previous code policy violations\n" + previous_code_violation.strip()
     prompt_messages = [
@@ -273,7 +273,12 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 2c — LLM judge (task alignment, policy gaps Semgrep can miss)
     # ------------------------------------------------------------------
-    judge_ok, judge_detail = run_llm_judge(code=code, task=task, model_name=JUDGE_MODEL)
+    judge_ok, judge_detail = run_llm_judge(
+        code=code,
+        task=task,
+        model_name=JUDGE_MODEL,
+        path_literal_prefix=f"{LOGICAL_AGENT_FS}/{session_dir_for_paths(session_id)}/",
+    )
     if not judge_ok:
         result = json.dumps(
             {
@@ -293,14 +298,10 @@ def _code_pipeline_impl(
     # Step 3 — Persist only after both gates pass (fixed name for the runner)
     # ------------------------------------------------------------------
     ensure_session_dirs(session_id)
-    code_dir_logical = logical_output_code_dir(session_id)
-    code_dir = resolve_agent_path(session_id, code_dir_logical)
+    run_logical = logical_pipeline_run_path(session_id)
+    out_path = resolve_agent_path(session_id, run_logical)
     session_workspace = session_root(session_id)
-    with langfuse.start_as_current_observation(
-        name="code_pipeline.save_script", as_type="span", input={"target_dir": code_dir_logical}
-    ) as save_span:
-        code_dir.mkdir(parents=True, exist_ok=True)
-        out_path = code_dir / "pipeline_run.py"
+    with langfuse.start_as_current_observation(name="code_pipeline.save_script", as_type="span", input={"logical_path": run_logical}) as save_span:
         out_path.write_text(code, encoding="utf-8")
         save_span.update(output={"path": str(out_path)}, metadata={"bytes_written": len(code.encode("utf-8"))})
     gen = {
