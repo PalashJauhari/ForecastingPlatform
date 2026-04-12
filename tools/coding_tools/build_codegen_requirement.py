@@ -21,7 +21,7 @@ from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
-from output_validation.build_codegen_requirement import BuildCodegenRequirementOutput
+from output_validation import BuildCodegenRequirementOutput
 from prompts.build_codegen_requirement_prompt import BUILD_CODEGEN_REQUIREMENT_SYSTEM_PROMPT
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

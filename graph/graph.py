@@ -122,18 +122,19 @@ langfuse = get_langfuse_client()
 # ---------------------------------------------------------------------------
 
 
-@observe(name="graph.profile_session_file", capture_input=False, capture_output=False)
 def profile_session_file(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
     Delegate to ``profiling_data.profile_session_workspace``: read every top-level
     session CSV/XLSX file, build a rich in-memory profile, and set ``data_profile``.
-    Does not modify ``todos`` or ``scratchpad``.
+    Does not modify ``todos`` or ``scratchpad``. Tracing uses ``start_as_current_observation``
+    so metadata is applied via ``obs.update`` on the open span (avoids ``update_current_span``
+    missing the observation when the OTEL current span does not match the node span).
     """
     session_id = session_id_from_config(config)
-    data_profile: List[Any] = profile_session_workspace(session_id)
-    update: Dict[str, Any] = {"data_profile": data_profile}
-    langfuse.update_current_span(metadata={"profile_entries": len(data_profile), "session_id": session_id})
-    return update
+    with langfuse.start_as_current_observation(name="graph.profile_session_file", as_type="span") as obs:
+        data_profile: List[Any] = profile_session_workspace(session_id)
+        obs.update(metadata={"profile_entries": len(data_profile), "session_id": session_id})
+        return {"data_profile": data_profile}
 
 
 @observe(name="graph.orchestrator", capture_input=False, capture_output=False)
