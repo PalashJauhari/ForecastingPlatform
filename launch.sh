@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch Forecasting Platform: API (uvicorn) + UI (streamlit)
+# Launch Forecasting Platform: API (uvicorn) + UI (Plotly Dash)
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -22,5 +22,5 @@ trap 'kill $API_PID 2>/dev/null' EXIT
 sleep 2
 
 # Start UI (foreground; Ctrl+C will also trigger trap and kill API)
-echo "Starting UI (streamlit) ..."
-streamlit run ui/app.py --server.headless true
+echo "Starting UI (Dash) on http://127.0.0.1:8501 ..."
+python ui/dash_app.py

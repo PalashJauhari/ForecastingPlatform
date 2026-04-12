@@ -101,7 +101,10 @@ output_validation/
 api/
   main.py                                    # POST /run, /resume, /upload-data
 ui/
-  app.py                                     # Streamlit UI
+  __init__.py
+  api_client.py                              # HTTP client for FastAPI (upload / run / resume)
+  dash_app.py                                # Plotly Dash UI (layout + callbacks)
+  assets/                                    # Static CSS for Dash (e.g. markdown in chat)
 observability/
   langfuse_handler.py
 ```
@@ -178,7 +181,7 @@ Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` �
 
 LangChain’s `ChatOpenAI` reads **`OPENAI_API_KEY` from the environment** by default (OpenAI SDK convention); you do not pass the key in code.
 
-The Streamlit UI talks to the HTTP API only and does **not** need an OpenAI key in the browser.
+The Dash UI talks to the HTTP API only (via `ui/api_client.py`) and does **not** need an OpenAI key in the browser.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -198,15 +201,29 @@ cp .env.example .env    # add OPENAI_API_KEY
 ```
 
 - **API:** `http://127.0.0.1:8000`
-- **UI:** `http://localhost:8501`
+- **UI:** `http://127.0.0.1:8501` (Plotly Dash)
 
 **Manual (two terminals):**
 
 ```bash
 export PYTHONPATH="$(pwd)"
 uvicorn api.main:app --host 127.0.0.1 --port 8000
-streamlit run ui/app.py
+python ui/dash_app.py
 ```
+
+### Dash UI and HTTP client
+
+The browser UI is **`ui/dash_app.py`**. It does not call OpenAI directly; it only talks to **`api/main.py`** via **`ui/api_client.py`** (`GaussianBlurrApiClient`):
+
+| Client method | HTTP | Form / file fields |
+|---------------|------|---------------------|
+| `upload_data(bytes, filename, session_id)` | `POST /upload-data` | `session_id`, multipart `files` |
+| `run(query, session_id)` | `POST /run` | `query`, `session_id` |
+| `resume(resume_value, session_id)` | `POST /resume` | `resume_value`, `session_id` |
+
+- **Base URL:** defaults to `http://127.0.0.1:8000`. Override with **`GAUSSIANBLURR_API_URL`** (no trailing slash), e.g. another host or reverse proxy.
+- **Timeouts:** uploads **120s**; agent **/run** and **/resume** **600s** (see `ui/api_client.py`).
+- **Imports:** `dash_app.py` prepends the repository root to `sys.path` so `python ui/dash_app.py` works without setting `PYTHONPATH`; keeping `PYTHONPATH="$(pwd)"` is still recommended for other tooling.
 
 ---
 
@@ -262,4 +279,4 @@ streamlit run ui/app.py
 - **Ignored files** — `*.docx` is listed in `.gitignore` for local guides; `agent_filesystem/` is ignored as runtime data.
 - **Production:** replace `InMemorySaver` with a persistent checkpointer (e.g. `PostgresSaver`) so conversations survive restarts. Changing **`AgentState`** (field names or types such as **`data_profile`**) can break old checkpoints—use a new **`session_id`** after migrations.
 - If `code_pipeline` is blocked by Semgrep or the LLM judge, check `code_safety_evaluation.detail` in the tool result, pass `previous_code_violation` on retry, and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` if needed.
-- The Streamlit UI (`ui/app.py`) supports upload, interrupt/resume, and per-session chat state.
+- The Dash UI (`ui/dash_app.py`) supports upload, interrupt/resume, and per-session chat state; HTTP is centralized in **`ui/api_client.py`**.
