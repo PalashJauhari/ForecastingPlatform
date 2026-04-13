@@ -26,3 +26,8 @@ body {
 .gb-md li {
   margin-bottom: 0.25em;
 }
+
+/* File preview modal shell (display toggled inline by Dash) */
+.gb-preview-overlay {
+  box-sizing: border-box;
+}

@@ -53,7 +53,6 @@ def _default_store() -> dict[str, Any]:
         "session_id": str(uuid.uuid4()),
         "messages": [],
         "uploaded_files": [],
-        "active_file": None,
         "awaiting_resume": False,
         "pending_question": "",
         "agent_thinking": False,
@@ -104,19 +103,6 @@ def _read_df_from_bytes(raw: bytes, name: str) -> pd.DataFrame | None:
     except Exception:
         return None
     return None
-
-
-def _agent_query_for_prompt(store: dict[str, Any], prompt: str) -> str:
-    """Same routing as the send handler: optional active-file prefix for ``/run`` (not resume)."""
-    agent_query = prompt
-    if store.get("active_file") is not None and not store.get("awaiting_resume"):
-        files = store.get("uploaded_files") or []
-        idx = store["active_file"]
-        if 0 <= idx < len(files):
-            af = files[idx]
-            if af["name"] not in prompt and af["path"] not in prompt:
-                agent_query = f"[Active file: {af['path']}]\n{prompt}"
-    return agent_query
 
 
 def _output_paths_from_tool(last_tool: str) -> list[str]:
@@ -193,6 +179,7 @@ def _build_layout() -> html.Div:
             dcc.Store(id="ui-store", data=_default_store()),
             dcc.Store(id="upload-gen", data=0),
             dcc.Store(id="agent-tick", data=0),
+            dcc.Store(id="preview-dlg", data={"open": False, "i": None}),
             html.Div(
                 className="gb-frame",
                 style={
@@ -275,6 +262,7 @@ def _build_layout() -> html.Div:
                             html.Button(
                                 "+ New session",
                                 id="btn-new-session",
+                                type="button",
                                 n_clicks=0,
                                 style={
                                     "width": "100%",
@@ -303,7 +291,6 @@ def _build_layout() -> html.Div:
                         },
                         children=[
                             html.Div(id="interrupt-banner", style={"flexShrink": 0, "padding": "8px 12px 0"}),
-                            html.Div(id="preview-block", style={"flexShrink": 0, "padding": "0 12px"}),
                             html.Div(
                                 id="chat-area",
                                 style={
@@ -355,6 +342,7 @@ def _build_layout() -> html.Div:
                                             html.Button(
                                                 "Send",
                                                 id="btn-send",
+                                                type="button",
                                                 n_clicks=0,
                                                 style={
                                                     "minHeight": "44px",
@@ -374,6 +362,57 @@ def _build_layout() -> html.Div:
                                     ),
                                 ],
                             ),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                id="preview-overlay",
+                className="gb-preview-overlay",
+                children=[
+                    html.Div(
+                        style={
+                            "width": "100%",
+                            "maxWidth": "min(920px, 96vw)",
+                            "maxHeight": "88vh",
+                            "overflow": "auto",
+                            "background": "#FAFAF8",
+                            "borderRadius": "14px",
+                            "border": "1px solid #DCDCD9",
+                            "boxShadow": "0 16px 48px rgba(0, 0, 0, 0.18)",
+                            "padding": "16px 18px 18px",
+                            "boxSizing": "border-box",
+                        },
+                        children=[
+                            html.Div(
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "justifyContent": "space-between",
+                                    "gap": "12px",
+                                    "marginBottom": "12px",
+                                },
+                                children=[
+                                    html.Span("Preview", style={"fontSize": "15px", "fontWeight": 600}),
+                                    html.Button(
+                                        "×",
+                                        id="preview-close",
+                                        type="button",
+                                        n_clicks=0,
+                                        title="Close",
+                                        style={
+                                            "border": "none",
+                                            "background": "transparent",
+                                            "cursor": "pointer",
+                                            "fontSize": "22px",
+                                            "lineHeight": 1,
+                                            "color": "#666",
+                                            "padding": "0 4px",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            html.Div(id="preview-modal-body"),
                         ],
                     ),
                 ],
@@ -465,8 +504,6 @@ def on_upload(contents_list, names_list, store):
                 "preview_columns": columns,
             }
         )
-        if store.get("active_file") is None:
-            store["active_file"] = len(files) - 1
         status_parts.append(html.Span(f"{display_name} ready. ", style={"color": "#3B6D11"}))
     store["uploaded_files"] = files
     status_el = html.Div(status_parts) if status_parts else ""
@@ -478,6 +515,7 @@ def on_upload(contents_list, names_list, store):
     Output("upload-gen", "data"),
     Output("upload-status", "children", allow_duplicate=True),
     Output("chat-input", "value", allow_duplicate=True),
+    Output("preview-dlg", "data", allow_duplicate=True),
     Input("btn-new-session", "n_clicks"),
     State("upload-gen", "data"),
     prevent_initial_call=True,
@@ -486,33 +524,106 @@ def on_new_session(n, upload_gen):
     """New graph session id, empty chat/files, and remount upload so file picks do not carry over."""
     if not n:
         raise PreventUpdate
-    return _default_store(), int(upload_gen or 0) + 1, "", ""
+    return _default_store(), int(upload_gen or 0) + 1, "", "", {"open": False, "i": None}
 
 
 @callback(
-    Output("ui-store", "data", allow_duplicate=True),
-    Input({"type": "view-file", "index": ALL}, "n_clicks"),
+    Output("preview-dlg", "data"),
+    Input({"type": "preview-file", "index": ALL}, "n_clicks"),
     State("ui-store", "data"),
     prevent_initial_call=True,
 )
-def on_view_file(_n_clicks, store):
-    """Mark which uploaded file is active (drives preview + optional path hint on send)."""
+def open_file_preview(_n_clicks, store):
+    """Open the preview dialog for the clicked file (does not change what is sent to ``/run``)."""
     if not store:
         raise PreventUpdate
     ctx = callback_context
     if not ctx.triggered:
         raise PreventUpdate
-    trig = ctx.triggered[0]["prop_id"].split(".n_clicks")[0]
-    try:
-        btn_id = json.loads(trig)
-        idx = int(btn_id["index"])
-    except Exception:
+    t0 = ctx.triggered[0]
+    prop_id = str(t0.get("prop_id") or "")
+    if not prop_id.endswith("n_clicks"):
         raise PreventUpdate
-    store = dict(store)
-    file_list = store.get("uploaded_files") or []
-    if 0 <= idx < len(file_list):
-        store["active_file"] = idx
-    return store
+    # Re-renders reset ``n_clicks`` to 0 and can spuriously fire this callback — require a real click.
+    n = t0.get("value")
+    if n is None or int(n) < 1:
+        raise PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "preview-file":
+        raise PreventUpdate
+    idx = int(tid["index"])
+    files = store.get("uploaded_files") or []
+    if not (0 <= idx < len(files)):
+        raise PreventUpdate
+    return {"open": True, "i": idx}
+
+
+@callback(
+    Output("preview-dlg", "data", allow_duplicate=True),
+    Input("preview-close", "n_clicks"),
+    prevent_initial_call=True,
+)
+def close_file_preview(_n):
+    if not _n:
+        raise PreventUpdate
+    return {"open": False, "i": None}
+
+
+@callback(
+    Output("preview-overlay", "style"),
+    Output("preview-modal-body", "children"),
+    Input("preview-dlg", "data"),
+    State("ui-store", "data"),
+    prevent_initial_call=False,
+)
+def sync_preview_modal(dlg, store):
+    """Show or hide the preview overlay and fill the table from ``ui-store``."""
+    base_style: dict[str, Any] = {
+        "position": "fixed",
+        "inset": "0",
+        "zIndex": "2000",
+        "backgroundColor": "rgba(0, 0, 0, 0.45)",
+        "alignItems": "center",
+        "justifyContent": "center",
+        "padding": "20px",
+        "boxSizing": "border-box",
+    }
+    if not dlg or not dlg.get("open") or dlg.get("i") is None:
+        return {**base_style, "display": "none"}, []
+    if not store:
+        return {**base_style, "display": "none"}, []
+    files = store.get("uploaded_files") or []
+    idx = int(dlg["i"])
+    if not (0 <= idx < len(files)):
+        return {**base_style, "display": "none"}, []
+    af = files[idx]
+    recs = af.get("preview_records") or []
+    cols = list(af.get("preview_columns") or [])
+    if recs and not cols:
+        cols = [{"name": str(k), "id": str(k)} for k in recs[0].keys()]
+    if not recs:
+        inner = html.P("No preview rows available.", style={"color": "#888", "margin": "8px 0"})
+    else:
+        inner = html.Div(
+            children=[
+                html.Div(
+                    style={"fontSize": "12px", "color": "#555", "marginBottom": "10px"},
+                    children=[
+                        html.Strong(af["name"]),
+                        html.Span(f" · {af['rows']:,} rows · {af['cols']} cols"),
+                    ],
+                ),
+                DataTable(
+                    id="preview-dl-table",
+                    data=recs,
+                    columns=cols,
+                    style_table={"overflowX": "auto", "maxHeight": "min(52vh, 420px)"},
+                    style_cell={"fontSize": "12px", "padding": "6px 8px", "textAlign": "left", "border": "1px solid #f0f0ee"},
+                    style_header={"fontWeight": 600, "background": "#F6F6F4", "border": "1px solid #E8E8E6"},
+                ),
+            ],
+        )
+    return {**base_style, "display": "flex"}, [inner]
 
 
 # ---------------------------------------------------------------------------
@@ -580,12 +691,11 @@ def complete_agent_turn(_tick, store):
     was_resume = bool(store.get("awaiting_resume"))
     restore_pending = store.pop("agent_restore_pending", None)
 
-    agent_query = _agent_query_for_prompt(store, prompt)
     try:
         if was_resume:
             data = api.resume(prompt, store["session_id"])
         else:
-            data = api.run(agent_query, store["session_id"])
+            data = api.run(prompt, store["session_id"])
     except Exception as exc:
         store["agent_thinking"] = False
         if was_resume and restore_pending is not None:
@@ -660,7 +770,6 @@ def _meta_row(*, is_user: bool) -> html.Div:
 @callback(
     Output("session-line", "children"),
     Output("file-list", "children"),
-    Output("preview-block", "children"),
     Output("chat-area", "children"),
     Output("interrupt-banner", "children"),
     Output("chat-input", "placeholder"),
@@ -674,7 +783,6 @@ def render_all(store):
     session_line = sid[:14] + "…" if len(sid) > 14 else sid
 
     files = store.get("uploaded_files") or []
-    active = store.get("active_file")
 
     file_children: list = []
     if not files:
@@ -686,21 +794,11 @@ def render_all(store):
         ]
     else:
         for i, f in enumerate(files):
-            is_act = active == i
             raw_name = f["name"]
             name_display = raw_name if len(raw_name) <= 22 else raw_name[:19] + "…"
             file_children.append(
-                html.Div(
-                    style={
-                        "display": "flex",
-                        "alignItems": "center",
-                        "gap": "8px",
-                        "padding": "8px 6px",
-                        "borderRadius": "8px",
-                        "marginBottom": "4px",
-                        "background": "#F3F3F1" if is_act else "transparent",
-                    },
-                    children=[
+                html.Button(
+                    [
                         html.Span("📄", style={"fontSize": "16px", "opacity": 0.85}),
                         html.Div(
                             name_display,
@@ -713,71 +811,40 @@ def render_all(store):
                                 "overflow": "hidden",
                                 "textOverflow": "ellipsis",
                                 "whiteSpace": "nowrap",
+                                "textAlign": "left",
                             },
                             title=raw_name,
                         ),
-                        html.Button(
-                            "···",
-                            id={"type": "view-file", "index": i},
-                            n_clicks=0,
-                            title="Select file",
+                        html.Span(
+                            "Preview",
                             style={
-                                "border": "none",
-                                "background": "transparent",
-                                "cursor": "pointer",
-                                "fontSize": "18px",
-                                "lineHeight": 1,
+                                "fontSize": "10px",
+                                "letterSpacing": "0.06em",
+                                "textTransform": "uppercase",
                                 "color": "#9A9A97",
-                                "padding": "0 4px",
+                                "fontWeight": 600,
+                                "flexShrink": 0,
                             },
                         ),
                     ],
+                    id={"type": "preview-file", "index": i},
+                    type="button",
+                    n_clicks=0,
+                    title="Click to preview in a dialog",
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "gap": "8px",
+                        "width": "100%",
+                        "padding": "8px 8px",
+                        "borderRadius": "8px",
+                        "marginBottom": "4px",
+                        "border": "1px solid #E8E8E6",
+                        "background": "#fff",
+                        "cursor": "pointer",
+                        "boxSizing": "border-box",
+                    },
                 )
-            )
-
-    preview = html.Div()
-    if active is not None and 0 <= active < len(files):
-        af = files[active]
-        recs = af.get("preview_records") or []
-        cols = list(af.get("preview_columns") or [])
-        if recs and not cols:
-            cols = [{"name": str(k), "id": str(k)} for k in recs[0].keys()]
-        if recs:
-            preview = html.Div(
-                style={
-                    "marginTop": "4px",
-                    "marginBottom": "4px",
-                    "padding": "8px 10px",
-                    "background": "#fff",
-                    "border": "1px solid #E8E8E6",
-                    "borderRadius": "12px",
-                    "width": "100%",
-                    "maxWidth": "100%",
-                    "boxSizing": "border-box",
-                },
-                children=[
-                    html.Div(
-                        style={
-                            "fontSize": "12px",
-                            "color": "#666",
-                            "marginBottom": "8px",
-                            "display": "flex",
-                            "justifyContent": "space-between",
-                            "flexWrap": "wrap",
-                            "gap": "8px",
-                        },
-                        children=[
-                            html.Span([html.Strong(af["name"]), f" · {af['rows']:,} rows · {af['cols']} cols"]),
-                        ],
-                    ),
-                    DataTable(
-                        data=recs,
-                        columns=cols,
-                        style_table={"overflowX": "auto", "maxHeight": "180px"},
-                        style_cell={"fontSize": "12px", "padding": "6px 8px", "textAlign": "left", "border": "1px solid #f0f0ee"},
-                        style_header={"fontWeight": 600, "background": "#F6F6F4", "border": "1px solid #E8E8E6"},
-                    ),
-                ],
             )
 
     msgs = store.get("messages") or []
@@ -883,17 +950,14 @@ def render_all(store):
     else:
         banner = html.Div()
 
-    af_hint = ""
-    if active is not None and 0 <= active < len(files):
-        af_hint = files[active]["name"]
     if store.get("awaiting_resume"):
         ph = "Answer the question above..."
-    elif af_hint:
-        ph = f"Ask about {af_hint}..."
+    elif files:
+        ph = "Ask about your data..."
     else:
         ph = "Upload a file and ask anything..."
 
-    return session_line, file_children, preview, chat, banner, ph
+    return session_line, file_children, chat, banner, ph
 
 
 if __name__ == "__main__":
