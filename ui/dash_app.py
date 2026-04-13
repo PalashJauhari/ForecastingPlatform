@@ -56,12 +56,40 @@ def _default_store() -> dict[str, Any]:
         "active_file": None,
         "awaiting_resume": False,
         "pending_question": "",
+        "agent_thinking": False,
     }
 
 
-def _file_type_label(name: str) -> str:
-    ext = Path(name).suffix.lower()
-    return {".csv": "CSV", ".xlsx": "XLSX"}.get(ext, "FILE")
+def _upload_data_component() -> dcc.Upload:
+    """CSV/XLSX upload control (remounted on new session so the browser clears stale file picks)."""
+    return dcc.Upload(
+        id="upload-data",
+        children=html.Div(
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "gap": "8px",
+                "fontSize": "14px",
+                "fontWeight": 500,
+                "color": "#333",
+            },
+            children=[
+                html.Span("+", style={"fontSize": "18px", "fontWeight": 400, "lineHeight": 1}),
+                "Upload CSV / XLSX",
+            ],
+        ),
+        style={
+            "border": "none",
+            "borderRadius": "10px",
+            "padding": "10px 11px",
+            "textAlign": "center",
+            "cursor": "pointer",
+            "background": "#EDEDEB",
+            "marginBottom": "8px",
+        },
+        multiple=True,
+    )
 
 
 def _read_df_from_bytes(raw: bytes, name: str) -> pd.DataFrame | None:
@@ -76,6 +104,19 @@ def _read_df_from_bytes(raw: bytes, name: str) -> pd.DataFrame | None:
     except Exception:
         return None
     return None
+
+
+def _agent_query_for_prompt(store: dict[str, Any], prompt: str) -> str:
+    """Same routing as the send handler: optional active-file prefix for ``/run`` (not resume)."""
+    agent_query = prompt
+    if store.get("active_file") is not None and not store.get("awaiting_resume"):
+        files = store.get("uploaded_files") or []
+        idx = store["active_file"]
+        if 0 <= idx < len(files):
+            af = files[idx]
+            if af["name"] not in prompt and af["path"] not in prompt:
+                agent_query = f"[Active file: {af['path']}]\n{prompt}"
+    return agent_query
 
 
 def _output_paths_from_tool(last_tool: str) -> list[str]:
@@ -105,23 +146,24 @@ def _output_paths_from_tool(last_tool: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _logo_circle(size: int = 28) -> html.Div:
-    """Small circular mark in the sidebar and next to assistant bubbles (no image asset)."""
-    return html.Div(
-        "G",
+_LOGO_FILENAME = "gaussianblurr_favicon.png"
+
+
+def _favicon_logo_img(size: int = 30) -> html.Img:
+    """Sidebar + assistant row mark from ``assets/gaussianblurr_favicon.png`` (same as browser tab icon)."""
+    px = f"{size}px"
+    return html.Img(
+        src=f"/assets/{_LOGO_FILENAME}",
+        alt="GaussianBlurr",
+        width=size,
+        height=size,
         style={
-            "width": f"{size}px",
-            "height": f"{size}px",
-            "borderRadius": "50%",
-            "background": "#1a1a1a",
-            "color": "#fff",
-            "fontSize": f"{max(11, size - 14)}px",
-            "fontWeight": 600,
-            "display": "flex",
-            "alignItems": "center",
-            "justifyContent": "center",
+            "width": px,
+            "height": px,
+            "borderRadius": "8px",
+            "objectFit": "cover",
             "flexShrink": 0,
-            "fontFamily": "Georgia, serif",
+            "display": "block",
         },
     )
 
@@ -138,7 +180,7 @@ def _build_layout() -> html.Div:
         style={
             "height": "100vh",
             "maxHeight": "100vh",
-            "padding": "8px",
+            "padding": "6px",
             "boxSizing": "border-box",
             "display": "flex",
             "flexDirection": "column",
@@ -149,6 +191,8 @@ def _build_layout() -> html.Div:
         },
         children=[
             dcc.Store(id="ui-store", data=_default_store()),
+            dcc.Store(id="upload-gen", data=0),
+            dcc.Store(id="agent-tick", data=0),
             html.Div(
                 className="gb-frame",
                 style={
@@ -168,7 +212,7 @@ def _build_layout() -> html.Div:
                             "flexShrink": 0,
                             "background": "#fff",
                             "borderRight": "1px solid #E8E8E6",
-                            "padding": "14px 12px 18px",
+                            "padding": "12px 10px 14px",
                             "display": "flex",
                             "flexDirection": "column",
                             "height": "100%",
@@ -176,12 +220,12 @@ def _build_layout() -> html.Div:
                         },
                         children=[
                             html.Div(
-                                style={"marginBottom": "16px"},
+                                style={"marginBottom": "14px"},
                                 children=[
                                     html.Div(
                                         style={"display": "flex", "alignItems": "center", "gap": "8px"},
                                         children=[
-                                            _logo_circle(30),
+                                            _favicon_logo_img(30),
                                             html.Span(
                                                 ["Gaussian", html.Span("Blurr", style={"fontWeight": 400, "opacity": 0.45})],
                                                 style={"fontSize": "15px", "fontWeight": 600, "letterSpacing": "-0.02em"},
@@ -195,41 +239,14 @@ def _build_layout() -> html.Div:
                                             "fontStyle": "italic",
                                             "color": "#9A9A97",
                                             "margin": "6px 0 0 0",
-                                            "paddingLeft": "38px",
+                                            "paddingLeft": "36px",
                                             "lineHeight": 1.35,
                                             "letterSpacing": "0.01em",
                                         },
                                     ),
                                 ],
                             ),
-                            dcc.Upload(
-                                id="upload-data",
-                                children=html.Div(
-                                    style={
-                                        "display": "flex",
-                                        "alignItems": "center",
-                                        "justifyContent": "center",
-                                        "gap": "8px",
-                                        "fontSize": "14px",
-                                        "fontWeight": 500,
-                                        "color": "#333",
-                                    },
-                                    children=[
-                                        html.Span("+", style={"fontSize": "18px", "fontWeight": 400, "lineHeight": 1}),
-                                        "Upload CSV / XLSX",
-                                    ],
-                                ),
-                                style={
-                                    "border": "none",
-                                    "borderRadius": "10px",
-                                    "padding": "11px 12px",
-                                    "textAlign": "center",
-                                    "cursor": "pointer",
-                                    "background": "#EDEDEB",
-                                    "marginBottom": "8px",
-                                },
-                                multiple=True,
-                            ),
+                            html.Div(id="upload-wrapper"),
                             html.Div(
                                 id="upload-status",
                                 style={"fontSize": "11px", "marginTop": "4px", "color": "#3B6D11", "minHeight": "16px"},
@@ -240,7 +257,7 @@ def _build_layout() -> html.Div:
                                     "fontSize": "10px",
                                     "letterSpacing": "0.06em",
                                     "color": "#9A9A97",
-                                    "margin": "14px 0 8px",
+                                    "margin": "12px 0 6px",
                                     "fontWeight": 600,
                                 },
                             ),
@@ -285,21 +302,21 @@ def _build_layout() -> html.Div:
                             "background": "#FAFAF8",
                         },
                         children=[
-                            html.Div(id="interrupt-banner", style={"flexShrink": 0, "padding": "10px 16px 0"}),
-                            html.Div(id="preview-block", style={"flexShrink": 0, "padding": "0 16px"}),
+                            html.Div(id="interrupt-banner", style={"flexShrink": 0, "padding": "8px 12px 0"}),
+                            html.Div(id="preview-block", style={"flexShrink": 0, "padding": "0 12px"}),
                             html.Div(
                                 id="chat-area",
                                 style={
                                     "flex": 1,
                                     "overflowY": "auto",
-                                    "padding": "10px 16px 14px",
+                                    "padding": "8px 12px 12px",
                                     "minHeight": 0,
                                 },
                             ),
                             html.Div(
                                 style={
                                     "flexShrink": 0,
-                                    "padding": "10px 16px 18px",
+                                    "padding": "8px 12px 14px",
                                     "background": "#FAFAF8",
                                     "borderTop": "1px solid #ECECE9",
                                     "boxSizing": "border-box",
@@ -309,7 +326,7 @@ def _build_layout() -> html.Div:
                                         style={
                                             "display": "flex",
                                             "alignItems": "center",
-                                            "gap": "10px",
+                                            "gap": "8px",
                                             "width": "100%",
                                             "maxWidth": "100%",
                                             "boxSizing": "border-box",
@@ -325,8 +342,8 @@ def _build_layout() -> html.Div:
                                                     "flex": 1,
                                                     "minWidth": 0,
                                                     "width": "100%",
-                                                    "minHeight": "46px",
-                                                    "padding": "11px 14px",
+                                                    "minHeight": "44px",
+                                                    "padding": "10px 12px",
                                                     "borderRadius": "10px",
                                                     "border": "1px solid #DCDCD9",
                                                     "fontSize": "15px",
@@ -340,8 +357,8 @@ def _build_layout() -> html.Div:
                                                 id="btn-send",
                                                 n_clicks=0,
                                                 style={
-                                                    "minHeight": "46px",
-                                                    "padding": "0 20px",
+                                                    "minHeight": "44px",
+                                                    "padding": "0 18px",
                                                     "borderRadius": "10px",
                                                     "border": "none",
                                                     "background": "#2C2C2A",
@@ -371,12 +388,29 @@ app = Dash(
     assets_folder=str(Path(__file__).resolve().parent / "assets"),
 )
 app.title = "GaussianBlurr"
+_tab_icon = app.get_asset_url(_LOGO_FILENAME)
+_favicon_link = f'<link rel="icon" type="image/png" href="{_tab_icon}" sizes="any" />'
+if "{%favicon%}" in app.index_string:
+    app.index_string = app.index_string.replace("{%favicon%}", _favicon_link)
+else:
+    _head_i = app.index_string.find("</head>")
+    if _head_i != -1:
+        app.index_string = app.index_string[:_head_i] + _favicon_link + "\n    " + app.index_string[_head_i:]
 app.layout = _build_layout
 
 
 # ---------------------------------------------------------------------------
 # Callbacks — uploads and graph session
 # ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("upload-wrapper", "children"),
+    Input("upload-gen", "data"),
+    prevent_initial_call=False,
+)
+def _mount_upload_widget(_upload_gen: int):
+    return [_upload_data_component()]
 
 
 @callback(
@@ -441,15 +475,18 @@ def on_upload(contents_list, names_list, store):
 
 @callback(
     Output("ui-store", "data", allow_duplicate=True),
+    Output("upload-gen", "data"),
+    Output("upload-status", "children", allow_duplicate=True),
+    Output("chat-input", "value", allow_duplicate=True),
     Input("btn-new-session", "n_clicks"),
-    State("ui-store", "data"),
+    State("upload-gen", "data"),
     prevent_initial_call=True,
 )
-def on_new_session(n, _store):
-    """Reset browser state (server-side checkpoints for the old id are left as-is)."""
+def on_new_session(n, upload_gen):
+    """New graph session id, empty chat/files, and remount upload so file picks do not carry over."""
     if not n:
         raise PreventUpdate
-    return _default_store()
+    return _default_store(), int(upload_gen or 0) + 1, "", ""
 
 
 @callback(
@@ -486,42 +523,80 @@ def on_view_file(_n_clicks, store):
 @callback(
     Output("ui-store", "data", allow_duplicate=True),
     Output("chat-input", "value"),
+    Output("agent-tick", "data"),
     Input("btn-send", "n_clicks"),
     Input("chat-input", "n_submit"),
     State("chat-input", "value"),
     State("ui-store", "data"),
+    State("agent-tick", "data"),
     prevent_initial_call=True,
 )
-def on_send(_n_clicks, _n_submit, text, store):
+def on_send(_n_clicks, _n_submit, text, store, agent_tick):
     """
-    Append the user line, then call ``/run`` or ``/resume`` and append the assistant turn.
-
-    When the graph is waiting on ``ask_user``, the same text box submits to ``/resume``.
-    If ``/resume`` fails, we restore the interrupt state so the user can retry.
+    Append the user line and set ``agent_thinking`` so the UI can show ``Thinking`` while
+    ``complete_agent_turn`` calls ``/run`` or ``/resume`` (avoids blocking the first paint).
     """
     if not callback_context.triggered:
         raise PreventUpdate
     if not store or not text or not str(text).strip():
         raise PreventUpdate
+    if store.get("agent_thinking"):
+        raise PreventUpdate
     prompt = str(text).strip()
     store = dict(store)
     messages = list(store.get("messages") or [])
 
-    agent_query = prompt
-    if store.get("active_file") is not None and not store.get("awaiting_resume"):
-        af = store["uploaded_files"][store["active_file"]]
-        if af["name"] not in prompt and af["path"] not in prompt:
-            agent_query = f"[Active file: {af['path']}]\n{prompt}"
-
     messages.append({"role": "user", "content": prompt})
-
     was_resume = bool(store.get("awaiting_resume"))
     pending_before = store.get("pending_question") or ""
 
+    store["messages"] = messages
+    store["agent_thinking"] = True
     if was_resume:
-        data = api.resume(prompt, store["session_id"])
+        store["agent_restore_pending"] = pending_before
     else:
-        data = api.run(agent_query, store["session_id"])
+        store.pop("agent_restore_pending", None)
+
+    return store, "", int(agent_tick or 0) + 1
+
+
+@callback(
+    Output("ui-store", "data", allow_duplicate=True),
+    Input("agent-tick", "data"),
+    State("ui-store", "data"),
+    prevent_initial_call=True,
+)
+def complete_agent_turn(_tick, store):
+    """After each send (``agent-tick``), call the API if ``agent_thinking`` is set."""
+    if not store or not store.get("agent_thinking"):
+        raise PreventUpdate
+    store = dict(store)
+    messages = list(store.get("messages") or [])
+    if not messages or messages[-1].get("role") != "user":
+        store["agent_thinking"] = False
+        return store
+
+    prompt = str(messages[-1].get("content") or "")
+    was_resume = bool(store.get("awaiting_resume"))
+    restore_pending = store.pop("agent_restore_pending", None)
+
+    agent_query = _agent_query_for_prompt(store, prompt)
+    try:
+        if was_resume:
+            data = api.resume(prompt, store["session_id"])
+        else:
+            data = api.run(agent_query, store["session_id"])
+    except Exception as exc:
+        store["agent_thinking"] = False
+        if was_resume and restore_pending is not None:
+            store["awaiting_resume"] = True
+            store["pending_question"] = restore_pending
+        else:
+            store["awaiting_resume"] = False
+            store["pending_question"] = ""
+        messages.append({"role": "assistant", "content": f"Something went wrong: {exc}"})
+        store["messages"] = messages
+        return store
 
     if data.get("interrupted"):
         store["awaiting_resume"] = True
@@ -534,18 +609,20 @@ def on_send(_n_clicks, _n_submit, text, store):
             }
         )
         store["messages"] = messages
-        return store, ""
+        store["agent_thinking"] = False
+        return store
 
     if data.get("error"):
-        if was_resume:
+        if was_resume and restore_pending is not None:
             store["awaiting_resume"] = True
-            store["pending_question"] = pending_before
+            store["pending_question"] = restore_pending
         else:
             store["awaiting_resume"] = False
             store["pending_question"] = ""
         messages.append({"role": "assistant", "content": f"Something went wrong: {data['error']}"})
         store["messages"] = messages
-        return store, ""
+        store["agent_thinking"] = False
+        return store
 
     store["awaiting_resume"] = False
     store["pending_question"] = ""
@@ -555,7 +632,8 @@ def on_send(_n_clicks, _n_submit, text, store):
     reply = summary if summary else "Done."
     messages.append({"role": "assistant", "content": reply, "output_files": outs})
     store["messages"] = messages
-    return store, ""
+    store["agent_thinking"] = False
+    return store
 
 
 # ---------------------------------------------------------------------------
@@ -667,9 +745,9 @@ def render_all(store):
         if recs:
             preview = html.Div(
                 style={
-                    "marginTop": "6px",
-                    "marginBottom": "6px",
-                    "padding": "10px 12px",
+                    "marginTop": "4px",
+                    "marginBottom": "4px",
+                    "padding": "8px 10px",
                     "background": "#fff",
                     "border": "1px solid #E8E8E6",
                     "borderRadius": "12px",
@@ -738,7 +816,7 @@ def render_all(store):
                 )
                 blocks.append(
                     html.Div(
-                        style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "12px"},
+                        style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "10px"},
                         children=[bubble],
                     )
                 )
@@ -761,13 +839,27 @@ def render_all(store):
                     ],
                 )
                 row = html.Div(
-                    style={"display": "flex", "gap": "10px", "alignItems": "flex-start", "marginBottom": "12px"},
-                    children=[_logo_circle(32), bubble],
+                    style={"display": "flex", "gap": "8px", "alignItems": "flex-start", "marginBottom": "10px"},
+                    children=[_favicon_logo_img(32), bubble],
                 )
                 blocks.append(row)
+        chat_children: list = list(blocks)
+        if store.get("agent_thinking"):
+            chat_children.append(
+                html.Div(
+                    "Thinking",
+                    style={
+                        "fontSize": "13px",
+                        "color": "#9A9A97",
+                        "letterSpacing": "0.06em",
+                        "marginTop": "6px",
+                        "paddingLeft": "2px",
+                    },
+                )
+            )
         chat = html.Div(
             style={"width": "100%", "maxWidth": "100%", "boxSizing": "border-box"},
-            children=blocks,
+            children=chat_children,
         )
 
     if store.get("awaiting_resume") and store.get("pending_question"):
@@ -776,7 +868,7 @@ def render_all(store):
                 "background": "#F0F4FF",
                 "border": "1px solid #B5D4F4",
                 "borderRadius": "10px",
-                "padding": "11px 14px",
+                "padding": "9px 12px",
                 "fontSize": "14px",
                 "color": "#185FA5",
                 "width": "100%",
