@@ -24,7 +24,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
 - **Skills (optional, repo only)** — `skills/` and `loader.py` remain for future overlay guidance; the graph does **not** run `identify_skills` or inject `skill_context` into the orchestrator right now.
-- **Sessions** — `thread_id = session_id` with `InMemorySaver` (per-session checkpoints; lost on restart).
+- **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.IS_NEON: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
 - **Observability** — optional **Langfuse** tracing: graph nodes and tools use `@observe` / nested spans; **`api/main.py`** wraps **`POST /run`** and **`POST /resume`** in **`propagate_attributes(...)`** so `session_id`, tags, and small request metadata attach to traces. **`observability/langfuse_handler.get_langfuse_client()`** uses the Langfuse SDK; if you set **`LANGFUSE_BASE_URL`** but not **`LANGFUSE_HOST`**, the client copies it into **`LANGFUSE_HOST`** for compatibility.
 
 ---
@@ -53,7 +53,7 @@ START → profile_session_file → orchestrator → [has tool calls?]
 ## Repository layout
 
 ```
-config.yaml                                  # Models, middleware, paths, code_pipeline, skills budget
+config.yaml                                  # Models, middleware, paths, checkpointer (IS_NEON), code_pipeline, skills budget
 agent_filesystem/                          # Runtime data (gitignored); flat per session
   <session_id>/                              # Uploads, CSV/XLSX outputs, plots, pipeline_run.py
 graph/
@@ -189,6 +189,22 @@ The Dash UI talks to the HTTP API only (via `ui/api_client.py`) and does **not**
 | `LANGFUSE_PUBLIC_KEY` | No | Langfuse tracing |
 | `LANGFUSE_SECRET_KEY` | No | Langfuse tracing |
 | `LANGFUSE_HOST` | No | Langfuse API host (SDK default); use **`LANGFUSE_BASE_URL`** instead if you prefer—`get_langfuse_client()` maps it to `LANGFUSE_HOST` when the latter is unset |
+| `DATABASE_URL` | When Postgres checkpoints are on | Postgres connection URI (e.g. Neon). Required only if `checkpointer.IS_NEON: true` in `config.yaml` (see **Checkpoints** below). |
+
+---
+
+## Checkpoints (InMemory vs Postgres / Neon)
+
+LangGraph conversation state is keyed by **`session_id`** as **`thread_id`**.
+
+| `config.yaml` | Behaviour |
+|-----------------|------------|
+| `checkpointer.IS_NEON: false` (default) | **`InMemorySaver`** — checkpoints exist only in the API process; they are **lost on restart**. |
+| `checkpointer.IS_NEON: true` | **`PostgresSaver`** via **`psycopg`** — checkpoints are stored in Postgres; set **`DATABASE_URL`** in `.env` (see `.env.example`, typically `?sslmode=require` for Neon). On startup the API prints which backend is active. |
+
+**Dependencies:** Postgres checkpointing uses **`langgraph-checkpoint-postgres`** and **`psycopg[binary]`** (listed in `requirements.txt`). After pulling the repo or enabling Neon, run **`pip install -r requirements.txt`** in the **same virtualenv** you use for `uvicorn`. If you see **`ModuleNotFoundError: No module named 'langgraph.checkpoint.postgres'`**, that package is missing from that environment.
+
+**Schema:** the first successful startup with Neon runs **`checkpointer.setup()`** to create LangGraph’s checkpoint tables. If you change **`AgentState`** incompatibly, start new sessions (`session_id`) or migrate data as needed.
 
 ---
 
@@ -277,6 +293,6 @@ The browser UI is **`ui/dash_app.py`**. It does not call OpenAI directly; it onl
 - **`data_profile` vs `code_pipeline.data_profile`** — Graph state **`data_profile`** is the auto-refreshed **list** of per-file profiles. The **`code_pipeline`** tool exposes a separate **`data_profile`** **string** parameter for optional codegen hints (often a short summary pasted from the Session workspace list).
 - **Tool call cap** — per-session total via `middleware.tool_call_limit.max_calls` and `tool_call_count` state. The guard runs **before** the LLM on each orchestrator step; a single assistant step can still increment the counter by the full parallel batch size, so the running total can land **slightly above** `max_calls` if the model requests many tools in one turn when the counter was already near the limit. To reset the budget on every new user message instead, pass `tool_call_count: 0` in the dict passed to `graph.invoke` for that turn (overrides the checkpoint for that key).
 - **Ignored files** — `*.docx` is listed in `.gitignore` for local guides; `agent_filesystem/` is ignored as runtime data.
-- **Production:** replace `InMemorySaver` with a persistent checkpointer (e.g. `PostgresSaver`) so conversations survive restarts. Changing **`AgentState`** (field names or types such as **`data_profile`**) can break old checkpoints—use a new **`session_id`** after migrations.
+- **Production checkpoints:** see **Checkpoints (InMemory vs Postgres / Neon)** above. Changing **`AgentState`** incompatibly can break old checkpoints—use a new **`session_id`** after migrations.
 - If `code_pipeline` is blocked by Semgrep or the LLM judge, check `code_safety_evaluation.detail` in the tool result, pass `previous_code_violation` on retry, and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` if needed.
 - The Dash UI (`ui/dash_app.py`) supports upload, interrupt/resume, and per-session chat state; HTTP is centralized in **`ui/api_client.py`**.

@@ -23,3 +23,7 @@ skills:
 paths:
   # On-disk: ./agent_filesystem/<session>/ — flat folder (uploads, outputs, pipeline_run.py)
   agent_filesystem: "agent_filesystem"
+
+# When IS_NEON is true, graph checkpoints use Postgres (``DATABASE_URL`` in ``.env``). Otherwise ``InMemorySaver``.
+checkpointer:
+  IS_NEON: True

@@ -9,6 +9,7 @@ Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
 
 from __future__ import annotations
 import json
+import os
 from operator import add
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal
@@ -26,9 +27,12 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langfuse import observe
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
+from psycopg import Connection
+from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
@@ -58,6 +62,7 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
+_IS_NEON = bool((cfg.get("checkpointer") or {}).get("IS_NEON"))
 
 
 class TodoEntry(TypedDict):
@@ -261,7 +266,18 @@ class AnalysisGraph:
     """
 
     def __init__(self) -> None:
-        self.checkpointer = InMemorySaver()
+        self._pg_conn: Connection | None = None
+        if _IS_NEON:
+            uri = os.environ.get("DATABASE_URL", "").strip()
+            if not uri:
+                raise ValueError("checkpointer.IS_NEON is true in config.yaml but DATABASE_URL is missing in the environment.")
+            self._pg_conn = Connection.connect(uri, autocommit=True, row_factory=dict_row)
+            self.checkpointer = PostgresSaver(self._pg_conn)
+            self.checkpointer.setup()
+            print("GaussianBlurr checkpointer: Postgres (Neon / DATABASE_URL)", flush=True)
+        else:
+            self.checkpointer = InMemorySaver()
+            print("GaussianBlurr checkpointer: InMemorySaver", flush=True)
         self.graph = self.build_graph()
 
     # ------------------------------------------------------------------
