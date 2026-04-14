@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
@@ -33,7 +35,10 @@ def run_llm_judge(
         ``(False, detail)`` if rejected or the response is invalid; ``detail`` is safe to surface in
         ``code_safety_evaluation.detail``.
     """
-    llm = ChatOpenAI(model=model_name, temperature=0).with_structured_output(JudgeOutput)
+    _j_kw = {"model": model_name, "temperature": 0}
+    if OPENAI_RATE_LIMITER is not None:
+        _j_kw["rate_limiter"] = OPENAI_RATE_LIMITER
+    llm = ChatOpenAI(**_j_kw).with_structured_output(JudgeOutput)
     # Policy in ``CODE_JUDGE_SYSTEM_PROMPT``; same task string codegen saw, then script only in the user turn.
     system_content = CODE_JUDGE_SYSTEM_PROMPT + "\n\n" + task.strip()
     human_content = f"```python\n{code}\n```"

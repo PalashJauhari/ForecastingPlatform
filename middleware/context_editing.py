@@ -24,6 +24,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 from langfuse import observe
 
+from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 from observability.langfuse_handler import (
     extract_usage_details,
     get_langfuse_client,
@@ -32,7 +33,7 @@ from observability.langfuse_handler import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-SUMMARY_MODEL = cfg["models"].get("summarization", "gpt-4o-mini")
+SUMMARY_MODEL = cfg["models"].get("message_summarisation", "gpt-4o-mini")
 langfuse = get_langfuse_client()
 
 SUMMARY_SYSTEM = """\
@@ -71,7 +72,10 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
 @observe(name="context.summarize_evicted", capture_input=False, capture_output=False)
 def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
-    llm = ChatOpenAI(model=SUMMARY_MODEL, temperature=0)
+    _kw = {"model": SUMMARY_MODEL, "temperature": 0}
+    if OPENAI_RATE_LIMITER is not None:
+        _kw["rate_limiter"] = OPENAI_RATE_LIMITER
+    llm = ChatOpenAI(**_kw)
 
     conversation = "\n".join(
         f"{type(m).__name__}: {m.content}"

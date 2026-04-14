@@ -8,6 +8,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
+- **OpenAI rate limiting (server-side)** — optional shared [`InMemoryRateLimiter`](https://python.langchain.com/docs/integrations/chat/openai/#rate-limiting) on every backend `ChatOpenAI` (orchestrator, summarisation, codegen, requirement planner, judge); tuned under `llm_rate_limit` in `config.yaml`.
 - **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`.
 - **Workspace profiling (`data_profile`)** — **`profile_session_file`** runs from **START** and again after **`tools`** (`tools` → `profile_session_file` → `orchestrator`). It only updates **`data_profile`** (not `todos` / `scratchpad` / `tool_call_count`). **`profiling_data.profile_session_workspace`** walks the whole session directory tree, collects every `.csv`/`.xlsx`, and returns **`build_session_data_profile`**’s list (one dict per path). Success entries include `file`, `row_count`, `columns` (names), and `head` (first five rows as dicts); failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage (same idea in **`build_codegen_requirement`**).
 - **Session planning in state** — `write_todos` replaces the full todo list (`content` + `status` per item); `write_scratchpad` appends a full **`note`** to state while the tool return shown in chat is a short **`summary`** (length-capped). Both merge via `Command`. The orchestrator sees **Current todo list** and **Scratchpad** as JSON each turn.
@@ -24,7 +25,7 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
 - **Skills (optional, repo only)** — `skills/` and `loader.py` remain for future overlay guidance; the graph does **not** run `identify_skills` or inject `skill_context` into the orchestrator right now.
-- **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.IS_NEON: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
+- **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.use_neon: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
 - **Observability** — optional **Langfuse** tracing: graph nodes and tools use `@observe` / nested spans; **`api/main.py`** wraps **`POST /run`** and **`POST /resume`** in **`propagate_attributes(...)`** so `session_id`, tags, and small request metadata attach to traces. **`observability/langfuse_handler.get_langfuse_client()`** uses the Langfuse SDK; if you set **`LANGFUSE_BASE_URL`** but not **`LANGFUSE_HOST`**, the client copies it into **`LANGFUSE_HOST`** for compatibility.
 
 ---
@@ -53,7 +54,7 @@ START → profile_session_file → orchestrator → [has tool calls?]
 ## Repository layout
 
 ```
-config.yaml                                  # Models, middleware, paths, checkpointer (IS_NEON), code_pipeline, skills budget
+config.yaml                                  # Models, middleware, graph, llm_rate_limit, checkpointer (use_neon), …
 agent_filesystem/                          # Runtime data (gitignored); flat per session
   <session_id>/                              # Uploads, CSV/XLSX outputs, plots, pipeline_run.py
 graph/
@@ -65,7 +66,8 @@ skills/                                      # Curated reasoning guidance (appro
   visual_answering/ … one_shot_forecast/ …
 middleware/
   context_editing.py                         # Truncate messages at safe turn boundaries
-  summarization.py                           # Running summary of evicted messages
+  (message summarisation lives in ``context_editing.py`` — ``truncate_and_summarize``)
+  llm_rate_limit.py                          # Shared ``InMemoryRateLimiter`` for ``ChatOpenAI`` (``config.yaml`` → ``llm_rate_limit``)
   tool_call_limit.py                         # Per-session cap helper (used from orchestrator)
   __init__.py
 tools/
@@ -116,6 +118,7 @@ observability/
 | Function | Module | Role |
 |----------|--------|------|
 | `truncate_and_summarize` | `middleware/context_editing.py` | Truncation + running summary when token estimate exceeds threshold. |
+| `OPENAI_RATE_LIMITER` | `middleware/llm_rate_limit.py` | Optional `InMemoryRateLimiter` built from `llm_rate_limit` in `config.yaml`; attached to every `ChatOpenAI` in the graph and coding tools. |
 | `check_tool_call_limit` | `middleware/tool_call_limit.py` | Returns a stop `AIMessage` when session `tool_call_count` ≥ `max_calls` (checked at the top of `orchestrator`, before summarisation and the LLM). |
 | — | `code_pipeline` (tool) | Codegen → Semgrep → LLM judge → save → `run_pipeline_sandboxed.py` execution. |
 
@@ -142,16 +145,27 @@ models:
   orchestrator: "gpt-4o-mini"       # Main agent LLM
   code_generation: "gpt-4o-mini"    # Codegen LLM inside code_pipeline
   code_judge: "gpt-4o-mini"         # Judge after Semgrep
-  summarization: "gpt-4o-mini"      # Summary LLM for context eviction
+  message_summarisation: "gpt-4o-mini"   # Summary LLM for context eviction
   # codegen_requirement: "gpt-4o-mini"  # optional; build_codegen_requirement defaults to orchestrator if omitted
 
 middleware:
   context_editing:
     keep_recent_messages: 10         # Messages to keep after truncation
-  summarization:
+  message_summarisation:
     token_threshold: 100000          # Rough token estimate to trigger summarisation
   tool_call_limit:
     max_calls: 25                    # Session-wide cap on orchestrator-requested tool calls (parallel = multiple)
+
+graph:
+  recursion_limit: 100               # Max LangGraph super-steps per ``invoke`` (run + resume)
+  max_concurrency: 2                 # Max parallel runnable work where LangGraph applies it
+
+# Shared bucket for all ``ChatOpenAI`` clients (set ``enabled: false`` to disable).
+llm_rate_limit:
+  enabled: true
+  requests_per_second: 1.0
+  check_every_n_seconds: 0.1
+  max_bucket_size: 2.0
 
 code_pipeline:
   timeout_seconds: 120               # Wall-clock subprocess timeout for generated script
@@ -164,6 +178,8 @@ paths:
 ```
 
 Logical paths: `agent_filesystem/<session-folder>/<file>` (flat folder on disk under `./agent_filesystem/<session-folder>/`).
+
+**`llm_rate_limit`** — LangChain’s process-local token bucket for outbound OpenAI requests (not a Dash/browser limit). One `InMemoryRateLimiter` instance from `middleware/llm_rate_limit.py` is passed as `rate_limiter=` into each `ChatOpenAI` so concurrent tools and the orchestrator share the same cap. Parameters match LangChain: `requests_per_second`, `check_every_n_seconds`, `max_bucket_size`.
 
 Semgrep rules live in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` — edit to tune blocking. Memory limit (200 MiB), BLAS thread caps, and Linux CPU affinity are defined in `tools/coding_tools/code_scan/run_pipeline_sandboxed.py`, not in YAML.
 
@@ -189,7 +205,7 @@ The Dash UI talks to the HTTP API only (via `ui/api_client.py`) and does **not**
 | `LANGFUSE_PUBLIC_KEY` | No | Langfuse tracing |
 | `LANGFUSE_SECRET_KEY` | No | Langfuse tracing |
 | `LANGFUSE_HOST` | No | Langfuse API host (SDK default); use **`LANGFUSE_BASE_URL`** instead if you prefer—`get_langfuse_client()` maps it to `LANGFUSE_HOST` when the latter is unset |
-| `DATABASE_URL` | When Postgres checkpoints are on | Postgres connection URI (e.g. Neon). Required only if `checkpointer.IS_NEON: true` in `config.yaml` (see **Checkpoints** below). |
+| `DATABASE_URL` | When Postgres checkpoints are on | Postgres connection URI (e.g. Neon). Required only if `checkpointer.use_neon: true` in `config.yaml` (see **Checkpoints** below). |
 
 ---
 
@@ -199,8 +215,8 @@ LangGraph conversation state is keyed by **`session_id`** as **`thread_id`**.
 
 | `config.yaml` | Behaviour |
 |-----------------|------------|
-| `checkpointer.IS_NEON: false` (default) | **`InMemorySaver`** — checkpoints exist only in the API process; they are **lost on restart**. |
-| `checkpointer.IS_NEON: true` | **`PostgresSaver`** via **`psycopg`** — checkpoints are stored in Postgres; set **`DATABASE_URL`** in `.env` (see `.env.example`, typically `?sslmode=require` for Neon). On startup the API prints which backend is active. |
+| `checkpointer.use_neon: false` (default) | **`InMemorySaver`** — checkpoints exist only in the API process; they are **lost on restart**. |
+| `checkpointer.use_neon: true` | **`PostgresSaver`** via **`psycopg`** — checkpoints are stored in Postgres; set **`DATABASE_URL`** in `.env` (see `.env.example`, typically `?sslmode=require` for Neon). On startup the API prints which backend is active. |
 
 **Dependencies:** Postgres checkpointing uses **`langgraph-checkpoint-postgres`** and **`psycopg[binary]`** (listed in `requirements.txt`). After pulling the repo or enabling Neon, run **`pip install -r requirements.txt`** in the **same virtualenv** you use for `uvicorn`. If you see **`ModuleNotFoundError: No module named 'langgraph.checkpoint.postgres'`**, that package is missing from that environment.
 

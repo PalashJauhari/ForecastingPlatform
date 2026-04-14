@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from langfuse import observe
 from pydantic import BaseModel, Field
 
+from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
@@ -82,7 +83,10 @@ def _build_codegen_requirement_impl(
         *messages,
     ]
 
-    llm = ChatOpenAI(model=PLANNING_MODEL, temperature=0).with_structured_output(BuildCodegenRequirementOutput)
+    _pl_kw = {"model": PLANNING_MODEL, "temperature": 0}
+    if OPENAI_RATE_LIMITER is not None:
+        _pl_kw["rate_limiter"] = OPENAI_RATE_LIMITER
+    llm = ChatOpenAI(**_pl_kw).with_structured_output(BuildCodegenRequirementOutput)
 
     with langfuse.start_as_current_observation(name="build_codegen_requirement.llm", as_type="generation", model=PLANNING_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         try:

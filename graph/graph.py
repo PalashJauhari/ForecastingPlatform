@@ -36,6 +36,7 @@ from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
+from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 from middleware.tool_call_limit import check_tool_call_limit
 from observability.langfuse_handler import (
     extract_usage_details,
@@ -60,9 +61,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
-TOKEN_THRESHOLD = int(cfg["middleware"]["summarization"]["token_threshold"])
+TOKEN_THRESHOLD = int(cfg["middleware"]["message_summarisation"]["token_threshold"])
 MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
-_IS_NEON = bool((cfg.get("checkpointer") or {}).get("IS_NEON"))
+_USE_NEON = bool((cfg.get("checkpointer") or {}).get("use_neon"))
+GRAPH_RECURSION_LIMIT = int((cfg.get("graph") or {}).get("recursion_limit", 100))
+GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
 
 
 class TodoEntry(TypedDict):
@@ -118,7 +121,10 @@ TOOLS = [
     write_todos,
 ]
 
-llm = ChatOpenAI(model=cfg["models"]["orchestrator"], temperature=0)
+_orch_kw: Dict[str, Any] = {"model": cfg["models"]["orchestrator"], "temperature": 0}
+if OPENAI_RATE_LIMITER is not None:
+    _orch_kw["rate_limiter"] = OPENAI_RATE_LIMITER
+llm = ChatOpenAI(**_orch_kw)
 llm_with_tools = llm.bind_tools(TOOLS)
 langfuse = get_langfuse_client()
 
@@ -267,10 +273,10 @@ class AnalysisGraph:
 
     def __init__(self) -> None:
         self._pg_conn: Connection | None = None
-        if _IS_NEON:
+        if _USE_NEON:
             uri = os.environ.get("DATABASE_URL", "").strip()
             if not uri:
-                raise ValueError("checkpointer.IS_NEON is true in config.yaml but DATABASE_URL is missing in the environment.")
+                raise ValueError("checkpointer.use_neon is true in config.yaml but DATABASE_URL is missing in the environment.")
             self._pg_conn = Connection.connect(uri, autocommit=True, row_factory=dict_row)
             self.checkpointer = PostgresSaver(self._pg_conn)
             self.checkpointer.setup()
@@ -324,9 +330,13 @@ class AnalysisGraph:
         Returns
             Graph invoke result dict (``messages``, ``message_summary``, etc.).
         """
-        config: Dict[str, Any] = {}
         # ``thread_id`` ties every turn for a session to the same checkpointed graph state.
-        config["configurable"] = {"thread_id": session_id}
+        # ``recursion_limit`` / ``max_concurrency`` are top-level RunnableConfig keys (see ``config.yaml`` → ``graph``).
+        config: Dict[str, Any] = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+            "max_concurrency": GRAPH_MAX_CONCURRENCY,
+        }
         # On each turn we add only the new user message and let the checkpointer load prior state.
         result = self.graph.invoke({"messages": [HumanMessage(content=user_query)]}, config=config)
         langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
@@ -348,8 +358,11 @@ class AnalysisGraph:
         Returns
             Graph invoke result dict.
         """
-        config: Dict[str, Any] = {}
-        config["configurable"] = {"thread_id": session_id}
+        config: Dict[str, Any] = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+            "max_concurrency": GRAPH_MAX_CONCURRENCY,
+        }
         result = self.graph.invoke(Command(resume=value), config=config)
         langfuse.update_current_span(input={"session_id": session_id, "resume_value": value}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result

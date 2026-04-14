@@ -4,15 +4,28 @@ models:
   orchestrator: "gpt-5.4-mini"
   code_generation: "gpt-5.4-mini"
   code_judge: "gpt-5.4-mini"
-  summarization: "gpt-5.4-mini"
+  message_summarisation: "gpt-5.4-mini"
 
 middleware:
   context_editing:
     keep_recent_messages: 10
-  summarization:
+  message_summarisation:
     token_threshold: 100000
   tool_call_limit:
     max_calls: 25
+
+# LangGraph ``invoke`` / ``stream`` runtime (top-level ``RunnableConfig`` keys, not under ``configurable``).
+graph:
+  recursion_limit: 100   # max super-steps per single run (stops runaway loops)
+  max_concurrency: 2      # max parallel runnable work where the engine applies it
+
+# Optional OpenAI throttling on every ``ChatOpenAI`` (``langchain_core.rate_limiters.InMemoryRateLimiter``).
+# Set ``enabled: false`` to turn off. Shared across orchestrator, codegen, judge, summarisation.
+llm_rate_limit:
+  enabled: true
+  requests_per_second: 1.0
+  check_every_n_seconds: 0.1
+  max_bucket_size: 5.0
 
 code_pipeline:
   timeout_seconds: 120
@@ -24,6 +37,6 @@ paths:
   # On-disk: ./agent_filesystem/<session>/ — flat folder (uploads, outputs, pipeline_run.py)
   agent_filesystem: "agent_filesystem"
 
-# When IS_NEON is true, graph checkpoints use Postgres (``DATABASE_URL`` in ``.env``). Otherwise ``InMemorySaver``.
+# When use_neon is true, graph checkpoints use Postgres (``DATABASE_URL`` in ``.env``). Otherwise ``InMemorySaver``.
 checkpointer:
-  IS_NEON: True
+  use_neon: false

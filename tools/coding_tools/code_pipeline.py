@@ -35,6 +35,7 @@ from langchain_openai import ChatOpenAI
 from langfuse import observe
 from pydantic import BaseModel, Field
 
+from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
@@ -186,7 +187,10 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
-    llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput)
+    _cg_kw = {"model": CODING_MODEL, "temperature": 0}
+    if OPENAI_RATE_LIMITER is not None:
+        _cg_kw["rate_limiter"] = OPENAI_RATE_LIMITER
+    llm = ChatOpenAI(**_cg_kw).with_structured_output(CodeGenerationOutput)
     # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (data profile + retries).
     user_payload = (
         "## Task\n"
