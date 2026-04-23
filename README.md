@@ -24,11 +24,14 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
-- **Skills (optional, repo only)** — `skills/` and `loader.py` remain for future overlay guidance; the graph does **not** run `identify_skills` or inject `skill_context` into the orchestrator right now.
+- **Staged Skill Strategy** (`skills/`) — Specialized expertise injected "Just-in-Time":
+  - **LLM-Based Routing**: A dedicated `IdentifySkills` step (in `loader.py`) uses an atomic LLM call to select relevant skill IDs from the filesystem based on conversation history and data profile.
+  - **Reasoning Layer** (`approach.md`): Domain-specific mental models injected into the Orchestrator to guide planning and safety (e.g., `data_integrity`).
+  - **Pattern Layer** (`patterns.py`): Vetted code blueprints injected into the `code_pipeline` to ensure professional execution (e.g., `forecasting` templates).
+  - **PascalCase Loader**: A clean, traced ingestor that handles token budgets and folder-based discovery.
+
 - **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.use_neon: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
 - **Observability** — optional **Langfuse** tracing: graph nodes and tools use `@observe` / nested spans; **`api/main.py`** wraps **`POST /run`** and **`POST /resume`** in **`propagate_attributes(...)`** so `session_id`, tags, and small request metadata attach to traces. **`observability/langfuse_handler.get_langfuse_client()`** uses the Langfuse SDK; if you set **`LANGFUSE_BASE_URL`** but not **`LANGFUSE_HOST`**, the client copies it into **`LANGFUSE_HOST`** for compatibility.
-
----
 
 ## Graph architecture
 
@@ -60,10 +63,16 @@ agent_filesystem/                          # Runtime data (gitignored); flat per
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
-skills/                                      # Curated reasoning guidance (approach.md per skill)
-  loader.py                                  # Skill markdown assembly (not wired into graph currently)
-  data_science_workflow/ … tabular_prep/ … metric_answering/ …
-  visual_answering/ … one_shot_forecast/ …
+skills/                                      # Expert "Just-in-Time" library
+  loader.py                                  # PascalCase: IdentifySkills (LLM-based), LoadReasoningSkills, LoadPatternSkills
+  data_integrity/                            # Skill: Grain checks, row-count validation, join safety
+    approach.md                              #   Reasoning layer
+  forecasting/                               # Skill: Date hygiene, seasonality, stationarity
+    approach.md                              #   Reasoning layer
+    patterns.py                              #   Execution layer (Prophet, gap-filling)
+  visualization/                             # Skill: Professional storytelling and charting
+    approach.md                              #   Reasoning layer
+    patterns.py                              #   Execution layer (Seaborn/Matplotlib templates)
 middleware/
   context_editing.py                         # Truncate messages at safe turn boundaries
   (message summarisation lives in ``context_editing.py`` — ``truncate_and_summarize``)
@@ -90,14 +99,14 @@ tools/
 prompts/
   graph_prompts.py                           # Orchestrator SYSTEM_PROMPT
   build_codegen_requirement_prompt.py        # Requirement-builder system prompt
-  skills_prompts.py                          # Skill identification prompt (unused by graph currently)
+  skill_identification_prompt.py             # Router persona and selection rules
   code_generation_prompt.py                  # Codegen system prompt
   code_judge_prompt.py                       # Judge system prompt
 output_validation/
-  build_codegen_requirement.py               # Pydantic output validation for requirement builder
-  code_generation.py                         # Pydantic output validation for code generation
-  judge_output.py                            # Pydantic output validation for the LLM judge
-  skill_selection.py                         # Pydantic for skill selection (unused by graph currently)
+  build_codegen_requirement.py               # Pydantic: requirement builder
+  code_generation.py                         # Pydantic: code generation
+  judge_output.py                            # Pydantic: LLM judge
+  skill_selection.py                         # Pydantic: skill router (selected_skills)
   scratchpad.py                              # Pydantic args for ``write_scratchpad``
   write_todos.py                             # Pydantic models for ``write_todos`` tool args
 api/

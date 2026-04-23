@@ -52,6 +52,7 @@ from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.profiling_data import profile_session_workspace
 from tools.planning.write_scratchpad import write_scratchpad
 from tools.planning.write_todos import write_todos
+from skills.loader import LoadReasoningSkills, IdentifySkills
 
 # ---------------------------------------------------------------------------
 # Config
@@ -107,6 +108,7 @@ class AgentState(TypedDict):
     todos: NotRequired[list[TodoEntry]]
     scratchpad: Annotated[list[str], add]
     tool_call_count: int
+    active_skills: List[str]
 
 
 # ---------------------------------------------------------------------------
@@ -202,13 +204,24 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     data_profile = state.get("data_profile")
     if not isinstance(data_profile, list):
         data_profile = []
+    
+    # Skill identification and injection
+    active_skills = IdentifySkills(messages, data_profile)
+    skill_guidance = LoadReasoningSkills(active_skills)
+    
     workspace_block = (
         "Session workspace (data_profile list, auto-refreshed before this turn):\n"
         f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}\n\n"
     )
+    
+    expert_block = ""
+    if skill_guidance:
+        expert_block = f"### EXPERT GUIDANCE (Reasoning Skills):\n{skill_guidance}\n\n"
+
     context = (
         f"{paths_block}"
         f"{workspace_block}"
+        f"{expert_block}"
         f"{todos_block}"
         f"{pad_block}"
         f"Conversation summary:\n{summary}\n\n"
@@ -238,6 +251,7 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         "messages": remove_ops + [response],
         "message_summary": summary,
         "tool_call_count": state.get("tool_call_count", 0) + len(tool_calls),
+        "active_skills": active_skills,
     }
 
 

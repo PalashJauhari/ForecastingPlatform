@@ -49,6 +49,7 @@ from session_paths import (
     session_id_from_config,
     session_root,
 )
+from skills.loader import LoadPatternSkills
 
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
@@ -148,6 +149,7 @@ def _code_pipeline_impl(
     data_profile: str = "",
     previous_code_violation: str = "",
     session_id: str = "default",
+    active_skills: list[str] = [],
 ) -> str:
     """Generate, validate, save, and run Python for a tabular-data task in one tool call.
 
@@ -198,8 +200,10 @@ def _code_pipeline_impl(
         + "\n\n## Data profile\n"
         + data_profile.strip()
     )
-    if previous_code_violation.strip():
-        user_payload += "\n\n## Previous code policy violations\n" + previous_code_violation.strip()
+    pattern_guidance = LoadPatternSkills(active_skills)
+    if pattern_guidance:
+        user_payload += "\n\n## Vetted Code Patterns (Use these as blueprints)\n" + pattern_guidance.strip()
+
     prompt_messages = [
         SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
         HumanMessage(content=user_payload),
@@ -353,9 +357,13 @@ def code_pipeline(
     """LangChain wrapper for the traced code pipeline implementation."""
     # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
+    state = runtime.get_state()
+    active_skills = state.values.get("active_skills", [])
+    
     return _code_pipeline_impl(
         task=task,
         data_profile=data_profile,
         previous_code_violation=previous_code_violation,
         session_id=session_id,
+        active_skills=active_skills,
     )
