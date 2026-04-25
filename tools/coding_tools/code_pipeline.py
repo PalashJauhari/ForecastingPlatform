@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import yaml
@@ -45,6 +46,7 @@ from session_paths import (
     ensure_session_dirs,
     logical_pipeline_run_path,
     resolve_agent_path,
+    session_dir_for_paths,
     session_id_from_config,
     session_root,
 )
@@ -52,6 +54,10 @@ from skills.loader import LoadPatternSkills
 
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
+
+# Plot artifacts the per-question run folder may contain. Anything else (csv/xlsx) lands at
+# session root via the ``safe_to_*`` patches, so this set is intentionally tiny.
+PLOT_FILE_EXTENSIONS = frozenset({".png", ".svg"})
 
 # ---------------------------------------------------------------------------
 # Config (loaded once at import)
@@ -318,11 +324,35 @@ def _code_pipeline_impl(
     }
 
     # ------------------------------------------------------------------
-    # Step 4 — Run script: subprocess, no shell, project root as cwd
-    # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
+    # Step 4 — Allocate per-question plot folder
+    #
+    # Each ``code_pipeline`` invocation gets its own ``run_<run_id>/`` subfolder under the
+    # session workspace. ``plt.savefig`` writes are routed there by the runtime patch, so
+    # the UI can display only the plots produced by this specific tool call. Tabular
+    # outputs (csv/xlsx) still land at session root and remain reusable across questions.
+    # ``run_id`` is generated locally (12 hex chars) — short, unique, and independent of
+    # any LangChain/RunnableConfig internals so the contract is explicit.
     # ------------------------------------------------------------------
-    cmd = [sys.executable, str(SANDBOX_RUNNER), str(out_path), str(session_workspace)]
-    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT, "session_id": session_id}) as execution_span:
+    run_id = uuid.uuid4().hex[:12]
+    run_workspace = session_workspace / f"run_{run_id}"
+    # ``apply_patches`` will mkdir again inside the subprocess; we create here too so the
+    # parent can scan the folder after execution even if the script wrote nothing.
+    run_workspace.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Step 5 — Run script: subprocess, no shell, project root as cwd
+    # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
+    # The third argv carries the per-question plot folder across the process boundary;
+    # RunnableConfig does not propagate to subprocesses, so we pass it explicitly.
+    # ------------------------------------------------------------------
+    cmd = [
+        sys.executable,
+        str(SANDBOX_RUNNER),
+        str(out_path),
+        str(session_workspace),
+        str(run_workspace),
+    ]
+    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT, "session_id": session_id, "run_id": run_id}) as execution_span:
         try:
             proc = subprocess.run(
                 cmd,
@@ -344,8 +374,24 @@ def _code_pipeline_impl(
             execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
         execution_span.update(output=execution, metadata={"returncode": execution["returncode"], "timed_out": execution["returncode"] == 124, "stdout_length": len(execution.get("stdout", "")), "stderr_length": len(execution.get("stderr", ""))})
 
-    result = json.dumps({"code_generation": gen, "execution": execution}, default=str)
-    langfuse.update_current_span(output={"code_generation_passed": True, "execution": execution}, metadata={"final_stage": "execute_subprocess", "status": "completed"})
+    # ------------------------------------------------------------------
+    # Step 6 — Collect plot artifacts
+    #
+    # Scan the per-question run folder for plot files. Returned as logical
+    # ``agent_filesystem/<session>/run_<run_id>/<file>`` paths so the UI can fetch them
+    # via the ``GET /artifact`` endpoint. By listing only the run folder we get perfect
+    # per-message isolation: previous questions live under different ``run_<id>/`` and
+    # never leak into the current tool result.
+    # ------------------------------------------------------------------
+    plots: list[str] = []
+    if run_workspace.exists():
+        sid = session_dir_for_paths(session_id)
+        for f in sorted(run_workspace.iterdir()):
+            if f.is_file() and f.suffix.lower() in PLOT_FILE_EXTENSIONS:
+                plots.append(f"agent_filesystem/{sid}/run_{run_id}/{f.name}")
+
+    result = json.dumps({"code_generation": gen, "execution": execution, "plots": plots}, default=str)
+    langfuse.update_current_span(output={"code_generation_passed": True, "execution": execution, "plot_count": len(plots)}, metadata={"final_stage": "execute_subprocess", "status": "completed", "run_id": run_id})
     return result
 
 

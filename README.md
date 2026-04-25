@@ -1,6 +1,6 @@
 # GaussianBlurr
 
-An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **flat `agent_filesystem/<session>/`** workspace (uploads, outputs, and `pipeline_run.py` share one folder per session). Logical paths look like **`agent_filesystem/<session>/<filename>`**. Before each orchestrator turn, the **`data_profile`** graph node runs **`profiling_data.profile_session_workspace`**, which fills the **`data_profile`** state field with a **list** of per-file summaries (row counts, column names, dtypes, null counts, previews, and richer column stats where available). **Profiling does not write a snapshot file**—only graph state and the orchestrator’s assembled context carry the profile. There is no list/read tool on the graph.
+An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **session workspace under `agent_filesystem/<session>/`**. Tabular uploads and outputs (`.csv`, `.xlsx`) and **`pipeline_run.py`** live at the **session root** so later questions can reuse them. Each **`code_pipeline`** run also allocates **`run_<run_id>/`** under that session; **matplotlib** saves (`plt.savefig` / `Figure.savefig`) write **`.png`** / **`.svg`** only into that folder so the UI can show **plots for the current turn** without mixing in older images. Logical paths look like **`agent_filesystem/<session>/<filename>`** for tabular files and **`agent_filesystem/<session>/run_<run_id>/<plot>.png`** for plots. Before each orchestrator turn, the **`data_profile`** graph node runs **`profiling_data.profile_session_workspace`**, which fills the **`data_profile`** state field with a **list** of per-file summaries (row counts, column names, dtypes, null counts, previews, and richer column stats where available). **Profiling does not write a snapshot file**—only graph state and the orchestrator’s assembled context carry the profile. There is no list/read tool on the graph.
 
 On each **orchestrator** step, after optional message summarisation, **`IdentifySkills`** picks skill folder ids from disk; **`LoadReasoningSkills`** loads their **`approach.md`** text into the prompt; **`active_skills`** is written to state so **`build_codegen_requirement`** and **`code_pipeline`** can reuse the same routing for reasoning and optional **`patterns.py`** snippets.
 
@@ -11,19 +11,20 @@ On each **orchestrator** step, after optional message summarisation, **`Identify
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
 - **OpenAI rate limiting (server-side)** — optional shared [`InMemoryRateLimiter`](https://python.langchain.com/docs/integrations/chat/openai/#rate-limiting) from `middleware/llm_rate_limit.py`, attached inside **`middleware/llm_client.make_llm`** to every `ChatOpenAI` built through that factory (orchestrator, summarisation path, codegen, requirement planner, judge, skill router). Tuned under `llm_rate_limit` in `config.yaml`; set `enabled: false` to disable.
-- **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`.
+- **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`. The orchestrator uses **`make_llm`** then **`llm.bind_tools(TOOLS)`** (`graph/graph.py`); codegen paths use **`make_llm(..., output_schema=...)`** without tools.
 - **Workspace profiling (`data_profile`)** — the **`data_profile`** node runs from **START** and again after **`tools`** (`tools` → `data_profile` → `orchestrator`). It only updates the **`data_profile`** list in state (not `todos` / `scratchpad`). **`profiling_data.profile_session_workspace`** walks the whole session directory tree, collects every `.csv`/`.xlsx`, and returns **`build_session_data_profile`**’s list (one dict per path). Success entries include `file`, `row_count`, `columns` (names), and `head` (first five rows as dicts); failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage (same idea in **`build_codegen_requirement`**).
 - **Session planning in state** — `write_todos` replaces the full todo list (`content` + `status` per item); `write_scratchpad` appends a full **`note`** to state while the tool return shown in chat is a short **`summary`** (length-capped). Both merge via `Command`. The orchestrator sees **Current todo list** and **Scratchpad** as JSON each turn.
 - **Requirement planning before codegen** — `build_codegen_requirement` reads **`data_profile`**, **`message_summary`**, **`active_skills`** (and reloads reasoning text via **`LoadReasoningSkills`**), messages, and the orchestrator **`brief`**, before `code_pipeline`.
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
-- **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root).
+- **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root), with optional **`run_<run_id>/`** subfolders for plot artifacts only.
 - **Graph execution cap** — LangGraph’s `recursion_limit` in `config.yaml` bounds how many super-steps a single `/run` or `/resume` call can take, which is the main protection against runaway tool loops.
-- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/pipeline_run.py` → subprocess runner.
+- **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/pipeline_run.py` → subprocess runner. Tool result JSON includes **`plots`**: logical paths under **`run_<run_id>/`** for **`.png`** / **`.svg`** files created that run (empty list if none).
+- **Plot artifacts in the UI** — FastAPI **`GET /artifact/{session_id}/{path}`** (`api/main.py`) serves allowlisted files from the session directory (containment-checked). Dash builds image URLs via **`GaussianBlurrApiClient.artifact_url`** and renders **png/svg/jpg/jpeg** inline in chat bubbles; other outputs stay as **`Saved: …`** text.
 - **Two-layer code sandbox** —
-  - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
-  - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches `builtins.open`, `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` for path/extension rules under `agent_filesystem/`. Applied only while the generated script runs.
-  - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
+  - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` (tabular paths + allowed **`plt.savefig` / `Figure.savefig`** with bare **`.png`** / **`.svg`** literals only).
+  - **Layer 2 — Runtime patch** (`tools/coding_tools/code_scan/runtime_patch_scan.py`): monkey-patches **`builtins.open`** (allowlisted extensions including `.png`/`.svg` for library internals), **`pd.read_csv` / `pd.read_excel` / `df.to_csv` / `df.to_excel`** (paths resolve under the **session** workspace), and **`plt.savefig` / `Figure.savefig`** (paths resolve under the **per-run** `run_<run_id>/` folder passed into the subprocess). Applied only while the generated script runs.
+  - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script with **three** argv: path to **`pipeline_run.py`**, **session workspace** (data read/write root), **run workspace** (plot write root). It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
 - **Skills** (`skills/`) — Just-in-time expertise:
@@ -60,8 +61,9 @@ START → data_profile → orchestrator → [has tool calls?]
 ```
 config.yaml                                  # Models, middleware, graph, llm_rate_limit, checkpointer, paths, …
 session_paths.py                             # Session id → disk root; logical agent_filesystem/… ↔ Path (cross-session safety)
-agent_filesystem/                          # Runtime data (gitignored); flat per session
-  <session_id>/                              # Uploads, CSV/XLSX outputs, plots, pipeline_run.py
+agent_filesystem/                          # Runtime data (gitignored); one folder per session
+  <session_id>/                              # Session root: uploads, CSV/XLSX outputs, pipeline_run.py
+    run_<run_id>/                            # Per code_pipeline invocation: plot outputs (.png / .svg) only
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
@@ -86,7 +88,7 @@ tools/
     build_codegen_requirement.py            # Requirement builder before code_pipeline
     code_pipeline.py                         # Codegen → Semgrep → judge → save → run
     code_scan/
-      run_pipeline_sandboxed.py              # Runtime patches + RLIMIT + BLAS env + CPU pin (Linux)
+      run_pipeline_sandboxed.py              # argv: pipeline_run.py, session_workspace, run_workspace; patches + limits
       semgrep_scan.py                        # Layer 1 — Semgrep
       llm_judge.py                           # Post-Semgrep LLM review
       runtime_patch_scan.py                  # Layer 2 — I/O monkey-patches
@@ -107,10 +109,10 @@ output_validation/
   scratchpad.py                              # Pydantic args for ``write_scratchpad``
   write_todos.py                             # Pydantic models for ``write_todos`` tool args
 api/
-  main.py                                    # POST /run, /resume, /upload-data
+  main.py                                    # POST /run, /resume, /upload-data; GET /artifact/… for plots & files
 ui/
   __init__.py
-  api_client.py                              # HTTP client for FastAPI (upload / run / resume)
+  api_client.py                              # HTTP client (upload / run / resume + artifact_url for GET /artifact)
   dash_app.py                                # Plotly Dash UI (layout + callbacks)
   assets/                                    # Static CSS for Dash (e.g. markdown in chat)
 observability/
@@ -137,7 +139,7 @@ observability/
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | **build_codegen_requirement** | `brief` | Reads graph state (**`data_profile`**, **`message_summary`**, **`active_skills`**, messages); returns a validated execution requirement JSON before the orchestrator calls `code_pipeline` or clarifies with the user. |
-| **code_pipeline** | `task`, `data_profile`, optional `previous_code_violation` | Orchestrator-supplied **`data_profile`** is a **string** argument: optional extra hints for codegen (summarize from **Session workspace** list in context). Injects **`LoadPatternSkills(active_skills)`** from checkpoint state into the codegen payload. Pipeline: structured codegen → Semgrep → LLM judge → `pipeline_run.py` → `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On failure, retry with `previous_code_violation` set from `code_safety_evaluation.detail`. |
+| **code_pipeline** | `task`, `data_profile`, optional `previous_code_violation` | Orchestrator-supplied **`data_profile`** is a **string** argument: optional extra hints for codegen (summarize from **Session workspace** list in context). Injects **`LoadPatternSkills(active_skills)`** from checkpoint state into the codegen payload. Pipeline: structured codegen → Semgrep → LLM judge → `pipeline_run.py` → `run_pipeline_sandboxed.py` (session + **`run_<run_id>/`** workspaces). Returns JSON with **`code_generation`**, **`execution`**, and **`plots`** (logical paths for png/svg written that run). On failure, retry with `previous_code_violation` set from `code_safety_evaluation.detail`. |
 | **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
 | **write_scratchpad** | `note`, `summary` | Appends `note` via `Command`; `summary` is the `ToolMessage` (≤2 lines, ≤400 chars). Full entries are JSON in **Scratchpad** each turn. |
 | **write_todos** | `todos` | Replaces the session todo list via `Command`. `ToolMessage` confirms count only; full list is in state and in **Current todo list** JSON each turn (`[]` if empty). |
@@ -175,13 +177,14 @@ code_pipeline:
   timeout_seconds: 120
 
 paths:
+  # On-disk: ./agent_filesystem/<session>/ (tabular I/O) and ./agent_filesystem/<session>/run_<id>/ (plots per pipeline run)
   agent_filesystem: "agent_filesystem"
 
 checkpointer:
   use_neon: false                    # true + DATABASE_URL → PostgresSaver (Neon, etc.)
 ```
 
-Logical paths: `agent_filesystem/<session-folder>/<file>` (flat folder on disk under `./agent_filesystem/<session-folder>/`).
+Logical paths: **`agent_filesystem/<session-folder>/<file>`** for tabular artifacts at session root; **`agent_filesystem/<session-folder>/run_<run_id>/<plot>.png`** (or `.svg`) for plot outputs from a single **`code_pipeline`** invocation.
 
 **`llm_rate_limit`** — LangChain’s process-local token bucket for outbound OpenAI requests (not a Dash/browser limit). One `InMemoryRateLimiter` instance from `middleware/llm_rate_limit.py` is passed as `rate_limiter=` into each `ChatOpenAI` so concurrent tools and the orchestrator share the same cap. Parameters match LangChain: `requests_per_second`, `check_every_n_seconds`, `max_bucket_size`.
 
@@ -257,6 +260,7 @@ The browser UI is **`ui/dash_app.py`**. It does not call OpenAI directly; it onl
 | `upload_data(bytes, filename, session_id)` | `POST /upload-data` | `session_id`, multipart `files` |
 | `run(query, session_id)` | `POST /run` | `query`, `session_id` |
 | `resume(resume_value, session_id)` | `POST /resume` | `resume_value`, `session_id` |
+| `artifact_url(session_id, relative_path)` | `GET /artifact/{session_id}/{path}` | Builds URL for browser `<img src>`; accepts logical `agent_filesystem/...` or session-relative `run_<id>/file.png` |
 
 - **Base URL:** defaults to `http://127.0.0.1:8000`. Override with **`GAUSSIANBLURR_API_URL`** (no trailing slash), e.g. another host or reverse proxy.
 - **Timeouts:** uploads **120s**; agent **/run** and **/resume** **600s** (see `ui/api_client.py`).
@@ -307,10 +311,15 @@ The browser UI is **`ui/dash_app.py`**. It does not call OpenAI directly; it onl
 | `count` | Number of files saved |
 | `renamed` | List of `{ "original_name", "stored_name" }` when a duplicate filename was avoided (`_2`, `_3`, … before the suffix); empty when no renames |
 
+### `GET /artifact/{session_id}/{path}` — static file (plots & outputs)
+
+Serves one file from **`./agent_filesystem/<session>/`** relative to **`path`** (FastAPI’s `:path` segment; may include slashes, e.g. **`run_abc123def456/trend.png`**). Extensions allowed: **`.csv`**, **`.xlsx`**, **`.png`**, **`.svg`**. Responses: **400** if the resolved path escapes the session root, **403** for other extensions, **404** if missing or not a regular file.
+
 ---
 
 ## Notes
 
+- **`run_<run_id>/` plots** — Each successful **`code_pipeline`** execution creates a new **`run_<run_id>/`** directory; only that run’s **`plots`** list targets those files, so the UI does not need to diff the whole session folder between questions.
 - **`data_profile` vs `code_pipeline.data_profile`** — Graph state **`data_profile`** is the auto-refreshed **list** of per-file profiles. The **`code_pipeline`** tool exposes a separate **`data_profile`** **string** parameter for optional codegen hints (often a short summary pasted from the Session workspace list).
 - **`active_skills`** — Refreshed every orchestrator step; requirement planning and codegen both read it from graph state so skill routing stays consistent for the turn.
 - **Graph recursion cap** — LangGraph stops a single execution when it reaches `graph.recursion_limit`, which is the hard guard against runaway loops in the orchestrator → tools cycle.

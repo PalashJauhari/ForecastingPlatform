@@ -2,20 +2,35 @@
 Runtime I/O sandbox for **LLM-generated pipeline code** (Layer 2).
 
 Applied in the subprocess that runs ``pipeline_run.py`` (see ``run_pipeline_sandboxed.py``):
-call ``apply_patches(session_root)`` before user code runs and ``remove_patches()`` in a
-``finally`` block so the interpreter returns to normal behavior.
+call ``apply_patches(session_root, run_root)`` before user code runs and ``remove_patches()``
+in a ``finally`` block so the interpreter returns to normal behavior.
 
-**Two enforcement layers**
+**Two write boundaries**
+
+* ``session_root`` (``SANDBOX``) — long-lived per-session workspace. Holds uploaded data
+  files and tabular outputs that may be reused by future questions in the same session.
+* ``run_root`` (``SANDBOX_RUN``) — short-lived per-question subfolder, e.g.
+  ``agent_filesystem/<session>/run_<run_id>/``. Holds **plot artifacts** for one tool call
+  so the UI can show only the plots produced by the current message (no leakage between
+  turns). Tabular outputs do **not** go here — they live at session root so the next
+  question can read them back.
+
+**Three enforcement layers**
 
 1. **Pandas entry points** (``read_excel``, ``read_csv``, ``to_excel``, ``to_csv``): the model
-   must pass a **bare filename** (e.g. ``sales.csv``). The path is joined with ``session_root``,
+   must pass a **bare filename** (e.g. ``sales.csv``). The path is joined with ``SANDBOX``,
    resolved, and checked to stay inside that directory. Allowed extensions depend on the call
    (Excel vs CSV); see each ``safe_*`` wrapper.
 
-2. **``builtins.open``** (used by pandas, openpyxl, and temp files): str/Path opens are allowed
-   only for ``.csv``, ``.xlsx``, and ``.xls``, **anywhere** on the host, so engines
-   can open temp copies and absolute paths. Sensitive extensions (``.pem``, ``.json``, …) are
-   always rejected.
+2. **Matplotlib savefig** (``plt.savefig`` / ``Figure.savefig``): the model must pass a
+   **bare filename** ending in ``.png`` or ``.svg``. The path is joined with ``SANDBOX_RUN``
+   so plots are isolated per question. Other extensions (e.g. ``.pdf``, ``.jpg``) are
+   rejected to keep the artifact surface small and predictable in the UI.
+
+3. **``builtins.open``** (used by pandas, openpyxl, matplotlib backends, PIL, etc.): str/Path
+   opens are allowed only for ``.csv``, ``.xlsx``, ``.xls``, ``.png``, and ``.svg``, **anywhere**
+   on the host, so engines can open temp copies and absolute paths the savefig wrappers have
+   already validated. Sensitive extensions (``.pem``, ``.key``, ``.json``, …) are always rejected.
 
 **Mimetype database passthrough**
 
@@ -23,10 +38,6 @@ On import, openpyxl constructs ``mimetypes.MimeTypes()``, which opens files list
 ``mimetypes.knownfiles`` (e.g. ``/etc/apache2/mime.types``). Those paths are not tabular; we
 allow **read-only** access to exactly that CPython allowlist so Excel works without widening
 arbitrary ``open()`` to other system files.
-
-**Plots**
-
-``plt.savefig`` / ``Figure.savefig`` are replaced with stubs that raise: tabular outputs only.
 """
 
 from __future__ import annotations
@@ -43,7 +54,13 @@ import pandas as pd
 _MISSING = object()
 
 # Session workspace root (``agent_filesystem/<session>/``), set by ``apply_patches``.
+# Holds uploaded data + tabular outputs that may be reused across questions.
 SANDBOX: Path | None = None
+
+# Per-question plot folder (``agent_filesystem/<session>/run_<run_id>/``), set by
+# ``apply_patches``. Only ``plt.savefig`` / ``Figure.savefig`` writes are routed here so
+# the UI can scope plot rendering to one message bubble.
+SANDBOX_RUN: Path | None = None
 
 # Rejected for every I/O path (credentials, keys, arbitrary JSON reads of secrets, etc.).
 GLOBALLY_BLOCKED_EXTENSIONS = {
@@ -51,8 +68,14 @@ GLOBALLY_BLOCKED_EXTENSIONS = {
     ".pfx", ".der", ".cer", ".p8",
 }
 
-# Allowed suffixes for patched ``open()`` on str/Path (not used for mimetype DB passthrough).
-ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls"})
+# Allowed suffixes for patched ``open()`` on str/Path. Includes ``.png`` / ``.svg`` so the
+# matplotlib backend (AGG → PIL for PNG, native XML writer for SVG) can write the file
+# handle that ``safe_pyplot_savefig`` / ``safe_figure_savefig`` already redirected into
+# ``SANDBOX_RUN``. Direct ``open()`` calls in user code are blocked at the Semgrep layer.
+ALLOWED_OPEN_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls", ".png", ".svg"})
+
+# Allowed suffixes for the savefig wrappers (matplotlib only writes one file per call).
+ALLOWED_PLOT_EXTENSIONS = frozenset({".png", ".svg"})
 
 
 def _norm_open_path_key(path: str | Path) -> str:
@@ -92,6 +115,64 @@ def _require_sandbox() -> Path:
     if SANDBOX is None:
         raise RuntimeError("Session sandbox is not configured.")
     return SANDBOX
+
+
+def _require_run_workspace() -> Path:
+    """Return the active per-question plot folder; raise if ``apply_patches`` has not run."""
+    if SANDBOX_RUN is None:
+        raise RuntimeError("Plot run workspace is not configured.")
+    return SANDBOX_RUN
+
+
+def _resolve_run_plot_path(path: str, operation: str) -> Path:
+    """
+    Map a bare plot filename to an absolute path under ``SANDBOX_RUN``.
+
+    Mirrors ``_resolve_session_path`` but routes savefig writes into the per-question
+    run folder instead of the session root, so each user message owns its plots.
+    """
+    run_root = _require_run_workspace()
+    raw = str(path).strip()
+
+    if not _is_bare_session_filename(raw):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : only a bare filename is allowed (e.g. plot.png) — no folders, prefixes, or paths\n"
+        )
+
+    ext = Path(raw).suffix.lower()
+
+    if ext in GLOBALLY_BLOCKED_EXTENSIONS:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : '{ext}' files are globally blocked -- no exceptions\n"
+            f"  Blocked   : {GLOBALLY_BLOCKED_EXTENSIONS}\n"
+        )
+    if ext not in ALLOWED_PLOT_EXTENSIONS:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : extension '{ext}' not allowed for {operation}\n"
+            f"  Allowed   : {ALLOWED_PLOT_EXTENSIONS}\n"
+        )
+
+    target = (run_root / raw).resolve()
+    try:
+        target.relative_to(run_root)
+    except ValueError as exc:
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : {operation}\n"
+            f"  Path      : {path}\n"
+            f"  Reason    : path escapes the per-question plot workspace\n"
+            f"  Allowed   : {run_root}\n"
+        ) from exc
+    return target
 
 
 def _is_bare_session_filename(path: str) -> bool:
@@ -231,7 +312,10 @@ def safe_open(file, mode="r", *args, **kwargs):  # noqa: A001
     3. Other str/Path targets: suffix must be in ``ALLOWED_OPEN_EXTENSIONS`` and not in
        ``GLOBALLY_BLOCKED_EXTENSIONS``.
 
-    Session directory rules apply to **pandas** helpers, not to every ``open()`` call.
+    Session directory rules apply to **pandas** helpers; per-question plot folder rules
+    apply to **savefig** wrappers. Direct ``open()`` calls in user code are blocked at the
+    Semgrep layer, so the only opens reaching this wrapper are from library internals
+    (pandas/openpyxl reading temp copies, matplotlib backend writing PNG/SVG bytes).
     """
     # Fail closed if patches were not installed (caller bug).
     _require_sandbox()
@@ -334,35 +418,60 @@ def safe_to_csv(self, *args, **kwargs):
     return original_to_csv(self, resolved, *rest, **kw)
 
 
-def safe_pyplot_savefig(*args, **kwargs):
-    """Block image export; use CSV/Excel writers for artifacts."""
-    raise PermissionError(
-        "\n[SANDBOX VIOLATION]\n"
-        "  Operation : plt.savefig()\n"
-        "  Reason    : image output is disabled; use DataFrame.to_csv / to_excel only\n"
-    )
+def safe_pyplot_savefig(fname, *args, **kwargs):
+    """
+    ``plt.savefig`` with ``fname`` restricted to a bare ``.png`` / ``.svg`` under ``SANDBOX_RUN``.
+
+    Module-level ``plt.savefig`` defers to the current ``Figure.savefig`` internally, so this
+    wrapper just validates the basename and forwards the absolute path to the original.
+    """
+    if not isinstance(fname, (str, Path)):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : plt.savefig()\n"
+            f"  Reason    : only str or pathlib.Path is allowed as fname (no buffers, no streams)\n"
+        )
+    resolved = _resolve_run_plot_path(str(fname), "plt.savefig()")
+    return original_pyplot_savefig(resolved, *args, **kwargs)
 
 
 def safe_figure_savefig(self, fname, *args, **kwargs):
-    """Block image export; use CSV/Excel writers for artifacts."""
-    raise PermissionError(
-        "\n[SANDBOX VIOLATION]\n"
-        "  Operation : Figure.savefig()\n"
-        "  Reason    : image output is disabled; use DataFrame.to_csv / to_excel only\n"
-    )
+    """
+    ``Figure.savefig`` with ``fname`` restricted to a bare ``.png`` / ``.svg`` under ``SANDBOX_RUN``.
+
+    Bound method form — first positional after ``self`` is the filename.
+    """
+    if not isinstance(fname, (str, Path)):
+        raise PermissionError(
+            f"\n[SANDBOX VIOLATION]\n"
+            f"  Operation : Figure.savefig()\n"
+            f"  Reason    : only str or pathlib.Path is allowed as fname (no buffers, no streams)\n"
+        )
+    resolved = _resolve_run_plot_path(str(fname), "Figure.savefig()")
+    return original_figure_savefig(self, resolved, *args, **kwargs)
 
 
 # -- Public API ---------------------------------------------------------------
 
-def apply_patches(session_root: str | Path) -> None:
+def apply_patches(session_root: str | Path, run_root: str | Path) -> None:
     """
     Install sandbox wrappers for ``open``, selected pandas methods, and matplotlib savefig.
 
-    ``session_root`` must be the absolute or resolvable directory for the current run
-    (typically ``agent_filesystem/<session_id>/``).
+    Parameters
+    ----------
+    session_root :
+        Long-lived per-session workspace (typically ``agent_filesystem/<session_id>/``).
+        Pandas reads / writes resolve here so tabular outputs persist across questions.
+    run_root :
+        Per-question plot folder (typically ``agent_filesystem/<session_id>/run_<run_id>/``).
+        Created if missing. ``plt.savefig`` / ``Figure.savefig`` resolve here so each
+        message bubble in the UI shows only the plots from its own tool call.
     """
-    global SANDBOX
+    global SANDBOX, SANDBOX_RUN
     SANDBOX = Path(session_root).resolve()
+    SANDBOX_RUN = Path(run_root).resolve()
+    SANDBOX_RUN.mkdir(parents=True, exist_ok=True)
+
     builtins.open = safe_open  # type: ignore[assignment]
     pd.read_excel = safe_read_excel  # type: ignore[assignment]
     pd.read_csv = safe_read_csv  # type: ignore[assignment]
@@ -378,8 +487,9 @@ def remove_patches() -> None:
     Undo ``apply_patches``; always run in a ``finally`` so a failed script does not leave
     patched globals in the subprocess interpreter.
     """
-    global SANDBOX
+    global SANDBOX, SANDBOX_RUN
     SANDBOX = None
+    SANDBOX_RUN = None
     builtins.open = original_open  # type: ignore[assignment]
     pd.read_excel = original_read_excel  # type: ignore[assignment]
     pd.read_csv = original_read_csv  # type: ignore[assignment]

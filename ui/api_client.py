@@ -11,6 +11,8 @@ Endpoints (must match FastAPI ``Form`` / ``File`` field names):
 - ``POST /run`` — ``application/x-www-form-urlencoded``-style body via
   ``data=``: ``query``, ``session_id``.
 - ``POST /resume`` — ``data=``: ``resume_value``, ``session_id``.
+- ``GET  /artifact/{session_id}/{path}`` — built via :meth:`GaussianBlurrApiClient.artifact_url`,
+  used by the Dash UI's ``html.Img(src=...)`` to render plot artifacts inline.
 
 Successful ``/run`` and ``/resume`` responses are JSON objects; this client
 normalizes missing keys so callers can use ``.get()`` safely.
@@ -106,6 +108,22 @@ class GaussianBlurrApiClient:
     @property
     def base_url(self) -> str:
         return self._base
+
+    def artifact_url(self, session_id: str, relative_path: str) -> str:
+        """
+        Build a fully-qualified ``GET /artifact/...`` URL for an output file.
+
+        Accepts either a logical path produced by ``code_pipeline``
+        (e.g. ``"agent_filesystem/<session>/run_<run_id>/trend.png"``) or a
+        bare session-relative path (e.g. ``"run_<run_id>/trend.png"``); the
+        ``agent_filesystem/<session>/`` prefix is stripped if present so the
+        result always lines up with the server route.
+        """
+        rel = (relative_path or "").lstrip("/")
+        prefix = f"agent_filesystem/{session_id}/"
+        if rel.startswith(prefix):
+            rel = rel[len(prefix):]
+        return f"{self._base}/artifact/{session_id}/{rel}"
 
     def upload_data(self, file_bytes: bytes, filename: str, session_id: str) -> tuple[Optional[str], Optional[str]]:
         """

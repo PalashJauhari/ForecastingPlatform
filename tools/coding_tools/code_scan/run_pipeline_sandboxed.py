@@ -5,6 +5,12 @@ Execute ``pipeline_run.py`` with ``runtime_patch_scan`` I/O monkey-patches enabl
 ``python pipeline_run.py`` directly, so ``builtins.open`` and pandas I/O are wrapped
 before any user code runs.
 
+CLI arguments (all required, all positional):
+    1. ``pipeline_path``    — absolute path to the generated ``pipeline_run.py``.
+    2. ``session_workspace`` — long-lived per-session folder; pandas reads/writes resolve here.
+    3. ``run_workspace``    — per-question folder for plot artifacts (created if missing);
+                              ``plt.savefig`` / ``Figure.savefig`` writes resolve here.
+
 Resource policy (applied in this file before pandas is imported):
     - **200 MiB** virtual address cap (``RLIMIT_AS``) on Unix where supported
     - **BLAS/OpenMP** single-thread env vars
@@ -55,19 +61,23 @@ from runtime_patch_scan import apply_patches, remove_patches
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 4:
         print(
-            "Usage: run_pipeline_sandboxed.py <path_to_pipeline_run.py> <session_workspace>",
+            "Usage: run_pipeline_sandboxed.py "
+            "<path_to_pipeline_run.py> <session_workspace> <run_workspace>",
             file=sys.stderr,
         )
         sys.exit(2)
     target = Path(sys.argv[1]).resolve()
     session_workspace = Path(sys.argv[2]).resolve()
+    # ``run_workspace`` is created by ``apply_patches`` if missing — no precondition here so
+    # the parent does not have to mkdir it before launching the subprocess.
+    run_workspace = Path(sys.argv[3]).resolve()
     if not target.is_file():
         print(f"Not a file: {target}", file=sys.stderr)
         sys.exit(2)
 
-    apply_patches(session_workspace)
+    apply_patches(session_workspace, run_workspace)
     try:
         # Mirrors ``python pipeline_run.py`` (``__name__ == "__main__"``, etc.).
         runpy.run_path(str(target), run_name="__main__")

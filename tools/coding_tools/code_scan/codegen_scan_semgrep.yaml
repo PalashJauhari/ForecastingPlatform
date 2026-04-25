@@ -1,6 +1,7 @@
 # codegen_scan_semgrep.yaml
 # Complete semgrep rules for LLM generated code sandbox
-# Reads/writes: only pd.read_* / df.to_* with .csv / .xlsx path literals; any other file extension is blocked
+# Tabular I/O: only pd.read_* / df.to_* with bare .csv / .xlsx string literals
+# Plot I/O:    only plt.savefig / Figure.savefig with bare .png / .svg string literals
 # Do not use pipeline_run.py as a data/plot path (tool-managed runner)
 # Everything else blocked
 
@@ -1117,7 +1118,7 @@ rules:
     languages: [python]
     severity: ERROR
 
-  # ── BLOCK NON-MATPLOTLIB IMAGE / ARRAY FILE WRITES (plots allowed; files not) ─
+  # ── BLOCK NON-MATPLOTLIB IMAGE WRITES (plots allowed only via plt.savefig) ─
 
   - id: block-image-file-writes
     pattern-either:
@@ -1133,7 +1134,7 @@ rules:
       - pattern: from cv2 import $X
       - pattern: cv2.imwrite(...)
       - pattern: torchvision.utils.save_image(...)
-    message: "image file writes not allowed — only .csv and .xlsx outputs"
+    message: "PIL / imageio / cv2 image writes not allowed — use plt.savefig with a .png or .svg basename for plot output"
     languages: [python]
     severity: ERROR
 
@@ -1239,11 +1240,60 @@ rules:
     languages: [python]
     severity: ERROR
 
-  - id: block-savefig
+  # ── ENFORCE plt.savefig BASENAME .png/.svg LITERAL ──────────────────────
+  # ``plt.savefig`` is allowed for plot artifacts. We require a plain string literal
+  # ending in .png or .svg with no path separators — the runtime patch will resolve it
+  # under ``agent_filesystem/<session>/run_<run_id>/`` so each question owns its plots.
+
+  - id: enforce-pyplot-savefig-png-or-svg-extension
     pattern-either:
-      - pattern: plt.savefig(...)
-      - pattern: $FIG.savefig(...)
-    message: "only .csv and .xlsx file outputs are allowed — savefig is not allowed"
+      - patterns:
+          - pattern: plt.savefig($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: plt.savefig($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.(?:[pP][nN][gG]|[sS][vV][gG])"$'
+      - patterns:
+          - pattern: plt.savefig($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: plt.savefig($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.(?:[pP][nN][gG]|[sS][vV][gG])"$'
+      - patterns:
+          - pattern: plt.savefig(..., fname=$PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: plt.savefig(..., fname=$PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.(?:[pP][nN][gG]|[sS][vV][gG])"$'
+    message: "plt.savefig path must be a basename string literal ending in .png or .svg — no folders, no other extensions"
+    languages: [python]
+    severity: ERROR
+
+  - id: enforce-figure-savefig-png-or-svg-extension
+    pattern-either:
+      - patterns:
+          - pattern: $FIG.savefig($PATH, ...)
+          - pattern-not:
+              patterns:
+                - pattern: $FIG.savefig($PATH, ...)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.(?:[pP][nN][gG]|[sS][vV][gG])"$'
+      - patterns:
+          - pattern: $FIG.savefig($PATH)
+          - pattern-not:
+              patterns:
+                - pattern: $FIG.savefig($PATH)
+                - metavariable-regex:
+                    metavariable: $PATH
+                    regex: '^"[^":/\\]+\.(?:[pP][nN][gG]|[sS][vV][gG])"$'
+    message: "Figure.savefig path must be a basename string literal ending in .png or .svg — no folders, no other extensions"
     languages: [python]
     severity: ERROR
 

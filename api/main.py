@@ -2,9 +2,11 @@
 FastAPI HTTP API for the Forecasting Platform agent.
 
 Endpoints
-    POST /run         — form: ``query``, ``session_id`` (``thread_id`` for the graph).
-    POST /resume      — resume after an ``ask_user`` interrupt.
-    POST /upload-data — multipart: CSV/Excel files → ``agent_filesystem/<session>/<filename>`` (session root).
+    POST /run                              — form: ``query``, ``session_id`` (``thread_id`` for the graph).
+    POST /resume                           — resume after an ``ask_user`` interrupt.
+    POST /upload-data                      — multipart: CSV/Excel files → ``agent_filesystem/<session>/<filename>``.
+    GET  /artifact/{session_id}/{path:path} — serve a static artifact (plot or output file)
+                                              from the session workspace; read-only, sandbox-checked.
 
 Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
 Langfuse keys.
@@ -27,14 +29,18 @@ from langfuse import observe, propagate_attributes
 load_dotenv(PROJECT_ROOT / ".env")
 
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import AIMessage
 
 from graph import AnalysisGraph
 from observability.langfuse_handler import build_request_metadata, get_langfuse_client
-from session_paths import ensure_session_dirs, logical_input_file, resolve_agent_path
+from session_paths import ensure_session_dirs, logical_input_file, resolve_agent_path, session_root
 
 ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
+
+# Extensions the ``/artifact`` endpoint will stream. Mirrors what the LLM is allowed to
+# produce (csv/xlsx tabular outputs + png/svg plot outputs). Anything else is a 403.
+ARTIFACT_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".png", ".svg"}
 
 app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
@@ -203,3 +209,44 @@ async def upload_data(
     response = {"saved": saved, "count": len(saved), "renamed": renamed}
     langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved), "session_id": session_id})
     return response
+
+
+@app.get("/artifact/{session_id}/{path:path}")
+async def artifact(session_id: str, path: str):
+    """
+    Stream a single artifact file from the session workspace.
+
+    The Dash UI calls this for every plot path returned by ``code_pipeline`` (e.g.
+    ``run_<run_id>/trend.png``) and for any other CSV / XLSX outputs the user wants to
+    download. The endpoint is intentionally narrow: read-only, allowlisted extensions,
+    and a hard symlink-resistant containment check against the session root.
+
+    Path semantics
+        ``session_id`` is the conversation key (matches ``thread_id``).
+        ``path``       is everything after the session id, joined with ``/`` (FastAPI's
+                       ``:path`` converter). Examples:
+                          ``forecast.csv``
+                          ``run_a1b2c3d4e5f6/trend.png``
+
+    Failure modes
+        400 — path escapes the session workspace (``..``, absolute, symlink out, …)
+        403 — extension not in ``ARTIFACT_ALLOWED_EXTENSIONS``
+        404 — file does not exist or is not a regular file
+    """
+    root = session_root(session_id).resolve()
+    target = (root / path).resolve()
+
+    # Containment check: ``relative_to`` raises if ``target`` is outside ``root``.
+    # ``.resolve()`` above already followed any symlinks, so this defeats traversal.
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Path escapes session workspace."})
+
+    if target.suffix.lower() not in ARTIFACT_ALLOWED_EXTENSIONS:
+        return JSONResponse(status_code=403, content={"error": f"Extension '{target.suffix}' is not served."})
+
+    if not target.exists() or not target.is_file():
+        return JSONResponse(status_code=404, content={"error": "Artifact not found."})
+
+    return FileResponse(target)

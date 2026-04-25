@@ -105,21 +105,39 @@ def _read_df_from_bytes(raw: bytes, name: str) -> pd.DataFrame | None:
     return None
 
 
+_ARTIFACT_EXTENSIONS = (".csv", ".xlsx", ".png", ".pdf", ".svg", ".jpg", ".jpeg")
+
+
 def _output_paths_from_tool(last_tool: str) -> list[str]:
-    """Best-effort extraction of saved artifact paths from a tool message string."""
+    """
+    Best-effort extraction of saved artifact paths from a tool message string.
+
+    Handles both top-level string fields and list values (``code_pipeline`` returns
+    plot paths under a ``"plots"`` list). A regex pass over the raw text catches
+    anything the structured walk missed (different tool shapes, embedded text, etc.).
+    """
     out: list[str] = []
     if not last_tool:
         return out
+
+    def _maybe_keep(value: object) -> None:
+        if not isinstance(value, str) or not value.startswith("agent_filesystem/"):
+            return
+        low = value.lower()
+        if low.endswith("pipeline_run.py"):
+            return
+        if low.endswith(_ARTIFACT_EXTENSIONS):
+            out.append(value)
+
     try:
         tool_json = json.loads(last_tool)
         if isinstance(tool_json, dict):
             for v in tool_json.values():
-                if isinstance(v, str) and v.startswith("agent_filesystem/"):
-                    low = v.lower()
-                    if low.endswith("pipeline_run.py"):
-                        continue
-                    if low.endswith((".csv", ".xlsx", ".png", ".pdf", ".svg", ".jpg", ".jpeg")):
-                        out.append(v)
+                if isinstance(v, list):
+                    for item in v:
+                        _maybe_keep(item)
+                else:
+                    _maybe_keep(v)
     except Exception:
         pass
     if "agent_filesystem/" in last_tool:
@@ -856,13 +874,41 @@ def render_all(store):
             role = m.get("role", "assistant")
             content = m.get("content", "")
             extras = []
+            # Render artifacts attached to this message:
+            #   * image artifacts (png / svg / jpg / jpeg) → inline <img> via /artifact endpoint
+            #   * everything else (csv / xlsx / pdf)        → text breadcrumb the user can copy
             for fp in m.get("output_files") or []:
-                extras.append(
-                    html.P(
-                        f"Saved: {fp}",
-                        style={"fontSize": "11px", "color": "#666", "margin": "8px 0 0"},
+                low = fp.lower()
+                if low.endswith((".png", ".svg", ".jpg", ".jpeg")):
+                    src = api.artifact_url(sid, fp)
+                    extras.append(
+                        html.A(
+                            html.Img(
+                                src=src,
+                                alt=fp.rsplit("/", 1)[-1],
+                                style={
+                                    "display": "block",
+                                    "maxWidth": "100%",
+                                    "maxHeight": "420px",
+                                    "borderRadius": "8px",
+                                    "border": "1px solid #E8E8E6",
+                                    "marginTop": "8px",
+                                    "background": "#fff",
+                                },
+                            ),
+                            href=src,
+                            target="_blank",
+                            title="Open full size in a new tab",
+                            style={"textDecoration": "none"},
+                        )
                     )
-                )
+                else:
+                    extras.append(
+                        html.P(
+                            f"Saved: {fp}",
+                            style={"fontSize": "11px", "color": "#666", "margin": "8px 0 0"},
+                        )
+                    )
             if role == "user":
                 bubble = html.Div(
                     style={
