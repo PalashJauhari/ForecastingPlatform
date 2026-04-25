@@ -1,6 +1,8 @@
 # GaussianBlurr
 
-An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **flat `agent_filesystem/<session>/`** workspace (uploads, outputs, and `pipeline_run.py` share one folder per session). Logical paths look like **`agent_filesystem/<session>/<filename>`**. Before each orchestrator turn, **`profile_session_file`** runs **`profiling_data.profile_session_workspace`**, which fills **`data_profile`** in checkpointed state with a **list** of per-file summaries (row counts, column names, preview rows). **Profiling does not write a snapshot file**—only graph state and the orchestrator prompt carry the profile. There is no list/read tool on the graph.
+An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **flat `agent_filesystem/<session>/`** workspace (uploads, outputs, and `pipeline_run.py` share one folder per session). Logical paths look like **`agent_filesystem/<session>/<filename>`**. Before each orchestrator turn, the **`data_profile`** graph node runs **`profiling_data.profile_session_workspace`**, which fills the **`data_profile`** state field with a **list** of per-file summaries (row counts, column names, dtypes, null counts, previews, and richer column stats where available). **Profiling does not write a snapshot file**—only graph state and the orchestrator’s assembled context carry the profile. There is no list/read tool on the graph.
+
+On each **orchestrator** step, after optional message summarisation, **`IdentifySkills`** picks skill folder ids from disk; **`LoadReasoningSkills`** loads their **`approach.md`** text into the prompt; **`active_skills`** is written to state so **`build_codegen_requirement`** and **`code_pipeline`** can reuse the same routing for reasoning and optional **`patterns.py`** snippets.
 
 ---
 
@@ -8,15 +10,15 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
-- **OpenAI rate limiting (server-side)** — optional shared [`InMemoryRateLimiter`](https://python.langchain.com/docs/integrations/chat/openai/#rate-limiting) on every backend `ChatOpenAI` (orchestrator, summarisation, codegen, requirement planner, judge); tuned under `llm_rate_limit` in `config.yaml`.
+- **OpenAI rate limiting (server-side)** — optional shared [`InMemoryRateLimiter`](https://python.langchain.com/docs/integrations/chat/openai/#rate-limiting) from `middleware/llm_rate_limit.py`, attached inside **`middleware/llm_client.make_llm`** to every `ChatOpenAI` built through that factory (orchestrator, summarisation path, codegen, requirement planner, judge, skill router). Tuned under `llm_rate_limit` in `config.yaml`; set `enabled: false` to disable.
 - **Five bound tools** — `build_codegen_requirement`, `code_pipeline`, `ask_user`, `write_scratchpad`, `write_todos`.
-- **Workspace profiling (`data_profile`)** — **`profile_session_file`** runs from **START** and again after **`tools`** (`tools` → `profile_session_file` → `orchestrator`). It only updates **`data_profile`** (not `todos` / `scratchpad` / `tool_call_count`). **`profiling_data.profile_session_workspace`** walks the whole session directory tree, collects every `.csv`/`.xlsx`, and returns **`build_session_data_profile`**’s list (one dict per path). Success entries include `file`, `row_count`, `columns` (names), and `head` (first five rows as dicts); failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage (same idea in **`build_codegen_requirement`**).
+- **Workspace profiling (`data_profile`)** — the **`data_profile`** node runs from **START** and again after **`tools`** (`tools` → `data_profile` → `orchestrator`). It only updates the **`data_profile`** list in state (not `todos` / `scratchpad`). **`profiling_data.profile_session_workspace`** walks the whole session directory tree, collects every `.csv`/`.xlsx`, and returns **`build_session_data_profile`**’s list (one dict per path). Success entries include `file`, `row_count`, `columns` (names), and `head` (first five rows as dicts); failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage (same idea in **`build_codegen_requirement`**).
 - **Session planning in state** — `write_todos` replaces the full todo list (`content` + `status` per item); `write_scratchpad` appends a full **`note`** to state while the tool return shown in chat is a short **`summary`** (length-capped). Both merge via `Command`. The orchestrator sees **Current todo list** and **Scratchpad** as JSON each turn.
-- **Requirement planning before codegen** — `build_codegen_requirement` reads the **`data_profile`** list (as JSON text in its planner prompt), messages, and **`message_summary`**, plus the orchestrator **`brief`**, before `code_pipeline`.
+- **Requirement planning before codegen** — `build_codegen_requirement` reads **`data_profile`**, **`message_summary`**, **`active_skills`** (and reloads reasoning text via **`LoadReasoningSkills`**), messages, and the orchestrator **`brief`**, before `code_pipeline`.
 - **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
 - **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root).
-- **Per-session tool budget** — `middleware.tool_call_limit.check_tool_call_limit` runs at the start of each `orchestrator` step; `tool_call_count` in graph state accumulates each batch of tool calls the model requests (parallel calls count separately). When the counter is already ≥ `max_calls`, the orchestrator returns a final `AIMessage` with **no** `tool_calls` **without invoking the LLM** on that step, so routing goes straight to `END`.
+- **Graph execution cap** — LangGraph’s `recursion_limit` in `config.yaml` bounds how many super-steps a single `/run` or `/resume` call can take, which is the main protection against runaway tool loops.
 - **Code execution pipeline** (`tools/coding_tools/code_pipeline.py`) — LLM codegen → **Semgrep** (static) → **LLM judge** → save `agent_filesystem/<session>/pipeline_run.py` → subprocess runner.
 - **Two-layer code sandbox** —
   - **Layer 1 — Semgrep** (`tools/coding_tools/code_scan/semgrep_scan.py`): static scan on generated source before save, using `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml`.
@@ -24,11 +26,10 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
   - **Runner** (`tools/coding_tools/code_scan/run_pipeline_sandboxed.py`): `code_pipeline` always executes generated code through this script. It applies runtime patches, sets **200 MiB** virtual address limit (`RLIMIT_AS` where supported), caps **BLAS/OpenMP to one thread** via environment variables (before pandas loads), pins the process to **CPU 0** on **Linux** (`sched_setaffinity`), then runs `pipeline_run.py` via `runpy.run_path`.
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
-- **Staged Skill Strategy** (`skills/`) — Specialized expertise injected "Just-in-Time":
-  - **LLM-Based Routing**: A dedicated `IdentifySkills` step (in `loader.py`) uses an atomic LLM call to select relevant skill IDs from the filesystem based on conversation history and data profile.
-  - **Reasoning Layer** (`approach.md`): Domain-specific mental models injected into the Orchestrator to guide planning and safety (e.g., `data_integrity`).
-  - **Pattern Layer** (`patterns.py`): Vetted code blueprints injected into the `code_pipeline` to ensure professional execution (e.g., `forecasting` templates).
-  - **PascalCase Loader**: A clean, traced ingestor that handles token budgets and folder-based discovery.
+- **Skills** (`skills/`) — Just-in-time expertise:
+  - **`IdentifySkills`** (`skills/loader.py`) — one structured LLM call per orchestrator turn; chooses subdirectory names under `skills/` that exist on disk, using the post-truncation message window and **`data_profile`**.
+  - **`LoadReasoningSkills`** — concatenates each selected skill’s **`approach.md`** in full (no token cap).
+  - **`LoadPatternSkills`** — used inside **`code_pipeline`**; appends any **`patterns.py`** from the same **`active_skills`** list into the codegen user payload (skills without that file contribute nothing there).
 
 - **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.use_neon: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
 - **Observability** — optional **Langfuse** tracing: graph nodes and tools use `@observe` / nested spans; **`api/main.py`** wraps **`POST /run`** and **`POST /resume`** in **`propagate_attributes(...)`** so `session_id`, tags, and small request metadata attach to traces. **`observability/langfuse_handler.get_langfuse_client()`** uses the Langfuse SDK; if you set **`LANGFUSE_BASE_URL`** but not **`LANGFUSE_HOST`**, the client copies it into **`LANGFUSE_HOST`** for compatibility.
@@ -36,8 +37,8 @@ An analysis assistant built with a custom **LangGraph `StateGraph`**, a single *
 ## Graph architecture
 
 ```
-START → profile_session_file → orchestrator → [has tool calls?]
-                                                                        ├─ YES → ToolNode → profile_session_file → orchestrator (loop)
+START → data_profile → orchestrator → [has tool calls?]
+                                                                        ├─ YES → ToolNode → data_profile → orchestrator (loop)
                                                                         └─ NO  → END
 ```
 
@@ -47,37 +48,33 @@ START → profile_session_file → orchestrator → [has tool calls?]
 |-----|------|---------|
 | `messages` | `Annotated[list, add_messages]` | Full conversation — `HumanMessage`, `AIMessage`, `ToolMessage`. Supports `RemoveMessage` for truncation. |
 | `message_summary` | `str` | Running summary of evicted messages. |
-| `data_profile` | `list` | Replaced every time **`profile_session_file`** runs. If the value is not a list (corrupt state), the orchestrator treats it as **`[]`**. Rendered for the LLM via **`json.dumps`** in the **Session workspace** block. |
+| `data_profile` | `list` | Replaced every time the **`data_profile`** graph node runs. If the value is not a list (corrupt state), the orchestrator treats it as **`[]`**. Rendered for the LLM via **`json.dumps`** in the **Session workspace** block. |
 | `todos` | `list[dict]` | Optional. Each item: `content` (str), `status` (`pending` \| `in_progress` \| `completed`). Replaced entirely on each `write_todos` call. |
 | `scratchpad` | `Annotated[list[str], operator.add]` | Session notes, oldest→newest. Each `write_scratchpad` call supplies `[note]`; `operator.add` concatenates lists (list `+`). |
-| `tool_call_count` | `int` | Cumulative orchestrator-requested tool calls for the session; each successful orchestrator step adds `len(tool_calls)` (after `ask_user`-in-batch rejection clears the batch). Compared against `middleware.tool_call_limit.max_calls` **before** the LLM runs. |
+| `active_skills` | `list[str]` | Skill folder ids chosen on the latest orchestrator step (`IdentifySkills`). Exposed to **`build_codegen_requirement`** and **`code_pipeline`** so reasoning and pattern snippets stay aligned with routing. |
 
 ---
 
 ## Repository layout
 
 ```
-config.yaml                                  # Models, middleware, graph, llm_rate_limit, checkpointer (use_neon), …
+config.yaml                                  # Models, middleware, graph, llm_rate_limit, checkpointer, paths, …
+session_paths.py                             # Session id → disk root; logical agent_filesystem/… ↔ Path (cross-session safety)
 agent_filesystem/                          # Runtime data (gitignored); flat per session
   <session_id>/                              # Uploads, CSV/XLSX outputs, plots, pipeline_run.py
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
-skills/                                      # Expert "Just-in-Time" library
-  loader.py                                  # PascalCase: IdentifySkills (LLM-based), LoadReasoningSkills, LoadPatternSkills
-  data_integrity/                            # Skill: Grain checks, row-count validation, join safety
-    approach.md                              #   Reasoning layer
-  forecasting/                               # Skill: Date hygiene, seasonality, stationarity
-    approach.md                              #   Reasoning layer
-    patterns.py                              #   Execution layer (Prophet, gap-filling)
-  visualization/                             # Skill: Professional storytelling and charting
-    approach.md                              #   Reasoning layer
-    patterns.py                              #   Execution layer (Seaborn/Matplotlib templates)
+skills/                                      # One folder per skill id (hyphenated names on disk)
+  loader.py                                  # IdentifySkills, LoadReasoningSkills, LoadPatternSkills (Langfuse‑traced)
+  data-processing/  data-readiness/  data_integrity/  evaluation-design/
+  feature-engineering/  forecasting/  grain-and-aggregation/  interpretation/
+  problem-framing/  visualization/           # each: approach.md; forecasting/ + visualization/ also ship patterns.py
 middleware/
+  llm_client.py                              # make_llm(...) — shared ChatOpenAI + rate_limiter + optional structured output
   context_editing.py                         # Truncate messages at safe turn boundaries
   (message summarisation lives in ``context_editing.py`` — ``truncate_and_summarize``)
-  llm_rate_limit.py                          # Shared ``InMemoryRateLimiter`` for ``ChatOpenAI`` (``config.yaml`` → ``llm_rate_limit``)
-  tool_call_limit.py                         # Per-session cap helper (used from orchestrator)
+  llm_rate_limit.py                          # Shared ``InMemoryRateLimiter`` (``config.yaml`` → ``llm_rate_limit``)
   __init__.py
 tools/
   human_in_loop/
@@ -127,11 +124,11 @@ observability/
 | Function | Module | Role |
 |----------|--------|------|
 | `truncate_and_summarize` | `middleware/context_editing.py` | Truncation + running summary when token estimate exceeds threshold. |
-| `OPENAI_RATE_LIMITER` | `middleware/llm_rate_limit.py` | Optional `InMemoryRateLimiter` built from `llm_rate_limit` in `config.yaml`; attached to every `ChatOpenAI` in the graph and coding tools. |
-| `check_tool_call_limit` | `middleware/tool_call_limit.py` | Returns a stop `AIMessage` when session `tool_call_count` ≥ `max_calls` (checked at the top of `orchestrator`, before summarisation and the LLM). |
+| `make_llm` | `middleware/llm_client.py` | Builds `ChatOpenAI` with shared rate limiter and optional `with_structured_output(...)`. |
+| `OPENAI_RATE_LIMITER` | `middleware/llm_rate_limit.py` | Optional `InMemoryRateLimiter` from `config.yaml`; consumed by `make_llm` (not wired on ad‑hoc clients that bypass the factory). |
 | — | `code_pipeline` (tool) | Codegen → Semgrep → LLM judge → save → `run_pipeline_sandboxed.py` execution. |
 
-**Graph nodes (non-middleware):** `profile_session_file`, `orchestrator`, `tools`.
+**Graph nodes (non-middleware):** `data_profile`, `orchestrator`, `tools`.
 
 ---
 
@@ -139,8 +136,8 @@ observability/
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| **build_codegen_requirement** | `brief` | Reads **`data_profile`** and conversation state; returns a validated execution requirement before the orchestrator calls `code_pipeline` or clarifies with the user. |
-| **code_pipeline** | `task`, `data_profile`, optional `previous_code_violation` | Orchestrator-supplied **`data_profile`** is a **string** argument: optional extra hints for codegen (summarize from **Session workspace** list in context). Pipeline: structured codegen → Semgrep → LLM judge → `pipeline_run.py` → `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On failure, retry with `previous_code_violation` set from `code_safety_evaluation.detail`. |
+| **build_codegen_requirement** | `brief` | Reads graph state (**`data_profile`**, **`message_summary`**, **`active_skills`**, messages); returns a validated execution requirement JSON before the orchestrator calls `code_pipeline` or clarifies with the user. |
+| **code_pipeline** | `task`, `data_profile`, optional `previous_code_violation` | Orchestrator-supplied **`data_profile`** is a **string** argument: optional extra hints for codegen (summarize from **Session workspace** list in context). Injects **`LoadPatternSkills(active_skills)`** from checkpoint state into the codegen payload. Pipeline: structured codegen → Semgrep → LLM judge → `pipeline_run.py` → `run_pipeline_sandboxed.py`. Returns JSON with `code_generation` and `execution`. On failure, retry with `previous_code_violation` set from `code_safety_evaluation.detail`. |
 | **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
 | **write_scratchpad** | `note`, `summary` | Appends `note` via `Command`; `summary` is the `ToolMessage` (≤2 lines, ≤400 chars). Full entries are JSON in **Scratchpad** each turn. |
 | **write_todos** | `todos` | Replaces the session todo list via `Command`. `ToolMessage` confirms count only; full list is in state and in **Current todo list** JSON each turn (`[]` if empty). |
@@ -151,39 +148,37 @@ observability/
 
 ```yaml
 models:
-  orchestrator: "gpt-4o-mini"       # Main agent LLM
-  code_generation: "gpt-4o-mini"    # Codegen LLM inside code_pipeline
-  code_judge: "gpt-4o-mini"         # Judge after Semgrep
-  message_summarisation: "gpt-4o-mini"   # Summary LLM for context eviction
-  # codegen_requirement: "gpt-4o-mini"  # optional; build_codegen_requirement defaults to orchestrator if omitted
+  orchestrator: "gpt-5.4-mini"       # Main agent + skill router; edit to taste
+  code_generation: "gpt-5.4-mini"  # code_pipeline codegen
+  code_judge: "gpt-5.4-mini"         # Post-Semgrep judge
+  message_summarisation: "gpt-5.4-mini"
+  # codegen_requirement: "…"       # optional; build_codegen_requirement defaults to orchestrator if omitted
 
 middleware:
   context_editing:
-    keep_recent_messages: 10         # Messages to keep after truncation
+    keep_recent_messages: 10
   message_summarisation:
-    token_threshold: 100000          # Rough token estimate to trigger summarisation
-  tool_call_limit:
-    max_calls: 25                    # Session-wide cap on orchestrator-requested tool calls (parallel = multiple)
+    token_threshold: 100000
 
 graph:
-  recursion_limit: 100               # Max LangGraph super-steps per ``invoke`` (run + resume)
-  max_concurrency: 2                 # Max parallel runnable work where LangGraph applies it
+  recursion_limit: 100               # Max LangGraph super-steps per invoke (run + resume)
+  max_concurrency: 2
 
-# Shared bucket for all ``ChatOpenAI`` clients (set ``enabled: false`` to disable).
+# Shared process-local token bucket for OpenAI calls made through make_llm (set enabled: false to disable).
 llm_rate_limit:
   enabled: true
   requests_per_second: 1.0
   check_every_n_seconds: 0.1
-  max_bucket_size: 2.0
+  max_bucket_size: 5.0               # burst capacity (not “parallelism”; see LangChain docs)
 
 code_pipeline:
-  timeout_seconds: 120               # Wall-clock subprocess timeout for generated script
-
-skills:
-  max_skill_context_tokens: 3000     # Reserved for future skill overlays (graph does not load skills today)
+  timeout_seconds: 120
 
 paths:
-  agent_filesystem: "agent_filesystem"   # logical prefix + ./agent_filesystem/ on disk
+  agent_filesystem: "agent_filesystem"
+
+checkpointer:
+  use_neon: false                    # true + DATABASE_URL → PostgresSaver (Neon, etc.)
 ```
 
 Logical paths: `agent_filesystem/<session-folder>/<file>` (flat folder on disk under `./agent_filesystem/<session-folder>/`).
@@ -215,6 +210,7 @@ The Dash UI talks to the HTTP API only (via `ui/api_client.py`) and does **not**
 | `LANGFUSE_SECRET_KEY` | No | Langfuse tracing |
 | `LANGFUSE_HOST` | No | Langfuse API host (SDK default); use **`LANGFUSE_BASE_URL`** instead if you prefer—`get_langfuse_client()` maps it to `LANGFUSE_HOST` when the latter is unset |
 | `DATABASE_URL` | When Postgres checkpoints are on | Postgres connection URI (e.g. Neon). Required only if `checkpointer.use_neon: true` in `config.yaml` (see **Checkpoints** below). |
+| `GAUSSIANBLURR_API_URL` | No | Dash UI only: API origin (no trailing slash). Defaults to `http://127.0.0.1:8000`. |
 
 ---
 
@@ -316,7 +312,8 @@ The browser UI is **`ui/dash_app.py`**. It does not call OpenAI directly; it onl
 ## Notes
 
 - **`data_profile` vs `code_pipeline.data_profile`** — Graph state **`data_profile`** is the auto-refreshed **list** of per-file profiles. The **`code_pipeline`** tool exposes a separate **`data_profile`** **string** parameter for optional codegen hints (often a short summary pasted from the Session workspace list).
-- **Tool call cap** — per-session total via `middleware.tool_call_limit.max_calls` and `tool_call_count` state. The guard runs **before** the LLM on each orchestrator step; a single assistant step can still increment the counter by the full parallel batch size, so the running total can land **slightly above** `max_calls` if the model requests many tools in one turn when the counter was already near the limit. To reset the budget on every new user message instead, pass `tool_call_count: 0` in the dict passed to `graph.invoke` for that turn (overrides the checkpoint for that key).
+- **`active_skills`** — Refreshed every orchestrator step; requirement planning and codegen both read it from graph state so skill routing stays consistent for the turn.
+- **Graph recursion cap** — LangGraph stops a single execution when it reaches `graph.recursion_limit`, which is the hard guard against runaway loops in the orchestrator → tools cycle.
 - **Ignored files** — `*.docx` is listed in `.gitignore` for local guides; `agent_filesystem/` is ignored as runtime data.
 - **Production checkpoints:** see **Checkpoints (InMemory vs Postgres / Neon)** above. Changing **`AgentState`** incompatibly can break old checkpoints—use a new **`session_id`** after migrations.
 - If `code_pipeline` is blocked by Semgrep or the LLM judge, check `code_safety_evaluation.detail` in the tool result, pass `previous_code_violation` on retry, and adjust rules in `tools/coding_tools/code_scan/codegen_scan_semgrep.yaml` if needed.

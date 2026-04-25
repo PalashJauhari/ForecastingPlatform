@@ -11,8 +11,6 @@ middleware:
     keep_recent_messages: 10
   message_summarisation:
     token_threshold: 100000
-  tool_call_limit:
-    max_calls: 25
 
 # LangGraph ``invoke`` / ``stream`` runtime (top-level ``RunnableConfig`` keys, not under ``configurable``).
 graph:
@@ -29,9 +27,6 @@ llm_rate_limit:
 
 code_pipeline:
   timeout_seconds: 120
-
-skills:
-  max_skill_context_tokens: 3000
 
 paths:
   # On-disk: ./agent_filesystem/<session>/ — flat folder (uploads, outputs, pipeline_run.py)

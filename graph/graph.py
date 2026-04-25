@@ -1,9 +1,9 @@
 """
 LangGraph entrypoint for the data-analysis agent: orchestrator + tools + checkpointing.
 
-Flow: ``profile_session_file`` runs **immediately before** ``orchestrator`` on every
+Flow: the ``data_profile`` node runs **immediately before** ``orchestrator`` on every
 orchestrator turn: once from **START**, and again after **tools** (``tools`` →
-``profile_session_file`` → ``orchestrator``). Then ``orchestrator`` → (optional) ``tools`` loop.
+``data_profile`` → ``orchestrator``). Then ``orchestrator`` → (optional) ``tools`` loop.
 Code execution goes through ``code_pipeline`` (codegen, Semgrep, judge, run).
 """
 
@@ -36,7 +36,6 @@ from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
 from middleware.llm_client import make_llm
-from middleware.tool_call_limit import check_tool_call_limit
 from observability.langfuse_handler import (
     extract_usage_details,
     get_langfuse_client,
@@ -62,7 +61,6 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
 KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
 TOKEN_THRESHOLD = int(cfg["middleware"]["message_summarisation"]["token_threshold"])
-MAX_TOOL_CALLS = int(cfg["middleware"]["tool_call_limit"]["max_calls"])
 _USE_NEON = bool((cfg.get("checkpointer") or {}).get("use_neon"))
 GRAPH_RECURSION_LIMIT = int((cfg.get("graph") or {}).get("recursion_limit", 100))
 GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
@@ -91,7 +89,7 @@ class AgentState(TypedDict):
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles.
         data_profile         — list of per-file profiling dicts from
-                               ``profiling_data.profile_session_workspace`` (``profile_session_file``).
+                               ``profiling_data.profile_session_workspace`` (graph node ``data_profile``).
                                Each entry uses ``file`` = basename only and includes
                                ``row_count``, ``column_count``, ``columns``, ``dtypes``,
                                ``null_counts``, ``head``, ``column_profiles``, and
@@ -99,14 +97,12 @@ class AgentState(TypedDict):
                                refreshed before every orchestrator call.
         todos                — session task list maintained via ``write_todos`` (full replace each call).
         scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
-        tool_call_count      — cumulative count of orchestrator-emitted tool calls this session (parallel calls count separately).
     """
     messages: Annotated[list, add_messages]
     message_summary: str
     data_profile: List[Any]
     todos: NotRequired[list[TodoEntry]]
     scratchpad: Annotated[list[str], add]
-    tool_call_count: int
     active_skills: List[str]
 
 
@@ -131,19 +127,19 @@ langfuse = get_langfuse_client()
 # ---------------------------------------------------------------------------
 
 
-def profile_session_file(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def data_profile(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
     Delegate to ``profiling_data.profile_session_workspace``: read every top-level
-    session CSV/XLSX file, build a rich in-memory profile, and set ``data_profile``.
+    session CSV/XLSX file, build a rich in-memory profile, and set state key ``data_profile``.
     Does not modify ``todos`` or ``scratchpad``. Tracing uses ``start_as_current_observation``
     so metadata is applied via ``obs.update`` on the open span (avoids ``update_current_span``
     missing the observation when the OTEL current span does not match the node span).
     """
     session_id = session_id_from_config(config)
-    with langfuse.start_as_current_observation(name="graph.profile_session_file", as_type="span") as obs:
-        data_profile: List[Any] = profile_session_workspace(session_id)
-        obs.update(metadata={"profile_entries": len(data_profile), "session_id": session_id})
-        return {"data_profile": data_profile}
+    with langfuse.start_as_current_observation(name="graph.data_profile", as_type="span") as obs:
+        rows: List[Any] = profile_session_workspace(session_id)
+        obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
+        return {"data_profile": rows}
 
 
 @observe(name="graph.orchestrator", capture_input=False, capture_output=False)
@@ -152,32 +148,16 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     Core agent node.
 
     Steps executed in order:
-        0. **Tool call budget** — if ``tool_call_count`` has reached ``MAX_TOOL_CALLS``,
-           append a stop ``AIMessage`` and return (no LLM call).
-        1. **Summarisation + truncation** — if token estimate exceeds the
+        0. **Summarisation + truncation** — if token estimate exceeds the
            threshold, evict old messages into a running summary and
            produce ``RemoveMessage`` ops for the ``add_messages`` reducer.
-        2. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with session
+        1. **Invoke LLM** — ``SYSTEM_PROMPT``, then a ``HumanMessage`` with session
            workspace profile list (``data_profile`` as JSON) + conversation summary,
            then prior ``messages``; model has tools bound (``llm_with_tools``).
-
-    If ``middleware.tool_call_limit.max_calls`` is reached before the LLM step, returns a
-    plain ``AIMessage`` (no tool calls) so routing ends at ``END``.
 
     ``config`` provides ``thread_id`` so the HumanMessage can spell the correct
     ``agent_filesystem/<session-folder>/...`` prefix for this checkpoint.
     """
-    limit_msg = check_tool_call_limit(
-        state.get("tool_call_count", 0),
-        MAX_TOOL_CALLS,
-    )
-    if limit_msg:
-        return {
-            "messages": [limit_msg],
-            "message_summary": state.get("message_summary", ""),
-            "tool_call_count": state.get("tool_call_count", 0),
-        }
-
     messages = state["messages"]
     summary = state.get("message_summary", "")
 
@@ -214,7 +194,7 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
     with langfuse.start_as_current_observation(name="graph.orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages)) as generation:
         response = llm_with_tools.invoke(orchestrator_messages)
-        generation.update(output=serialize_message(response), usage_details=extract_usage_details(response), metadata={"tool_call_count": len(response.tool_calls)})
+        generation.update(output=serialize_message(response), usage_details=extract_usage_details(response), metadata={"tool_calls_requested": len(response.tool_calls)})
 
     tool_calls = list(getattr(response, "tool_calls", None) or [])
     ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
@@ -235,7 +215,6 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     return {
         "messages": remove_ops + [response],
         "message_summary": summary,
-        "tool_call_count": state.get("tool_call_count", 0) + len(tool_calls),
         "active_skills": active_skills,
     }
 
@@ -264,7 +243,7 @@ class AnalysisGraph:
 
     Notes
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
-        * **Tools** — ``build_codegen_requirement``, ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos`` (tabular profiles live in ``data_profile`` from ``profile_session_file``).
+        * **Tools** — ``build_codegen_requirement``, ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos`` (tabular profiles live in state ``data_profile``, refreshed by the ``data_profile`` graph node).
         * **Middleware logic** — context editing, summarisation, and per-session tool-call budget run inside the orchestrator node.
         * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
         * **Skills** — the ``skills/`` package and loader remain in the repo for future use; the graph does not load skill overlays into the orchestrator for now.
@@ -293,19 +272,19 @@ class AnalysisGraph:
         """Construct and compile the ``StateGraph``."""
         builder = StateGraph(AgentState)
 
-        builder.add_node("profile_session_file", profile_session_file)
+        builder.add_node("data_profile", data_profile)
         builder.add_node("orchestrator", orchestrator)
         builder.add_node("tools", ToolNode(TOOLS))
 
-        # profile_session_file always runs immediately before orchestrator:
-        #   START → profile_session_file → orchestrator
-        #   tools → profile_session_file → orchestrator
-        builder.set_entry_point("profile_session_file")
-        builder.add_edge("profile_session_file", "orchestrator")
+        # ``data_profile`` node always runs immediately before orchestrator:
+        #   START → data_profile → orchestrator
+        #   tools → data_profile → orchestrator
+        builder.set_entry_point("data_profile")
+        builder.add_edge("data_profile", "orchestrator")
         builder.add_conditional_edges(
             "orchestrator", should_continue, {"tools": "tools", END: END},
         )
-        builder.add_edge("tools", "profile_session_file")
+        builder.add_edge("tools", "data_profile")
 
         return builder.compile(checkpointer=self.checkpointer)
 

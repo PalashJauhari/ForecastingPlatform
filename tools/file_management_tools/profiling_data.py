@@ -1,7 +1,7 @@
 """
 Session tabular profiling for the flat per-session workspace.
 
-Used by ``profile_session_file`` in ``graph/graph.py``. Profiling reads every
+Used by the ``data_profile`` graph node in ``graph/graph.py``. Profiling reads every
 top-level ``.csv`` / ``.xlsx`` file in ``agent_filesystem/<session>/`` and
 returns a list of per-file summaries stored only in graph state
 (``data_profile``).

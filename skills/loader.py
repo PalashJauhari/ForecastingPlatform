@@ -19,23 +19,13 @@ SKILLS_ROOT = Path(__file__).resolve().parent
 langfuse = get_langfuse_client()
 
 
-def GetMaxSkillTokens() -> int:
-    """Read the context budget from config.yaml."""
-    config_path = PROJECT_ROOT / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    return int(cfg.get("skills", {}).get("max_skill_context_tokens", 3000))
-
-
 @observe(name="skills.LoadReasoningSkills")
 def LoadReasoningSkills(skill_names: list[str]) -> str:
     """
-    Ingest 'approach.md' for requested skills. 
-    Assembles a single context block for the Orchestrator.
+    Ingest ``approach.md`` for each requested skill and assemble one context block.
+    All selected skills are included in full (no token budget).
     """
-    max_tokens = GetMaxSkillTokens()
     sections: list[str] = []
-    current_tokens = 0
 
     for name in skill_names:
         skill_dir = SKILLS_ROOT / name
@@ -47,15 +37,7 @@ def LoadReasoningSkills(skill_names: list[str]) -> str:
             continue
 
         text = approach_path.read_text(encoding="utf-8")
-        # Simple token estimation (chars / 4)
-        est_tokens = len(text) // 4
-        
-        if current_tokens + est_tokens > max_tokens:
-            sections.append(f"## SKILL: {name.upper()}\n[Context budget reached, skill omitted]")
-            break
-            
         sections.append(f"## SKILL: {name.upper()}\n{text}")
-        current_tokens += est_tokens
 
     return "\n\n".join(sections)
 
