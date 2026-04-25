@@ -422,8 +422,12 @@ def safe_pyplot_savefig(fname, *args, **kwargs):
     """
     ``plt.savefig`` with ``fname`` restricted to a bare ``.png`` / ``.svg`` under ``SANDBOX_RUN``.
 
-    Module-level ``plt.savefig`` defers to the current ``Figure.savefig`` internally, so this
-    wrapper just validates the basename and forwards the absolute path to the original.
+    Implementation note: matplotlib's ``plt.savefig`` internally delegates to
+    ``gcf().savefig(fname, ...)``. Because we also patch ``Figure.savefig``, naively
+    calling ``original_pyplot_savefig(resolved, ...)`` would re-enter ``safe_figure_savefig``
+    with an *absolute* path, which the bare-filename check then rejects. To avoid that
+    re-entry, we resolve the path here and call the **unpatched** ``Figure.savefig``
+    directly on the current figure.
     """
     if not isinstance(fname, (str, Path)):
         raise PermissionError(
@@ -432,7 +436,9 @@ def safe_pyplot_savefig(fname, *args, **kwargs):
             f"  Reason    : only str or pathlib.Path is allowed as fname (no buffers, no streams)\n"
         )
     resolved = _resolve_run_plot_path(str(fname), "plt.savefig()")
-    return original_pyplot_savefig(resolved, *args, **kwargs)
+    if plt is None or original_figure_savefig is None:
+        raise RuntimeError("matplotlib is not available; plt.savefig cannot be served.")
+    return original_figure_savefig(plt.gcf(), resolved, *args, **kwargs)
 
 
 def safe_figure_savefig(self, fname, *args, **kwargs):
