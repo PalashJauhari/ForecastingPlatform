@@ -61,6 +61,7 @@ def _build_codegen_requirement_impl(
     active_skills = state.get("active_skills", [])
     skill_guidance = LoadReasoningSkills(active_skills)
 
+    # Put planner-only context in one human block, then append the raw conversation so the model can inspect prior turns directly.
     human_payload = (
         "## Files\n"
         "In **every** field of your JSON and in `detailed_requirement`, use **filename only** "
@@ -91,6 +92,7 @@ def _build_codegen_requirement_impl(
         try:
             resp = llm.invoke(prompt_messages)
         except Exception as e:
+            # Fall back to a minimal requirement skeleton so the orchestrator can still ask a targeted clarification question.
             fallback = BuildCodegenRequirementOutput(
                 detailed_requirement=(
                     "1. Objective\n"

@@ -194,6 +194,7 @@ def _code_pipeline_impl(
         output_schema=CodeGenerationOutput,
     )
     pattern_guidance = LoadPatternSkills(active_skills)
+    # Keep implementation guidance in the user payload so codegen sees one fully-assembled spec.
     user_payload = (
         "## Task\n"
         f"{task.strip()}\n\n"
@@ -258,6 +259,7 @@ def _code_pipeline_impl(
         semgrep_report = run_semgrep_scan(code)
         semgrep_span.update(output=semgrep_report, metadata={"passed": semgrep_report["passed"], "violation_count": len(semgrep_report["violations"])})
     if not semgrep_report["passed"]:
+        # Return the blocked source so the caller can inspect it and retry with `previous_code_violation`.
         result = json.dumps(
             {
                 "code_generation": {
@@ -284,6 +286,7 @@ def _code_pipeline_impl(
         model_name=JUDGE_MODEL,
     )
     if not judge_ok:
+        # Mirror the Semgrep failure shape so the orchestrator can handle both safety gates the same way.
         result = json.dumps(
             {
                 "code_generation": {

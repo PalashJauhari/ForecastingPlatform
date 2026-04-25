@@ -191,9 +191,11 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     raw_todos = state.get("todos") or []
     raw_pad = state.get("scratchpad") or []
     data_profile = state.get("data_profile", [])
+    # Select skills after truncation so routing uses the same message window the orchestrator sees.
     active_skills = IdentifySkills(messages, data_profile)
     skill_guidance = LoadReasoningSkills(active_skills)
 
+    # Keep the dynamic context in one synthetic human turn; prior conversation remains as raw messages below.
     context = (
         "## File Rules\n"
         "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "

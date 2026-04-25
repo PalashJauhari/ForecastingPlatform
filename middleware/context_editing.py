@@ -76,6 +76,7 @@ def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     prompt_messages = [SystemMessage(content=SUMMARY_SYSTEM)]
     if previous_summary:
         prompt_messages.append(HumanMessage(content=f"## Previous Summary\n{previous_summary}"))
+    # Reuse the evicted message objects directly so summarisation sees the same structure the orchestrator saw.
     prompt_messages.extend(messages_to_evict)
     prompt_messages.append(HumanMessage(content="Update the running summary using the evicted messages above."))
     with langfuse.start_as_current_observation(name="context.summarize_evicted.llm", as_type="generation", model=SUMMARY_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:

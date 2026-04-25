@@ -101,7 +101,7 @@ def IdentifySkills(messages: list, data_profile: list) -> list[str]:
     model_name = cfg["models"].get("orchestrator", "gpt-4o-mini")
     llm = make_llm(model=model_name, temperature=0, output_schema=SkillSelection)
 
-    # 3. Build Prompt
+    # Give the selector the registry plus the profiled workspace; the raw conversation is appended below.
     user_context = (
         "## Available Skills\n"
         f"{skills_block}\n\n"
@@ -121,7 +121,7 @@ def IdentifySkills(messages: list, data_profile: list) -> list[str]:
     try:
         response = llm.invoke(prompt_messages)
         selected = response.selected_skills
-        # Filter to ensure we only return skills that actually exist
+        # Guard against hallucinated skill ids from structured output.
         return [s for s in selected if s in available_skills]
     except Exception:
         # Fallback to empty list if LLM fails
