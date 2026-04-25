@@ -359,8 +359,7 @@ def code_pipeline(
     """LangChain wrapper for the traced code pipeline implementation."""
     # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
-    state = runtime.get_state()
-    active_skills = state.values.get("active_skills", [])
+    active_skills = (runtime.state or {}).get("active_skills", [])
     
     return _code_pipeline_impl(
         task=task,
