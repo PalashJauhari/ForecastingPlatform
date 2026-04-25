@@ -13,17 +13,17 @@ import yaml
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from langfuse import observe
 from pydantic import BaseModel, Field
 
-from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
+from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
 from output_validation import BuildCodegenRequirementOutput
 from prompts.build_codegen_requirement_prompt import BUILD_CODEGEN_REQUIREMENT_SYSTEM_PROMPT
+from skills.loader import LoadReasoningSkills
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
@@ -55,15 +55,11 @@ def _build_codegen_requirement_impl(
     """
     state = runtime.state
     messages = list(state.get("messages", []))
-    data_profile = state.get("data_profile")
-    if not isinstance(data_profile, list):
-        data_profile = []
-    data_profile_text = (
-        json.dumps(data_profile, indent=2, default=str)
-        if data_profile
-        else "(empty data_profile list — no tabular files in session)"
-    )
+    data_profile = state.get("data_profile", [])
+    data_profile_text = json.dumps(data_profile, indent=2, default=str)
     message_summary = state.get("message_summary", "")
+    active_skills = state.get("active_skills", [])
+    skill_guidance = LoadReasoningSkills(active_skills)
 
     human_payload = (
         "## Files\n"
@@ -73,8 +69,10 @@ def _build_codegen_requirement_impl(
         f"{brief.strip()}\n\n"
         "## Session workspace (data_profile list from graph state)\n"
         f"{data_profile_text}\n\n"
+        "## Expert Guidance (Reasoning Skills)\n"
+        f"{skill_guidance or '(none)'}\n\n"
         "## Conversation Summary\n"
-        f"{message_summary or '(no summary available)'}"
+        f"{message_summary or '(none)'}\n\n"
     )
 
     prompt_messages = [
@@ -83,10 +81,11 @@ def _build_codegen_requirement_impl(
         *messages,
     ]
 
-    _pl_kw = {"model": PLANNING_MODEL, "temperature": 0}
-    if OPENAI_RATE_LIMITER is not None:
-        _pl_kw["rate_limiter"] = OPENAI_RATE_LIMITER
-    llm = ChatOpenAI(**_pl_kw).with_structured_output(BuildCodegenRequirementOutput)
+    llm = make_llm(
+        model=PLANNING_MODEL,
+        temperature=0,
+        output_schema=BuildCodegenRequirementOutput,
+    )
 
     with langfuse.start_as_current_observation(name="build_codegen_requirement.llm", as_type="generation", model=PLANNING_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         try:
@@ -95,19 +94,19 @@ def _build_codegen_requirement_impl(
             fallback = BuildCodegenRequirementOutput(
                 detailed_requirement=(
                     "1. Objective\n"
-                    "Build a safe execution requirement could not be completed from the current context.\n\n"
+                    "Could not produce a reliable execution requirement from the current context.\n\n"
                     "2. Available Data Context\n"
-                    "Use the available workspace files and latest profiling result to restate the user's goal before code generation.\n\n"
+                    "Use the available files and latest profiling result to restate the task.\n\n"
                     "3. Known Findings From Profiling\n"
-                    "The planner failed to produce a validated requirement from the current context.\n\n"
+                    "No validated planning output was produced.\n\n"
                     "4. Required Preprocessing\n"
-                    "No preprocessing steps have been confirmed yet.\n\n"
+                    "No preprocessing steps confirmed.\n\n"
                     "5. Forecasting / Evaluation Constraints\n"
-                    "Preserve chronological integrity and avoid future-data leakage.\n\n"
+                    "Preserve chronological order and avoid leakage.\n\n"
                     "6. Output Expectations\n"
                     "Do not execute code until the blocking ambiguity is resolved.\n\n"
                     "7. Unresolved Ambiguities\n"
-                    "A validated code-generation requirement could not be produced from the current context."
+                    "The current context is insufficient to produce a validated requirement."
                 ),
                 dataset_paths=[],
                 assumptions=[],

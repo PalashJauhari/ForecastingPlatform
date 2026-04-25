@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import os
 import json
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langfuse import observe
 
-from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
+from middleware.llm_client import make_llm
 from prompts.skill_identification_prompt import SKILL_IDENTIFIER_SYSTEM_PROMPT
-from observability.langfuse_handler import serialize_messages, get_langfuse_client
+from observability.langfuse_handler import get_langfuse_client
 from output_validation.skill_selection import SkillSelection
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -102,31 +99,22 @@ def IdentifySkills(messages: list, data_profile: list) -> list[str]:
 
     # 2. Setup LLM
     model_name = cfg["models"].get("orchestrator", "gpt-4o-mini")
-    _kw = {"model": model_name, "temperature": 0}
-    if OPENAI_RATE_LIMITER is not None:
-        _kw["rate_limiter"] = OPENAI_RATE_LIMITER
-    
-    llm = ChatOpenAI(**_kw).with_structured_output(SkillSelection)
+    llm = make_llm(model=model_name, temperature=0, output_schema=SkillSelection)
 
     # 3. Build Prompt
-    conversation_list = []
-    for m in messages:
-        role = type(m).__name__.replace("Message", "").replace("AI", "Assistant")
-        content = m.content if isinstance(m.content, str) else json.dumps(m.content)
-        conversation_list.append(f"{role}: {content}")
-    conversation_text = "\n".join(conversation_list)
-
-    # We separate the Brain (System) from the Data (Human)
     user_context = (
-        f"## Conversation History\n{conversation_text}\n\n"
-        f"## Available Skills\n{skills_block}\n\n"
-        f"## Current Data Profile\n{json.dumps(data_profile, indent=2, default=str)}\n\n"
-        "Analyze the context and data profile above, then select the appropriate skills from the list."
+        "## Available Skills\n"
+        f"{skills_block}\n\n"
+        "## Current Data Profile\n"
+        f"{json.dumps(data_profile, indent=2, default=str)}\n\n"
+        "## Task\n"
+        "Select the appropriate skills from the list using the conversation messages below and the current data profile."
     )
-    
+
     prompt_messages = [
         SystemMessage(content=SKILL_IDENTIFIER_SYSTEM_PROMPT),
-        HumanMessage(content=user_context)
+        HumanMessage(content=user_context),
+        *messages,
     ]
 
     # 4. Invoke

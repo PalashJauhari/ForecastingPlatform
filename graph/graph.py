@@ -24,7 +24,6 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 from langfuse import observe
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -36,7 +35,7 @@ from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
 
 from middleware.context_editing import truncate_and_summarize
-from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
+from middleware.llm_client import make_llm
 from middleware.tool_call_limit import check_tool_call_limit
 from observability.langfuse_handler import (
     extract_usage_details,
@@ -123,10 +122,7 @@ TOOLS = [
     write_todos,
 ]
 
-_orch_kw: Dict[str, Any] = {"model": cfg["models"]["orchestrator"], "temperature": 0}
-if OPENAI_RATE_LIMITER is not None:
-    _orch_kw["rate_limiter"] = OPENAI_RATE_LIMITER
-llm = ChatOpenAI(**_orch_kw)
+llm = make_llm(model=cfg["models"]["orchestrator"], temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
 langfuse = get_langfuse_client()
 
@@ -192,39 +188,26 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
     )
 
-    # 2. System prompt + dynamic context (session workspace profile list, todos, scratchpad, summary) + messages.
-    paths_block = (
-        "Refer to every CSV/Excel by **filename only** (e.g. `sales.csv`) in messages and tool arguments. "
-        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
-    )
     raw_todos = state.get("todos") or []
-    todos_block = f"Current todo list:\n{json.dumps(raw_todos, indent=2)}\n\n"
     raw_pad = state.get("scratchpad") or []
-    pad_block = f"Scratchpad (session notes, oldest to newest):\n{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
-    data_profile = state.get("data_profile")
-    if not isinstance(data_profile, list):
-        data_profile = []
-    
-    # Skill identification and injection
+    data_profile = state.get("data_profile", [])
     active_skills = IdentifySkills(messages, data_profile)
     skill_guidance = LoadReasoningSkills(active_skills)
-    
-    workspace_block = (
-        "Session workspace (data_profile list, auto-refreshed before this turn):\n"
-        f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}\n\n"
-    )
-    
-    expert_block = ""
-    if skill_guidance:
-        expert_block = f"### EXPERT GUIDANCE (Reasoning Skills):\n{skill_guidance}\n\n"
 
     context = (
-        f"{paths_block}"
-        f"{workspace_block}"
-        f"{expert_block}"
-        f"{todos_block}"
-        f"{pad_block}"
-        f"Conversation summary:\n{summary}\n\n"
+        "## File Rules\n"
+        "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
+        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
+        "## Session Workspace\n"
+        f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}\n\n"
+        "### EXPERT GUIDANCE (Reasoning Skills):\n"
+        f"{skill_guidance or '(none)'}\n\n"
+        "## Current Todo List\n"
+        f"{json.dumps(raw_todos, indent=2)}\n\n"
+        "## Scratchpad\n"
+        f"{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
+        "## Conversation Summary\n"
+        f"{summary}\n\n"
     )
     orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
     with langfuse.start_as_current_observation(name="graph.orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages)) as generation:

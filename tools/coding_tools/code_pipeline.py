@@ -31,11 +31,10 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
-from langchain_openai import ChatOpenAI
 from langfuse import observe
 from pydantic import BaseModel, Field
 
-from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
+from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
@@ -189,20 +188,20 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
-    _cg_kw = {"model": CODING_MODEL, "temperature": 0}
-    if OPENAI_RATE_LIMITER is not None:
-        _cg_kw["rate_limiter"] = OPENAI_RATE_LIMITER
-    llm = ChatOpenAI(**_cg_kw).with_structured_output(CodeGenerationOutput)
-    # Markdown sections must stay in sync with ``CODE_GENERATION_SYSTEM_PROMPT`` (data profile + retries).
-    user_payload = (
-        "## Task\n"
-        + task.strip()
-        + "\n\n## Data profile\n"
-        + data_profile.strip()
+    llm = make_llm(
+        model=CODING_MODEL,
+        temperature=0,
+        output_schema=CodeGenerationOutput,
     )
     pattern_guidance = LoadPatternSkills(active_skills)
-    if pattern_guidance:
-        user_payload += "\n\n## Vetted Code Patterns (Use these as blueprints)\n" + pattern_guidance.strip()
+    user_payload = (
+        "## Task\n"
+        f"{task.strip()}\n\n"
+        "## Data Profile\n"
+        f"{data_profile.strip() or '(none)'}\n\n"
+        "## Vetted Code Patterns\n"
+        f"{pattern_guidance.strip() if pattern_guidance else '(none)'}"
+    )
 
     prompt_messages = [
         SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),

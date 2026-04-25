@@ -21,10 +21,9 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
 )
-from langchain_openai import ChatOpenAI
 from langfuse import observe
 
-from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
+from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
     extract_usage_details,
     get_langfuse_client,
@@ -72,26 +71,13 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
 @observe(name="context.summarize_evicted", capture_input=False, capture_output=False)
 def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
-    _kw = {"model": SUMMARY_MODEL, "temperature": 0}
-    if OPENAI_RATE_LIMITER is not None:
-        _kw["rate_limiter"] = OPENAI_RATE_LIMITER
-    llm = ChatOpenAI(**_kw)
+    llm = make_llm(model=SUMMARY_MODEL, temperature=0)
 
-    conversation = "\n".join(
-        f"{type(m).__name__}: {m.content}"
-        for m in messages_to_evict
-        if hasattr(m, "content") and m.content
-    )
-
-    user_content = ""
+    prompt_messages = [SystemMessage(content=SUMMARY_SYSTEM)]
     if previous_summary:
-        user_content += f"## Previous Summary\n{previous_summary}\n\n"
-    user_content += f"## New Messages to Integrate\n{conversation}"
-
-    prompt_messages = [
-        SystemMessage(content=SUMMARY_SYSTEM),
-        HumanMessage(content=user_content),
-    ]
+        prompt_messages.append(HumanMessage(content=f"## Previous Summary\n{previous_summary}"))
+    prompt_messages.extend(messages_to_evict)
+    prompt_messages.append(HumanMessage(content="Update the running summary using the evicted messages above."))
     with langfuse.start_as_current_observation(name="context.summarize_evicted.llm", as_type="generation", model=SUMMARY_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         response = llm.invoke(prompt_messages)
         generation.update(output=serialize_message(response), usage_details=extract_usage_details(response))
