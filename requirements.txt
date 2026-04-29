@@ -42,6 +42,10 @@ pyyaml>=6.0
 statsmodels>=0.14.0
 pmdarima>=2.0.4
 
+# Time-series forecasting (``prophet_tool``): Prophet for univariate trend +
+# seasonality decomposition fits with optional weekly/monthly/yearly seasonality.
+prophet>=1.1.0
+
 # Code safety scanning (`code_pipeline` Semgrep gate)
 semgrep>=1.50.0
 
