@@ -28,7 +28,13 @@ Outputs:
   ``llm_interpretation`` block.
 """
 
-from __future__ import annotations
+# NOTE: Do NOT add ``from __future__ import annotations`` here. LangChain's
+# ``@tool`` decorator introspects function annotations to detect the
+# ``ToolRuntime`` parameter for auto-injection by LangGraph. With PEP 563
+# postponed evaluation, the annotation becomes the string ``"ToolRuntime"``
+# instead of the class object, and LangChain silently skips injection — the
+# tool then fails at call time with "missing 1 required positional argument:
+# 'runtime'". Keep annotations evaluated eagerly here.
 
 import json
 import uuid
