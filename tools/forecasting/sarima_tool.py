@@ -37,7 +37,6 @@ Outputs:
 # 'runtime'". Keep annotations evaluated eagerly here.
 
 import json
-import uuid
 import warnings as _warns
 from pathlib import Path
 from typing import Any, Optional
@@ -105,9 +104,18 @@ ALLOWED_IMAGE_EXTS = {".png", ".svg"}
 langfuse = get_langfuse_client()
 
 
+# Brief: Convert the injected LangChain tool-call id into a safe artifact folder id.
+def run_id_from_runtime(runtime: ToolRuntime) -> str:
+    """Use LangChain's tool-call id as the per-run artifact folder id."""
+    raw_run_id = getattr(runtime, "tool_call_id", "") or "unknown_run"
+    safe_run_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(raw_run_id))
+    return safe_run_id.strip("_") or "unknown_run"
+
+
 class SarimaToolError(Exception):
     """Domain error raised by pipeline stages so the wrapper can return clean JSON."""
 
+    # Brief: Store a stable error code, user-facing message, and pipeline stage.
     def __init__(self, code: str, message: str, stage: str):
         super().__init__(message)
         self.code = code
@@ -120,6 +128,7 @@ class SarimaToolError(Exception):
 # ---------------------------------------------------------------------------
 
 
+# Brief: Load a session CSV/XLSX file and verify that the requested columns exist.
 def data_validation(
     *,
     file_name: str,
@@ -181,6 +190,7 @@ def data_validation(
     return df[[date_column, target_column]].copy()
 
 
+# Brief: Parse dates, enforce a regular time index, and coerce the target to numeric.
 def prepare_time_index(
     df: pd.DataFrame,
     *,
@@ -240,11 +250,12 @@ def prepare_time_index(
     return series, freq
 
 
-def check_target_values(series: pd.Series) -> dict:
+# Brief: Reject target series that SARIMAX cannot fit reliably.
+def check_target_values(series: pd.Series) -> pd.Series:
     """
     Sanity-check the numeric target before model fitting.
 
-    Returns a small JSON-friendly summary so it can be added to the response.
+    Returns the validated series unchanged so callers can keep chaining pipeline steps.
     Raises if the series is unusable (all missing, has gaps, too few values,
     or constant). Strict on missing values because ``statsmodels`` SARIMAX
     behaviour with NaNs is brittle and we want predictable failure messages.
@@ -280,9 +291,10 @@ def check_target_values(series: pd.Series) -> dict:
             "check_target_values",
         )
 
-    return {"n_obs": n_obs, "missing_count": 0, "is_constant": False}
+    return series
 
 
+# Brief: Resolve manual or auto-selected ARIMA/SARIMA orders into one model spec.
 def select_or_prepare_model_order(
     *,
     series: pd.Series,
@@ -410,6 +422,7 @@ def select_or_prepare_model_order(
     )
 
 
+# Brief: Fit the configured SARIMAX model and return the statsmodels result object.
 def fit_model(series: pd.Series, spec: dict) -> Any:
     """Fit SARIMAX with the chosen spec; surfaces a clean error on convergence failure."""
     order = tuple(spec["order"])
@@ -453,6 +466,7 @@ def fit_model(series: pd.Series, spec: dict) -> Any:
             ) from exc
 
 
+# Brief: Summarize fitted-model quality metrics for the response and LLM prompts.
 def extract_fit_quality(fit: Any) -> dict:
     """Return AIC, AICc (small-sample-corrected AIC), BIC, log-likelihood, convergence flag."""
     nobs = int(getattr(fit, "nobs", 0)) or len(getattr(fit, "fittedvalues", []))
@@ -479,6 +493,7 @@ def extract_fit_quality(fit: Any) -> dict:
     }
 
 
+# Brief: Run residual checks and convert failed assumptions into warnings.
 def diagnose_residuals(fit: Any, seasonal_period: Optional[int]) -> dict:
     """
     Run a small standard set of residual checks.
@@ -546,6 +561,7 @@ def diagnose_residuals(fit: Any, seasonal_period: Optional[int]) -> dict:
     }
 
 
+# Brief: Produce future point forecasts and 95% prediction intervals.
 def generate_forecast(
     fit: Any,
     *,
@@ -583,6 +599,7 @@ def generate_forecast(
     return rows
 
 
+# Brief: Save the forecast table in the session workspace.
 def save_forecast(rows: list[dict], *, session_id: str, output_file: str) -> str:
     """Write the forecast table at the session root and return the logical agent path."""
     name = Path(output_file).name
@@ -606,6 +623,7 @@ def save_forecast(rows: list[dict], *, session_id: str, output_file: str) -> str
     return f"agent_filesystem/{sid}/{name}"
 
 
+# Brief: Save the forecast chart in this tool call's run folder.
 def save_forecast_image(
     *,
     history: pd.Series,
@@ -659,6 +677,7 @@ def save_forecast_image(
     return f"agent_filesystem/{sid}/run_{run_id}/{name}"
 
 
+# Brief: Ask the LLM to turn deterministic diagnostics into user-facing summaries.
 def run_llm_interpretations(
     *,
     fit_quality: dict,
@@ -686,12 +705,7 @@ def run_llm_interpretations(
         HumanMessage(content=residual_payload),
     ]
     residual_llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=ResidualAnalysisOutput)
-    with langfuse.start_as_current_observation(
-        name="sarima_tool.llm.residual_analysis",
-        as_type="generation",
-        model=INTERPRETATION_MODEL,
-        input=[serialize_message(m) for m in residual_messages],
-    ) as gen:
+    with langfuse.start_as_current_observation(name="sarima_tool.llm.residual_analysis", as_type="generation", model=INTERPRETATION_MODEL, input=[serialize_message(m) for m in residual_messages]) as gen:
         try:
             resp = residual_llm.invoke(residual_messages)
             interpretations["residual_analysis"] = resp.model_dump()
@@ -772,6 +786,7 @@ def run_llm_interpretations(
     return interpretations
 
 
+# Brief: Assemble the final JSON payload returned to the orchestrator.
 def build_response(
     *,
     file_name: str,
@@ -817,6 +832,7 @@ def build_response(
 
 
 @observe(name="tool.sarima_tool", as_type="tool")
+# Brief: Orchestrate validation, fitting, diagnostics, artifact saving, and response building.
 def run_sarima_pipeline(
     *,
     file_name: str,
@@ -839,86 +855,43 @@ def run_sarima_pipeline(
     column, request a different frequency, fall back to ``code_pipeline``).
     """
     session_id = session_id_from_config(runtime.config)
-    # Per-run id mirrors ``code_pipeline``'s convention so artifacts from
-    # different turns do not collide and the UI can address each one.
-    run_id = uuid.uuid4().hex[:12]
+    # Use the injected LangChain tool-call id so artifact paths map to this run.
+    run_id = run_id_from_runtime(runtime)
 
     try:
-        df = data_validation(
-            file_name=file_name,
-            date_column=date_column,
-            target_column=target_column,
-            session_id=session_id,
-        )
+        # Load and validate the source data before building the time series.
+        df = data_validation(file_name=file_name, date_column=date_column, target_column=target_column, session_id=session_id)
         series, freq = prepare_time_index(df, date_column=date_column, target_column=target_column)
-        check_target_values(series)
+        # Keep the validated target series for model selection and fitting.
+        series = check_target_values(series)
 
-        model_spec, warnings_out = select_or_prepare_model_order(
-            series=series,
-            use_auto_arima=use_auto_arima,
-            order=order,
-            seasonal_order=seasonal_order,
-            seasonal_period=seasonal_period,
-        )
+        # Choose SARIMA parameters from user input or auto-ARIMA.
+        model_spec, warnings_out = select_or_prepare_model_order(series=series, use_auto_arima=use_auto_arima, order=order, seasonal_order=seasonal_order, seasonal_period=seasonal_period)
 
+        # Fit the selected model and collect quality diagnostics.
         fit = fit_model(series, model_spec)
         fit_quality = extract_fit_quality(fit)
         residual_diagnostics = diagnose_residuals(fit, model_spec.get("seasonal_period"))
 
-        forecast_rows = generate_forecast(
-            fit,
-            horizon=int(horizon),
-            freq=freq,
-            last_date=series.index[-1],
-        )
+        # Generate the requested forecast horizon from the fitted model.
+        forecast_rows = generate_forecast(fit, horizon=int(horizon), freq=freq, last_date=series.index[-1])
 
+        # Persist forecast artifacts for downstream display and download.
         forecast_path = save_forecast(forecast_rows, session_id=session_id, output_file=forecast_output_file)
-        image_path = save_forecast_image(
-            history=series,
-            forecast_rows=forecast_rows,
-            session_id=session_id,
-            run_id=run_id,
-            image_file=forecast_image_file,
-        )
+        image_path = save_forecast_image(history=series, forecast_rows=forecast_rows, session_id=session_id, run_id=run_id, image_file=forecast_image_file)
 
-        llm_interpretation = run_llm_interpretations(
-            fit_quality=fit_quality,
-            residual_diagnostics=residual_diagnostics,
-            forecast_rows=forecast_rows,
-            model_spec=model_spec,
-        )
+        # Ask the LLM to summarize model quality and forecast behavior.
+        llm_interpretation = run_llm_interpretations(fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, model_spec=model_spec)
 
         # Bubble residual warnings up to the top-level warnings array so the
         # orchestrator does not have to dig into nested diagnostics.
         for w in residual_diagnostics.get("warnings", []) or []:
             warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
-        response = build_response(
-            file_name=file_name,
-            date_column=date_column,
-            target_column=target_column,
-            freq=freq,
-            run_id=run_id,
-            model_spec=model_spec,
-            fit_quality=fit_quality,
-            residual_diagnostics=residual_diagnostics,
-            forecast_rows=forecast_rows,
-            forecast_path=forecast_path,
-            image_path=image_path,
-            llm_interpretation=llm_interpretation,
-            warnings_out=warnings_out,
-        )
+        # Build the final tool response and attach trace metadata.
+        response = build_response(file_name=file_name, date_column=date_column, target_column=target_column, freq=freq, run_id=run_id, model_spec=model_spec, fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, forecast_path=forecast_path, image_path=image_path, llm_interpretation=llm_interpretation, warnings_out=warnings_out)
 
-        langfuse.update_current_span(
-            metadata={
-                "selection_method": model_spec["selection_method"],
-                "order": str(model_spec["order"]),
-                "seasonal_order": str(model_spec.get("seasonal_order")),
-                "seasonal_period": str(model_spec.get("seasonal_period")),
-                "warnings": str(len(warnings_out)),
-                "run_id": run_id,
-            },
-        )
+        langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out)), "run_id": run_id})
         return response
 
     except SarimaToolError as exc:
@@ -957,6 +930,7 @@ def run_sarima_pipeline(
 
 
 @tool(args_schema=SarimaToolInput)
+# Brief: Public LangChain tool wrapper that exposes SARIMA forecasting to the agent.
 def sarima_tool(
     runtime: ToolRuntime,
     file_name: str,
