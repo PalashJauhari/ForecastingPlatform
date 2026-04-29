@@ -48,6 +48,7 @@ from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.build_codegen_requirement import build_codegen_requirement
 from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.profiling_data import profile_session_workspace
+from tools.forecasting.sarima_tool import sarima_tool
 from tools.planning.write_scratchpad import write_scratchpad
 from tools.planning.write_todos import write_todos
 from skills.loader import LoadReasoningSkills, IdentifySkills
@@ -113,6 +114,7 @@ class AgentState(TypedDict):
 TOOLS = [
     build_codegen_requirement,
     code_pipeline,
+    sarima_tool,
     ask_user,
     write_scratchpad,
     write_todos,
