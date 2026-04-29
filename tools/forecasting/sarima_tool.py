@@ -130,7 +130,7 @@ class SarimaToolError(Exception):
 # ---------------------------------------------------------------------------
 
 
-# Brief: Load, validate, and turn the source file into a model-ready time series.
+# Brief: Load the file, prepare a clean time index, and sanity-check the target series.
 def data_validation(
     *,
     file_name: str,
@@ -141,41 +141,19 @@ def data_validation(
     """
     End-to-end input preparation for the SARIMA pipeline.
 
-    Combines three concerns into one stage so the rest of the pipeline can
-    assume it is working with a clean, model-ready time series:
+    Steps:
+    - Check the file exists in the session workspace; otherwise raise a tool error.
+    - Check the requested date and target columns exist.
+    - Sort by date and drop duplicate dates (keep first).
+    - Infer a regular frequency (ARIMA needs evenly spaced data).
+    - Reject a target series with no numeric values, any missing values, too few
+      values, or a constant target.
 
-    1. File-level validation: bare filename, supported extension (.csv/.xlsx),
-       file existence, required columns present, and minimum row count.
-    2. Time index preparation: parse dates, sort, reject duplicate timestamps,
-       and infer a regular cadence. Statsmodels SARIMAX needs evenly spaced
-       data; we never silently invent a frequency.
-    3. Target sanity checks: no missing values, enough observations, and the
-       series is not constant.
-
-    Returns a numeric ``pd.Series`` indexed by a regular ``DatetimeIndex`` plus
-    the inferred frequency string. Any failure short-circuits with a
-    ``SarimaToolError`` so the orchestrator can return a clean error JSON.
+    Returns ``(series, freq)`` ready for model selection and fitting.
     """
 
-    # 1. Reject anything that is not a bare filename (no path traversal allowed).
+    # 1. Locate the file inside the session workspace; error if missing.
     name = Path(file_name).name
-    if not name:
-        raise SarimaToolError(
-            "invalid_file_name",
-            "file_name must be a bare filename (no path components).",
-            "data_validation",
-        )
-
-    # 2. Only allow CSV / XLSX inputs; everything else is rejected up-front.
-    suffix = Path(name).suffix.lower()
-    if suffix not in ALLOWED_TABLE_EXTS:
-        raise SarimaToolError(
-            "unsupported_file_extension",
-            f"file_name must end with .csv or .xlsx (got '{suffix or 'no extension'}').",
-            "data_validation",
-        )
-
-    # 3. Resolve the file inside the session workspace and confirm it exists.
     path = session_root(session_id) / name
     if not path.exists() or not path.is_file():
         raise SarimaToolError(
@@ -184,13 +162,20 @@ def data_validation(
             "data_validation",
         )
 
-    # 4. Read the file into a DataFrame using the right pandas reader.
+    # 2. Read the file based on its extension.
+    suffix = Path(name).suffix.lower()
     if suffix == ".csv":
         df = pd.read_csv(path)
-    else:
+    elif suffix == ".xlsx":
         df = pd.read_excel(path)
+    else:
+        raise SarimaToolError(
+            "unsupported_file_extension",
+            f"file_name must end with .csv or .xlsx (got '{suffix or 'no extension'}').",
+            "data_validation",
+        )
 
-    # 5. Confirm the required date and target columns are present.
+    # 3. Confirm the required date and target columns are present.
     missing_cols = [c for c in (date_column, target_column) if c not in df.columns]
     if missing_cols:
         raise SarimaToolError(
@@ -199,88 +184,56 @@ def data_validation(
             "data_validation",
         )
 
-    # 6. Reject inputs with too few rows for an ARIMA fit.
-    if len(df) < MIN_OBS:
-        raise SarimaToolError(
-            "too_few_rows",
-            f"Need at least {MIN_OBS} rows to fit ARIMA; got {len(df)}.",
-            "data_validation",
-        )
-
-    # 7. Keep only the date and target columns going forward.
     df = df[[date_column, target_column]].copy()
 
-    # 8. Parse the date column; reject any unparseable values.
-    parsed = pd.to_datetime(df[date_column], errors="coerce")
-    if parsed.isna().any():
-        bad = df.loc[parsed.isna(), date_column].astype(str).head(5).tolist()
-        raise SarimaToolError(
-            "invalid_dates",
-            f"Some values in '{date_column}' could not be parsed as dates (e.g. {bad}).",
-            "data_validation",
-        )
+    # 4. Parse dates, drop unparseable rows, sort, and drop duplicate dates (keep first).
+    df[date_column] = pd.to_datetime(df[date_column], errors="coerce")
+    df = (
+        df.dropna(subset=[date_column])
+        .sort_values(date_column)
+        .drop_duplicates(subset=[date_column], keep="first")
+        .reset_index(drop=True)
+    )
 
-    # 9. Sort by date so the time index is monotonic.
-    df = df.assign(**{date_column: parsed}).sort_values(date_column).reset_index(drop=True)
-
-    # 10. Reject duplicate timestamps; user must aggregate/deduplicate first.
-    if df[date_column].duplicated().any():
-        dupes = df.loc[df[date_column].duplicated(), date_column].astype(str).unique().tolist()
-        raise SarimaToolError(
-            "duplicate_dates",
-            f"Duplicate dates found in '{date_column}': {dupes[:5]}. Aggregate or deduplicate first.",
-            "data_validation",
-        )
-
-    # 11. Infer a regular cadence; ARIMA needs evenly spaced data.
+    # 5. Infer a regular cadence; ARIMA needs evenly spaced data.
     date_idx = pd.DatetimeIndex(df[date_column].values)
     freq = pd.infer_freq(date_idx)
     if freq is None:
         raise SarimaToolError(
             "frequency_not_inferred",
-            (
-                "Could not infer a regular frequency from the date column. "
-                "ARIMA requires evenly spaced data — resample/clean first or ask the user."
-            ),
+            "Could not infer a regular frequency from the date column. Resample/clean first or ask the user.",
             "data_validation",
         )
 
-    # 12. Build the numeric target series indexed by the regular DatetimeIndex.
+    # 6. Build the numeric target series indexed by the regular DatetimeIndex.
     series = pd.Series(
         pd.to_numeric(df[target_column], errors="coerce").values,
         index=pd.DatetimeIndex(date_idx, freq=freq),
         name=target_column,
     )
 
-    # 13. Compute basic counts used by the next sanity checks.
+    # 7. Sanity-check the target series.
     n_obs = int(len(series))
     missing_target = int(series.isna().sum())
 
-    # 14. Reject a series whose target column has no numeric values at all.
     if missing_target == n_obs:
         raise SarimaToolError(
             "all_target_missing",
             "Target column has no usable numeric values.",
             "data_validation",
         )
-
-    # 15. Reject a series with any missing target values; SARIMAX behaviour with NaNs is brittle.
     if missing_target > 0:
         raise SarimaToolError(
             "missing_target_values",
             f"Target column has {missing_target} missing values. Clean/impute the data before fitting ARIMA.",
             "data_validation",
         )
-
-    # 16. Reject a series with too few observations for a meaningful fit.
     if n_obs < MIN_OBS:
         raise SarimaToolError(
             "too_few_target_values",
             f"Need at least {MIN_OBS} target values; got {n_obs}.",
             "data_validation",
         )
-
-    # 17. Reject a constant series; ARIMA cannot be fitted to a flat target.
     if series.nunique() <= 1:
         raise SarimaToolError(
             "constant_target",
@@ -288,7 +241,6 @@ def data_validation(
             "data_validation",
         )
 
-    # 18. Return the model-ready series and its inferred frequency string.
     return series, freq
 
 
@@ -914,20 +866,14 @@ def run_sarima_pipeline(
     try:
         # 1. Load and validate the source file, then turn it into a model-ready time series.
         #    data_validation performs all of the following:
-        #    - Rejects non-bare filenames (no path components allowed).
-        #    - Rejects unsupported extensions; only .csv and .xlsx are allowed.
-        #    - Resolves the file inside the session workspace and confirms it exists.
-        #    - Reads the file with the right pandas reader (csv or xlsx).
+        #    - Confirms the file exists in the session workspace; otherwise raises a tool error.
+        #    - Reads the file via pandas based on its .csv / .xlsx extension.
         #    - Confirms the requested date and target columns are present.
-        #    - Rejects inputs with too few rows for an ARIMA fit (< MIN_OBS).
-        #    - Keeps only the date and target columns going forward.
-        #    - Parses the date column and rejects any unparseable values.
-        #    - Sorts by date so the time index is monotonic.
-        #    - Rejects duplicate timestamps (caller must aggregate/deduplicate first).
+        #    - Sorts by date and drops duplicate dates (keeps the first row per date).
         #    - Infers a regular cadence with pd.infer_freq; ARIMA needs evenly spaced data.
-        #    - Builds a numeric pd.Series indexed by a regular DatetimeIndex.
+        #    - Builds a numeric pd.Series indexed by the regular DatetimeIndex.
         #    - Rejects a series with no numeric values, any missing values, too few values,
-        #      or a constant series; SARIMAX cannot be fitted in those cases.
+        #      or a constant target; SARIMAX cannot be fitted in those cases.
         #    - Returns the model-ready series and its inferred frequency string.
         series, freq = data_validation(file_name=file_name, date_column=date_column, target_column=target_column, session_id=session_id)
 
@@ -957,6 +903,7 @@ def run_sarima_pipeline(
 
         # 9. Attach high-signal trace metadata for langfuse and return the JSON string.
         langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out)), "run_id": run_id})
+        
         return response
 
     except SarimaToolError as exc:
@@ -1042,7 +989,7 @@ def sarima_tool(
     - Bad residual diagnostics are returned as warnings, not errors — the forecast is still produced.
 
     ## Output
-    A JSON string with: ``status``, ``model``, ``fit_quality``, ``residual_diagnostics``, ``forecast_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``), and ``warnings``. When showing results to the user, present the LLM interpretation; do not narrate file paths.
+    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (AIC/AICc/BIC/log-likelihood/converged/n_observations/n_parameters plus inline ``definitions`` for each metric), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``forecast_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation (residual analysis + fit quality + forecast summary + improvement guidance); do not narrate file paths.
     """
     return run_sarima_pipeline(
         file_name=file_name,
