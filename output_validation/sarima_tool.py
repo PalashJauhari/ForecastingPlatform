@@ -142,3 +142,17 @@ class ForecastSummaryOutput(BaseModel):
     business_readout: str = Field(
         description="1 sentence translating the forecast into a business takeaway.",
     )
+
+
+class ModelImprovementGuidanceOutput(BaseModel):
+    """Plain-English suggestions for tuning the model further, grounded in provided diagnostics."""
+
+    summary: str = Field(
+        description="1-2 sentences describing whether the current model looks sufficient or has room to improve, citing the diagnostic that drives this view.",
+    )
+    possible_next_steps: list[str] = Field(
+        description="2-5 concrete, actionable tuning suggestions tied to the provided diagnostics (e.g. enable auto_arima, adjust p/q, add seasonal_order). Do not promise improvement.",
+    )
+    caution: str = Field(
+        description="1 sentence reminding the reader these are hypotheses to validate, not proven improvements.",
+    )
