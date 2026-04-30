@@ -16,8 +16,6 @@ from __future__ import annotations
 import base64
 import sys
 import io
-import json
-import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -103,51 +101,6 @@ def _read_df_from_bytes(raw: bytes, name: str) -> pd.DataFrame | None:
     except Exception:
         return None
     return None
-
-
-_ARTIFACT_EXTENSIONS = (".csv", ".xlsx", ".png", ".pdf", ".svg", ".jpg", ".jpeg")
-
-
-def _output_paths_from_tool(last_tool: str) -> list[str]:
-    """
-    Best-effort extraction of saved artifact paths from a tool message string.
-
-    Handles both top-level string fields and list values (``code_pipeline`` returns
-    plot paths under a ``"plots"`` list). A regex pass over the raw text catches
-    anything the structured walk missed (different tool shapes, embedded text, etc.).
-    """
-    out: list[str] = []
-    if not last_tool:
-        return out
-
-    def _maybe_keep(value: object) -> None:
-        if not isinstance(value, str) or not value.startswith("agent_filesystem/"):
-            return
-        low = value.lower()
-        if low.endswith("pipeline_run.py"):
-            return
-        if low.endswith(_ARTIFACT_EXTENSIONS):
-            out.append(value)
-
-    try:
-        tool_json = json.loads(last_tool)
-        if isinstance(tool_json, dict):
-            for v in tool_json.values():
-                if isinstance(v, list):
-                    for item in v:
-                        _maybe_keep(item)
-                else:
-                    _maybe_keep(v)
-    except Exception:
-        pass
-    if "agent_filesystem/" in last_tool:
-        found = re.findall(
-            r"agent_filesystem/[^/\s]+/[\w./\-]+\.(?:csv|xlsx|png|pdf|svg|jpg|jpeg)",
-            last_tool,
-            flags=re.IGNORECASE,
-        )
-        out.extend(p for p in found if not p.lower().endswith("pipeline_run.py"))
-    return list(dict.fromkeys(out))
 
 
 _LOGO_FILENAME = "gaussianblurr_favicon.png"
@@ -755,10 +708,13 @@ def complete_agent_turn(_tick, store):
     store["awaiting_resume"] = False
     store["pending_question"] = ""
     summary = data.get("summary") or ""
-    last_tool = data.get("last_tool_result") or ""
-    outs = _output_paths_from_tool(last_tool)
+    # The API returns ``images``: logical paths under
+    # ``agent_filesystem/<session>/run_<tool_call_id>/...`` produced during this turn.
+    # We attach them to the assistant message so each chat bubble carries (and only
+    # ever shows) the plots from its own turn — no regex scan over tool output.
+    images = list(data.get("images") or [])
     reply = summary if summary else "Done."
-    messages.append({"role": "assistant", "content": reply, "output_files": outs})
+    messages.append({"role": "assistant", "content": reply, "output_images": images})
     store["messages"] = messages
     store["agent_thinking"] = False
     return store
@@ -874,41 +830,34 @@ def render_all(store):
             role = m.get("role", "assistant")
             content = m.get("content", "")
             extras = []
-            # Render artifacts attached to this message:
-            #   * image artifacts (png / svg / jpg / jpeg) → inline <img> via /artifact endpoint
-            #   * everything else (csv / xlsx / pdf)        → text breadcrumb the user can copy
-            for fp in m.get("output_files") or []:
-                low = fp.lower()
-                if low.endswith((".png", ".svg", ".jpg", ".jpeg")):
-                    src = api.artifact_url(sid, fp)
-                    extras.append(
-                        html.A(
-                            html.Img(
-                                src=src,
-                                alt=fp.rsplit("/", 1)[-1],
-                                style={
-                                    "display": "block",
-                                    "maxWidth": "100%",
-                                    "maxHeight": "420px",
-                                    "borderRadius": "8px",
-                                    "border": "1px solid #E8E8E6",
-                                    "marginTop": "8px",
-                                    "background": "#fff",
-                                },
-                            ),
-                            href=src,
-                            target="_blank",
-                            title="Open full size in a new tab",
-                            style={"textDecoration": "none"},
-                        )
+            # Render image artifacts attached to this assistant turn. ``output_images``
+            # is the list returned by the API — logical paths to .png / .svg files
+            # under ``agent_filesystem/<session>/run_<tool_call_id>/`` that were
+            # produced during the same turn that generated this reply. Each one is
+            # streamed back through the ``/artifact/{session_id}/{path}`` endpoint.
+            for fp in m.get("output_images") or []:
+                src = api.artifact_url(sid, fp)
+                extras.append(
+                    html.A(
+                        html.Img(
+                            src=src,
+                            alt=fp.rsplit("/", 1)[-1],
+                            style={
+                                "display": "block",
+                                "maxWidth": "100%",
+                                "maxHeight": "420px",
+                                "borderRadius": "8px",
+                                "border": "1px solid #E8E8E6",
+                                "marginTop": "8px",
+                                "background": "#fff",
+                            },
+                        ),
+                        href=src,
+                        target="_blank",
+                        title="Open full size in a new tab",
+                        style={"textDecoration": "none"},
                     )
-                else:
-                    extras.append(
-                        html.P(
-                            f"Saved: {fp}",
-                            style={"fontSize": "11px", "color": "#666", "margin": "8px 0 0"},
-                        )
-                    )
+                )
             if role == "user":
                 bubble = html.Div(
                     style={

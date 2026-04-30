@@ -25,7 +25,6 @@ import json
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 import yaml
@@ -151,6 +150,7 @@ class CodePipelineInput(BaseModel):
 @observe(name="tool.code_pipeline", as_type="tool")
 def _code_pipeline_impl(
     task: str,
+    tool_call_id: str,
     data_profile: str = "",
     previous_code_violation: str = "",
     session_id: str = "default",
@@ -328,12 +328,16 @@ def _code_pipeline_impl(
     #
     # Each ``code_pipeline`` invocation gets its own ``run_<run_id>/`` subfolder under the
     # session workspace. ``plt.savefig`` writes are routed there by the runtime patch, so
-    # the UI can display only the plots produced by this specific tool call. Tabular
-    # outputs (csv/xlsx) still land at session root and remain reusable across questions.
-    # ``run_id`` is generated locally (12 hex chars) — short, unique, and independent of
-    # any LangChain/RunnableConfig internals so the contract is explicit.
+    # the API can find the plots produced by this specific tool call by looking up the
+    # tool call id and listing the matching run folder. Tabular outputs (csv/xlsx) still
+    # land at session root and remain reusable across questions.
+    #
+    # ``run_id`` is the LangChain ``tool_call_id`` (sanitized for filesystem use).
+    # ``sarima_tool`` and ``prophet_tool`` do **not** write plot files — only this tool
+    # does — so aligning folder names with each tool-call id keeps per-turn plots
+    # discoverable alongside other tools' ``ToolMessage`` ids without guessing paths.
     # ------------------------------------------------------------------
-    run_id = uuid.uuid4().hex[:12]
+    run_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(tool_call_id or "")).strip("_") or "unknown_run"
     run_workspace = session_workspace / f"run_{run_id}"
     # ``apply_patches`` will mkdir again inside the subprocess; we create here too so the
     # parent can scan the folder after execution even if the script wrote nothing.
@@ -406,9 +410,13 @@ def code_pipeline(
     # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
     active_skills = (runtime.state or {}).get("active_skills", [])
-    
+    # The injected LangChain tool-call id becomes the per-run folder id so the API
+    # can find the plots produced by this exact call without scanning tool JSON.
+    tool_call_id = getattr(runtime, "tool_call_id", "") or ""
+
     return _code_pipeline_impl(
         task=task,
+        tool_call_id=tool_call_id,
         data_profile=data_profile,
         previous_code_violation=previous_code_violation,
         session_id=session_id,

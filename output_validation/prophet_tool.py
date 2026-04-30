@@ -71,9 +71,6 @@ class ProphetToolInput(BaseModel):
     decomposition_output_file: str = Field(
         description="Bare filename for the combined fitted + forecast decomposition table; must end with .csv or .xlsx.",
     )
-    forecast_image_file: str = Field(
-        description="Bare filename for the history + future forecast plot; must end with .png or .svg.",
-    )
 
 
 # ---------------------------------------------------------------------------

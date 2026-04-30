@@ -7,6 +7,12 @@ via ``pmdarima.auto_arima``), runs residual diagnostics, generates a forecast
 with 95% prediction intervals, and produces an LLM-written interpretation of
 residuals, fit quality, and the forecast.
 
+This tool deliberately does **not** create images. If the user wants a plot,
+the orchestrator should follow up with ``code_pipeline``: that tool already
+patches ``plt.savefig`` / ``Figure.savefig`` to land under
+``agent_filesystem/<session>/run_<tool_call_id>/`` so the UI can show only
+the plots produced by that turn.
+
 Design rules:
 
 * The deterministic statistics pipeline is the source of truth. LLMs only
@@ -20,11 +26,8 @@ Outputs:
 
 * Forecast table at ``agent_filesystem/<session>/<forecast_output_file>``
   (CSV or XLSX).
-* Forecast plot at ``agent_filesystem/<session>/run_<run_id>/<forecast_image_file>``
-  (PNG or SVG) — placed in a per-run subfolder so successive runs do not
-  overwrite each other and the UI can fetch artifacts deterministically.
 * JSON tool response containing model spec, fit quality, residual
-  diagnostics, forecast preview, output paths, warnings, and the
+  diagnostics, forecast preview, output path, warnings, and the
   ``llm_interpretation`` block.
 """
 
@@ -41,43 +44,37 @@ import warnings as _warns
 from pathlib import Path
 from typing import Any, Optional
 
-import matplotlib
+import numpy as np
+import pandas as pd
+import pmdarima as pm
+import yaml
+from langchain.tools import ToolRuntime
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langfuse import observe
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.stats.stattools import jarque_bera
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-# Force a non-interactive backend so the tool never tries to open a window.
-# Must be set before any pyplot import.
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-import pmdarima as pm  # noqa: E402
-import yaml  # noqa: E402
-from langchain.tools import ToolRuntime  # noqa: E402
-from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
-from langchain_core.tools import tool  # noqa: E402
-from langfuse import observe  # noqa: E402
-from statsmodels.stats.diagnostic import acorr_ljungbox  # noqa: E402
-from statsmodels.stats.stattools import jarque_bera  # noqa: E402
-from statsmodels.tsa.statespace.sarimax import SARIMAX  # noqa: E402
-
-from middleware.llm_client import make_llm  # noqa: E402
-from observability.langfuse_handler import (  # noqa: E402
+from middleware.llm_client import make_llm
+from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
-from output_validation.sarima_tool import (  # noqa: E402
+from output_validation.sarima_tool import (
     FitQualityOutput,
     ForecastSummaryOutput,
     ModelImprovementGuidanceOutput,
     ResidualAnalysisOutput,
     SarimaToolInput,
 )
-from prompts.sarima_interpretation_prompts import (  # noqa: E402
+from prompts.sarima_interpretation_prompts import (
     FIT_QUALITY_SYSTEM_PROMPT,
     FORECAST_SUMMARY_SYSTEM_PROMPT,
     MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
     RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
 )
-from session_paths import (  # noqa: E402
+from session_paths import (
     ensure_session_dirs,
     session_dir_for_paths,
     session_id_from_config,
@@ -101,17 +98,8 @@ MIN_OBS = 10
 DEFAULT_ALPHA = 0.05
 
 ALLOWED_TABLE_EXTS = {".csv", ".xlsx"}
-ALLOWED_IMAGE_EXTS = {".png", ".svg"}
 
 langfuse = get_langfuse_client()
-
-
-# Brief: Convert the injected LangChain tool-call id into a safe artifact folder id.
-def run_id_from_runtime(runtime: ToolRuntime) -> str:
-    """Use LangChain's tool-call id as the per-run artifact folder id."""
-    raw_run_id = getattr(runtime, "tool_call_id", "") or "unknown_run"
-    safe_run_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(raw_run_id))
-    return safe_run_id.strip("_") or "unknown_run"
 
 
 class SarimaToolError(Exception):
@@ -578,7 +566,7 @@ def generate_forecast(
 
 # Brief: Save the forecast table in the session workspace.
 def save_forecast(rows: list[dict], *, session_id: str, output_file: str) -> str:
-    """Write the forecast table at the session root and return the logical agent path."""
+    """Write the forecast table as CSV/XLSX at the session root only — never PNG/SVG (use ``code_pipeline`` for charts)."""
     name = Path(output_file).name
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED_TABLE_EXTS:
@@ -598,60 +586,6 @@ def save_forecast(rows: list[dict], *, session_id: str, output_file: str) -> str
 
     sid = session_dir_for_paths(session_id)
     return f"agent_filesystem/{sid}/{name}"
-
-
-# Brief: Save the forecast chart in this tool call's run folder.
-def save_forecast_image(
-    *,
-    history: pd.Series,
-    forecast_rows: list[dict],
-    session_id: str,
-    run_id: str,
-    image_file: str,
-) -> str:
-    """
-    Render a history + forecast plot into ``run_<run_id>/`` so the UI can display it.
-
-    Mirrors ``code_pipeline``'s artifact convention: each tool invocation writes
-    into its own ``run_<id>/`` subfolder so successive runs do not overwrite
-    each other and old plots remain reachable for previous chat turns.
-    """
-    name = Path(image_file).name
-    suffix = Path(name).suffix.lower()
-    if suffix not in ALLOWED_IMAGE_EXTS:
-        raise SarimaToolError(
-            "invalid_forecast_image_file",
-            f"forecast_image_file must end with .png or .svg (got '{suffix or 'no extension'}').",
-            "save_forecast_image",
-        )
-
-    sid = session_dir_for_paths(session_id)
-    run_dir = session_root(session_id) / f"run_{run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    out_path = run_dir / name
-
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(history.index, history.values, label="history", color="#1f77b4")
-
-    if forecast_rows:
-        future_dates = pd.to_datetime([r["calendar_date"] for r in forecast_rows])
-        means = [r["forecast"] for r in forecast_rows]
-        lower = [r["lower_95"] for r in forecast_rows]
-        upper = [r["upper_95"] for r in forecast_rows]
-        ax.plot(future_dates, means, label="forecast", color="#d62728")
-        ax.fill_between(future_dates, lower, upper, color="#d62728", alpha=0.2, label="95% CI")
-        ax.axvline(history.index[-1], color="gray", linestyle="--", alpha=0.5)
-
-    ax.set_title("SARIMA forecast")
-    ax.set_xlabel("date")
-    ax.set_ylabel(history.name or "value")
-    ax.legend(loc="best")
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
-
-    return f"agent_filesystem/{sid}/run_{run_id}/{name}"
 
 
 # Brief: Ask the LLM to turn deterministic diagnostics into user-facing summaries.
@@ -805,7 +739,6 @@ def build_response(
     residual_diagnostics: dict,
     forecast_rows: list[dict],
     forecast_path: str,
-    image_path: str,
     llm_interpretation: dict,
     warnings_out: list[dict],
 ) -> str:
@@ -821,7 +754,6 @@ def build_response(
         "fit_quality": fit_quality,
         "residual_diagnostics": residual_diagnostics,
         "forecast_output_file": forecast_path,
-        "forecast_image": image_path,
         "horizon": len(forecast_rows),
         # Keep the wire small: orchestrator gets a 12-row preview, full table is on disk.
         "forecast_preview": forecast_rows[:12],
@@ -849,7 +781,6 @@ def run_sarima_pipeline(
     seasonal_order: Optional[list[int]],
     seasonal_period: Optional[int],
     forecast_output_file: str,
-    forecast_image_file: str,
     runtime: ToolRuntime,
 ) -> str:
     """
@@ -860,8 +791,6 @@ def run_sarima_pipeline(
     column, request a different frequency, fall back to ``code_pipeline``).
     """
     session_id = session_id_from_config(runtime.config)
-    # Use the injected LangChain tool-call id so artifact paths map to this run.
-    run_id = run_id_from_runtime(runtime)
 
     try:
         # 1. Load and validate the source file, then turn it into a model-ready time series.
@@ -886,9 +815,9 @@ def run_sarima_pipeline(
         # 4. Generate the requested forecast horizon (point forecasts + 95% prediction intervals).
         forecast_rows = generate_forecast(fit, horizon=int(horizon), freq=freq, last_date=series.index[-1])
 
-        # 5. Persist the forecast table and the history+forecast chart for the UI/download.
+        # 5. Persist the forecast table for the UI/download. Charts are intentionally
+        #    not produced here; ``code_pipeline`` is the single source of plot artifacts.
         forecast_path = save_forecast(forecast_rows, session_id=session_id, output_file=forecast_output_file)
-        image_path = save_forecast_image(history=series, forecast_rows=forecast_rows, session_id=session_id, run_id=run_id, image_file=forecast_image_file)
 
         # 6. Ask the LLM to summarize residuals, fit quality, forecast, and improvement guidance.
         llm_interpretation = run_llm_interpretations(fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, model_spec=model_spec)
@@ -899,11 +828,11 @@ def run_sarima_pipeline(
             warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
         # 8. Pack everything into the JSON response the orchestrator will see.
-        response = build_response(file_name=file_name, date_column=date_column, target_column=target_column, freq=freq, model_spec=model_spec, fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, forecast_path=forecast_path, image_path=image_path, llm_interpretation=llm_interpretation, warnings_out=warnings_out)
+        response = build_response(file_name=file_name, date_column=date_column, target_column=target_column, freq=freq, model_spec=model_spec, fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, forecast_path=forecast_path, llm_interpretation=llm_interpretation, warnings_out=warnings_out)
 
         # 9. Attach high-signal trace metadata for langfuse and return the JSON string.
-        langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out)), "run_id": run_id})
-        
+        langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out))})
+
         return response
 
     except SarimaToolError as exc:
@@ -949,7 +878,6 @@ def sarima_tool(
     horizon: int,
     seasonal_period: Optional[int],
     forecast_output_file: str,
-    forecast_image_file: str,
     use_auto_arima: bool = False,
     order: Optional[list[int]] = None,
     seasonal_order: Optional[list[int]] = None,
@@ -967,6 +895,8 @@ def sarima_tool(
     - User wants Prophet, ETS, neural nets, or any non-ARIMA model — write code via ``code_pipeline``.
     - Data still needs cleaning, joining, or resampling before fitting — handle that in ``code_pipeline`` first, then call this tool on the cleaned file.
     - Multiple targets or panel structure — out of scope for this tool.
+    - User wants a chart of the forecast — this tool does not generate images;
+      follow up with ``code_pipeline`` (it is the only image-producing tool).
 
     ## Required inputs
     - ``file_name`` — bare CSV/XLSX filename in the session workspace.
@@ -975,7 +905,6 @@ def sarima_tool(
     - ``horizon`` — positive integer number of future periods.
     - ``seasonal_period`` — required field. Pass ``null`` for non-seasonal modelling, or an integer m (12 monthly/yearly cycle, 4 quarterly, 7 daily/weekly cycle, 24 hourly/daily cycle, etc.). If unsure, call ``ask_user`` first.
     - ``forecast_output_file`` — bare filename ending in ``.csv`` or ``.xlsx``.
-    - ``forecast_image_file`` — bare filename ending in ``.png`` or ``.svg``.
 
     ## Optional inputs
     - ``use_auto_arima`` (default ``false``) — if ``true``, the tool runs ``pmdarima.auto_arima`` (AICc) and ignores any provided order.
@@ -989,7 +918,7 @@ def sarima_tool(
     - Bad residual diagnostics are returned as warnings, not errors — the forecast is still produced.
 
     ## Output
-    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (AIC/AICc/BIC/log-likelihood/converged/n_observations/n_parameters plus inline ``definitions`` for each metric), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``forecast_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation (residual analysis + fit quality + forecast summary + improvement guidance); do not narrate file paths.
+    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (AIC/AICc/BIC/log-likelihood/converged/n_observations/n_parameters plus inline ``definitions`` for each metric), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``forecast_output_file``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation (residual analysis + fit quality + forecast summary + improvement guidance); do not narrate file paths.
     """
     return run_sarima_pipeline(
         file_name=file_name,
@@ -1001,6 +930,5 @@ def sarima_tool(
         seasonal_order=seasonal_order,
         seasonal_period=seasonal_period,
         forecast_output_file=forecast_output_file,
-        forecast_image_file=forecast_image_file,
         runtime=runtime,
     )

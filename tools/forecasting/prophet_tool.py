@@ -9,11 +9,16 @@ monthly / yearly seasonality flags. It then produces:
 * an in-sample fitted table (actual / fitted / residual + decomposition),
 * a future-only forecast table (forecast + decomposition),
 * a combined fitted+forecast decomposition table,
-* a single forecast plot (history + future, no intervals),
 * deterministic fit-quality (MAE / RMSE / SMAPE) and MAD-based residual outlier
   diagnostics, and
 * five structured LLM interpretations: residual analysis, fit quality,
   forecast summary, component analysis, and improvement guidance.
+
+This tool deliberately does **not** create images. If the user wants a plot,
+the orchestrator should follow up with ``code_pipeline``: that tool already
+patches ``plt.savefig`` / ``Figure.savefig`` to land under
+``agent_filesystem/<session>/run_<tool_call_id>/`` so the UI can show only
+the plots produced by that turn.
 
 Design rules:
 
@@ -29,9 +34,6 @@ Outputs (logical paths):
 * Forecast table at ``agent_filesystem/<session>/<forecast_output_file>``.
 * Fitted table at ``agent_filesystem/<session>/<fitted_output_file>``.
 * Decomposition table at ``agent_filesystem/<session>/<decomposition_output_file>``.
-* Forecast plot at ``agent_filesystem/<session>/run_<run_id>/<forecast_image_file>``
-  (per-run subfolder so successive runs do not overwrite each other and the UI
-  can fetch artifacts deterministically).
 * JSON tool response containing model spec, fit quality, residual
   diagnostics, changepoints, output paths, previews, warnings, and the
   ``llm_interpretation`` block.
@@ -51,26 +53,21 @@ import warnings as _warns
 from pathlib import Path
 from typing import Any, Optional
 
-import matplotlib
+import numpy as np
+import pandas as pd
+import yaml
+from langchain.tools import ToolRuntime
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langfuse import observe
+from prophet import Prophet
 
-# Force a non-interactive backend so the tool never tries to open a window.
-# Must be set before any pyplot import.
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-import yaml  # noqa: E402
-from langchain.tools import ToolRuntime  # noqa: E402
-from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
-from langchain_core.tools import tool  # noqa: E402
-from langfuse import observe  # noqa: E402
-from prophet import Prophet  # noqa: E402
-from middleware.llm_client import make_llm  # noqa: E402
-from observability.langfuse_handler import (  # noqa: E402
+from middleware.llm_client import make_llm
+from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
-from output_validation.prophet_tool import (  # noqa: E402
+from output_validation.prophet_tool import (
     ComponentAnalysisOutput,
     FitQualityOutput,
     ForecastSummaryOutput,
@@ -78,14 +75,14 @@ from output_validation.prophet_tool import (  # noqa: E402
     ProphetToolInput,
     ResidualAnalysisOutput,
 )
-from prompts.prophet_interpretation_prompts import (  # noqa: E402
+from prompts.prophet_interpretation_prompts import (
     COMPONENT_ANALYSIS_SYSTEM_PROMPT,
     FIT_QUALITY_SYSTEM_PROMPT,
     FORECAST_SUMMARY_SYSTEM_PROMPT,
     MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
     RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
 )
-from session_paths import (  # noqa: E402
+from session_paths import (
     ensure_session_dirs,
     session_dir_for_paths,
     session_id_from_config,
@@ -105,7 +102,6 @@ INTERPRETATION_MODEL = cfg["models"].get("orchestrator", "gpt-4o-mini")
 MIN_OBS = 10
 
 ALLOWED_TABLE_EXTS = {".csv", ".xlsx"}
-ALLOWED_IMAGE_EXTS = {".png", ".svg"}
 
 # Fixed Prophet parameters kept off the tool surface so the orchestrator does
 # not have to reason about them on every call. Tunable hyperparameters are
@@ -124,14 +120,6 @@ logging.getLogger("prophet").setLevel(logging.ERROR)
 logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
 
 langfuse = get_langfuse_client()
-
-
-# Brief: Convert the injected LangChain tool-call id into a safe artifact folder id.
-def run_id_from_runtime(runtime: ToolRuntime) -> str:
-    """Use LangChain's tool-call id as the per-run artifact folder id."""
-    raw_run_id = getattr(runtime, "tool_call_id", "") or "unknown_run"
-    safe_run_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(raw_run_id))
-    return safe_run_id.strip("_") or "unknown_run"
 
 
 class ProphetToolError(Exception):
@@ -472,7 +460,7 @@ def generate_forecast(model: Any, *, df: pd.DataFrame, horizon: int, freq: str) 
 
 # Brief: Save a tabular DataFrame at the session root and return its logical path.
 def save_table(table: pd.DataFrame, *, session_id: str, output_file: str, stage: str) -> str:
-    """Write ``table`` as CSV/XLSX at the session root and return the logical agent path."""
+    """Write ``table`` as CSV/XLSX at the session root only — never PNG/SVG (use ``code_pipeline`` for charts)."""
     name = Path(output_file).name
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED_TABLE_EXTS:
@@ -491,55 +479,6 @@ def save_table(table: pd.DataFrame, *, session_id: str, output_file: str, stage:
 
     sid = session_dir_for_paths(session_id)
     return f"agent_filesystem/{sid}/{name}"
-
-
-# Brief: Save the history + future forecast chart in this tool call's run folder.
-def save_forecast_image(
-    *,
-    history: pd.DataFrame,
-    forecast_future: pd.DataFrame,
-    session_id: str,
-    run_id: str,
-    image_file: str,
-) -> str:
-    """
-    Render a history + forecast plot into ``run_<run_id>/`` so the UI can display it.
-
-    Mirrors ``code_pipeline``'s artifact convention: each tool invocation writes
-    into its own ``run_<id>/`` subfolder so successive runs do not overwrite
-    each other and old plots remain reachable for previous chat turns.
-    """
-    name = Path(image_file).name
-    suffix = Path(name).suffix.lower()
-    if suffix not in ALLOWED_IMAGE_EXTS:
-        raise ProphetToolError(
-            "invalid_forecast_image_file",
-            f"forecast_image_file must end with .png or .svg (got '{suffix or 'no extension'}').",
-            "save_forecast_image",
-        )
-
-    sid = session_dir_for_paths(session_id)
-    run_dir = session_root(session_id) / f"run_{run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    out_path = run_dir / name
-
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(history["ds"], history["y"], label="history", color="#1f77b4")
-
-    if not forecast_future.empty:
-        ax.plot(forecast_future["ds"], forecast_future["yhat"], label="forecast", color="#d62728")
-        ax.axvline(history["ds"].iloc[-1], color="gray", linestyle="--", alpha=0.5)
-
-    ax.set_title("Prophet forecast")
-    ax.set_xlabel("date")
-    ax.set_ylabel("y")
-    ax.legend(loc="best")
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
-
-    return f"agent_filesystem/{sid}/run_{run_id}/{name}"
 
 
 # Brief: Ask the LLM to turn deterministic Prophet diagnostics into user-facing summaries.
@@ -696,7 +635,6 @@ def build_response(
     forecast_path: str,
     fitted_path: str,
     decomposition_path: str,
-    image_path: str,
     llm_interpretation: dict,
     warnings_out: list[dict],
 ) -> str:
@@ -715,7 +653,6 @@ def build_response(
         "forecast_output_file": forecast_path,
         "fitted_output_file": fitted_path,
         "decomposition_output_file": decomposition_path,
-        "forecast_image": image_path,
         "horizon": len(forecast_rows),
         # Keep the wire small: orchestrator gets short previews; full tables are on disk.
         "forecast_preview": forecast_rows[:12],
@@ -748,7 +685,6 @@ def run_prophet_pipeline(
     forecast_output_file: str,
     fitted_output_file: str,
     decomposition_output_file: str,
-    forecast_image_file: str,
     runtime: ToolRuntime,
 ) -> str:
     """
@@ -759,8 +695,6 @@ def run_prophet_pipeline(
     column, request a different frequency, fall back to ``code_pipeline``).
     """
     session_id = session_id_from_config(runtime.config)
-    # Use the injected LangChain tool-call id so artifact paths map to this run.
-    run_id = run_id_from_runtime(runtime)
     warnings_out: list[dict] = []
 
     try:
@@ -835,11 +769,12 @@ def run_prophet_pipeline(
         decomposition_table = decomposition_table.rename(columns={"ds": "calendar_date"})
         decomposition_table["calendar_date"] = pd.to_datetime(decomposition_table["calendar_date"]).dt.date.astype(str)
 
-        # 6. Persist the three tables and the forecast chart for downstream display/download.
+        # 6. Persist the three tables for downstream display/download. Charts are
+        #    intentionally not produced here; ``code_pipeline`` is the single source of
+        #    plot artifacts (it routes plt.savefig into a per-tool-call run folder).
         forecast_path = save_table(forecast_table, session_id=session_id, output_file=forecast_output_file, stage="save_forecast")
         fitted_path = save_table(fitted_table, session_id=session_id, output_file=fitted_output_file, stage="save_fitted")
         decomposition_path = save_table(decomposition_table, session_id=session_id, output_file=decomposition_output_file, stage="save_decomposition")
-        image_path = save_forecast_image(history=df, forecast_future=forecast_future, session_id=session_id, run_id=run_id, image_file=forecast_image_file)
 
         # 7. Convert the tables to JSON-friendly row lists for previews and LLM prompts.
         forecast_rows = forecast_table.to_dict(orient="records")
@@ -877,13 +812,12 @@ def run_prophet_pipeline(
             forecast_path=forecast_path,
             fitted_path=fitted_path,
             decomposition_path=decomposition_path,
-            image_path=image_path,
             llm_interpretation=llm_interpretation,
             warnings_out=warnings_out,
         )
 
         # 11. Attach high-signal trace metadata for langfuse and return the JSON string.
-        langfuse.update_current_span(metadata={"changepoint_prior_scale": str(changepoint_prior_scale), "seasonality_mode": seasonality_mode, "weekly": str(weekly_seasonality), "monthly": str(monthly_seasonality), "yearly": str(yearly_seasonality), "warnings": str(len(warnings_out)), "run_id": run_id})
+        langfuse.update_current_span(metadata={"changepoint_prior_scale": str(changepoint_prior_scale), "seasonality_mode": seasonality_mode, "weekly": str(weekly_seasonality), "monthly": str(monthly_seasonality), "yearly": str(yearly_seasonality), "warnings": str(len(warnings_out))})
         return response
 
     except ProphetToolError as exc:
@@ -935,7 +869,6 @@ def prophet_tool(
     forecast_output_file: str,
     fitted_output_file: str,
     decomposition_output_file: str,
-    forecast_image_file: str,
 ) -> str:
     """Fit a univariate Prophet model on a tabular session time series and return forecast + fitted + decomposition + diagnostics + LLM interpretation as JSON.
 
@@ -951,6 +884,8 @@ def prophet_tool(
     - User wants ETS, neural nets, or any non-Prophet model — write code via ``code_pipeline``.
     - Data still needs cleaning, joining, or resampling before fitting — handle that in ``code_pipeline`` first, then call this tool on the cleaned file.
     - Multiple targets or panel structure — out of scope for this tool.
+    - User wants a chart of the forecast — this tool does not generate images;
+      follow up with ``code_pipeline`` (it is the only image-producing tool).
 
     ## Required inputs
     - ``file_name`` — bare CSV/XLSX filename in the session workspace.
@@ -963,7 +898,6 @@ def prophet_tool(
     - ``forecast_output_file`` — bare filename ending in ``.csv`` or ``.xlsx`` for the future forecast table (with components).
     - ``fitted_output_file`` — bare filename ending in ``.csv`` or ``.xlsx`` for the in-sample fitted table (actual + fitted + residual + components).
     - ``decomposition_output_file`` — bare filename ending in ``.csv`` or ``.xlsx`` for the combined fitted + forecast decomposition.
-    - ``forecast_image_file`` — bare filename ending in ``.png`` or ``.svg`` for a single history + forecast chart (no intervals).
 
     ## Behaviour
     - ``changepoint_range`` is fixed at 0.8 (changepoints sought only in the first 80% of history).
@@ -973,7 +907,7 @@ def prophet_tool(
     - Bad residual diagnostics are returned as warnings, not errors — the forecast is still produced.
 
     ## Output
-    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (MAE/RMSE/SMAPE/n_observations plus inline ``definitions``), ``residual_diagnostics`` (MAD residual bounds, outlier count/fraction, dated outlier points, plain-English ``warnings``, plus inline ``definitions``), ``changepoints`` (``changepoint_range``, dates, top-5 by absolute delta), ``forecast_output_file``, ``fitted_output_file``, ``decomposition_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview``, ``fitted_preview``, ``decomposition_preview``, ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``component_analysis``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation; do not narrate file paths.
+    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (MAE/RMSE/SMAPE/n_observations plus inline ``definitions``), ``residual_diagnostics`` (MAD residual bounds, outlier count/fraction, dated outlier points, plain-English ``warnings``, plus inline ``definitions``), ``changepoints`` (``changepoint_range``, dates, top-5 by absolute delta), ``forecast_output_file``, ``fitted_output_file``, ``decomposition_output_file``, ``horizon``, ``forecast_preview``, ``fitted_preview``, ``decomposition_preview``, ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``component_analysis``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation; do not narrate file paths.
     """
     return run_prophet_pipeline(
         file_name=file_name,
@@ -988,6 +922,5 @@ def prophet_tool(
         forecast_output_file=forecast_output_file,
         fitted_output_file=fitted_output_file,
         decomposition_output_file=decomposition_output_file,
-        forecast_image_file=forecast_image_file,
         runtime=runtime,
     )

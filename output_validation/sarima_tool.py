@@ -53,9 +53,6 @@ class SarimaToolInput(BaseModel):
     forecast_output_file: str = Field(
         description="Bare filename for the forecast table; must end with .csv or .xlsx.",
     )
-    forecast_image_file: str = Field(
-        description="Bare filename for the forecast plot; must end with .png or .svg.",
-    )
     use_auto_arima: bool = Field(
         default=False,
         description=(
