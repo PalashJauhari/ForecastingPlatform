@@ -10,8 +10,8 @@ monthly / yearly seasonality flags. It then produces:
 * a future-only forecast table (forecast + decomposition),
 * a combined fitted+forecast decomposition table,
 * a single forecast plot (history + future, no intervals),
-* deterministic fit-quality (MAE / RMSE / SMAPE) and residual diagnostics
-  (Ljung-Box, Jarque-Bera, mean/std), and
+* deterministic fit-quality (MAE / RMSE / SMAPE) and MAD-based residual outlier
+  diagnostics, and
 * five structured LLM interpretations: residual analysis, fit quality,
   forecast summary, component analysis, and improvement guidance.
 
@@ -65,9 +65,6 @@ from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langfuse import observe  # noqa: E402
 from prophet import Prophet  # noqa: E402
-from statsmodels.stats.diagnostic import acorr_ljungbox  # noqa: E402
-from statsmodels.stats.stattools import jarque_bera  # noqa: E402
-
 from middleware.llm_client import make_llm  # noqa: E402
 from observability.langfuse_handler import (  # noqa: E402
     get_langfuse_client,
@@ -287,10 +284,10 @@ def fit_prophet_model(
     3. Fit quality: MAE, RMSE, SMAPE on rows where actual ``y`` is present,
        with inline ``definitions`` so the orchestrator/LLM never has to guess
        what each metric means.
-    4. Residual diagnostics: residual mean/std, Ljung-Box p-value, Jarque-Bera
-       normality p-value, and plain-English ``warnings`` when assumptions look
-       violated. Bad diagnostics never fail the pipeline — they are surfaced
-       as warnings only.
+    4. Residual diagnostics: median absolute deviation (MAD), robust sigma,
+       ``median ± 3*sigma`` bounds, and the dated residual points outside those
+       bounds. Outliers never fail the pipeline — they are surfaced as warnings
+       only.
     5. Changepoints: dates of all changepoints Prophet considered, plus the
        top-5 by absolute ``delta`` if Prophet exposes the parameter.
 
@@ -365,68 +362,62 @@ def fit_prophet_model(
         },
     }
 
-    # 3. Residual diagnostics. Bad diagnostics become warnings, not errors.
-    if n < 5:
-        residual_diagnostics = {
-            "status": "warn",
-            "n_residuals": n,
-            "warnings": ["Too few residuals for diagnostic tests."],
-            "definitions": {
-                "status": "'pass' when residuals look like noise around the fit; 'warn' when at least one assumption looks violated.",
-                "n_residuals": "Number of residuals available for diagnostic tests.",
-            },
-        }
+    # 3. Residual diagnostics. Use MAD to flag dated residual points outside
+    #    median +/- 3 robust sigma.
+    dates_v = pd.to_datetime(df["ds"].to_numpy()[mask])
+    if n == 0:
+        residual_median = residual_mad = robust_sigma = lower_bound = upper_bound = float("nan")
+        outlier_points: list[dict] = []
     else:
-        residual_mean = float(np.mean(residuals))
-        residual_std = float(np.std(residuals, ddof=1)) if n > 1 else 0.0
-        lb_lags = min(10, max(1, n // 5))
+        residual_median = float(np.median(residuals))
+        absolute_deviation = np.abs(residuals - residual_median)
+        residual_mad = float(np.median(absolute_deviation))
+        robust_sigma = float(1.4826 * residual_mad)
+        lower_bound = float(residual_median - 3.0 * robust_sigma)
+        upper_bound = float(residual_median + 3.0 * robust_sigma)
+        outlier_mask = (residuals < lower_bound) | (residuals > upper_bound)
+        outlier_points = [
+            {
+                "calendar_date": pd.Timestamp(dates_v[idx]).date().isoformat(),
+                "actual": None if np.isnan(actuals_v[idx]) else round(float(actuals_v[idx]), 6),
+                "fitted": None if np.isnan(fitted_v[idx]) else round(float(fitted_v[idx]), 6),
+                "residual": round(float(residuals[idx]), 6),
+            }
+            for idx in np.where(outlier_mask)[0]
+        ]
 
-        try:
-            lb = acorr_ljungbox(residuals, lags=[lb_lags], return_df=True)
-            ljung_box_pvalue = float(lb["lb_pvalue"].iloc[0])
-        except Exception:
-            ljung_box_pvalue = float("nan")
+    diagnostic_warnings: list[str] = []
+    if outlier_points:
+        diagnostic_warnings.append(
+            f"{len(outlier_points)} residual point(s) fall outside the MAD bounds [{lower_bound:.4f}, {upper_bound:.4f}]."
+        )
 
-        try:
-            _, jb_pvalue, _, _ = jarque_bera(residuals)
-            normality_pvalue = float(jb_pvalue)
-        except Exception:
-            normality_pvalue = float("nan")
-
-        diagnostic_warnings: list[str] = []
-        if not np.isnan(ljung_box_pvalue) and ljung_box_pvalue < 0.05:
-            diagnostic_warnings.append(
-                f"Residuals show statistically significant autocorrelation (Ljung-Box p={ljung_box_pvalue:.4f} at lag {lb_lags})."
-            )
-        if not np.isnan(normality_pvalue) and normality_pvalue < 0.05:
-            diagnostic_warnings.append(
-                f"Residuals deviate from normality (Jarque-Bera p={normality_pvalue:.4f}); residual-based caveats may apply."
-            )
-        if residual_std > 0 and abs(residual_mean) > 2.0 * residual_std / np.sqrt(n):
-            diagnostic_warnings.append(
-                f"Residual mean {residual_mean:.4f} is more than 2 standard errors from zero — possible bias."
-            )
-
-        residual_diagnostics = {
-            "status": "warn" if diagnostic_warnings else "pass",
-            "n_residuals": n,
-            "residual_mean": round(residual_mean, 6),
-            "residual_std": round(residual_std, 6),
-            "ljung_box_pvalue": None if np.isnan(ljung_box_pvalue) else round(ljung_box_pvalue, 6),
-            "ljung_box_lags": int(lb_lags),
-            "normality_pvalue": None if np.isnan(normality_pvalue) else round(normality_pvalue, 6),
-            "warnings": diagnostic_warnings,
-            "definitions": {
-                "status": "'pass' when residuals look like noise around the fit; 'warn' when at least one assumption looks violated.",
-                "n_residuals": "Number of residuals available for diagnostic tests.",
-                "residual_mean": "Average residual. Should be close to zero; large absolute values suggest fit bias.",
-                "residual_std": "Sample standard deviation of residuals; rough scale of unexplained variation.",
-                "ljung_box_pvalue": "Ljung-Box test p-value for residual autocorrelation. Low values (<0.05) suggest the model has not captured all time dependence.",
-                "ljung_box_lags": "Number of lags used by the Ljung-Box test.",
-                "normality_pvalue": "Jarque-Bera test p-value for residual normality. Low values (<0.05) suggest non-normal residuals.",
-                "warnings": "Plain-English notes about which residual assumptions look violated, if any.",
-            },
-        }
+    residual_diagnostics = {
+        "status": "warn" if diagnostic_warnings else "pass",
+        "n_residuals": n,
+        "residual_median": None if np.isnan(residual_median) else round(residual_median, 6),
+        "residual_mad": None if np.isnan(residual_mad) else round(residual_mad, 6),
+        "robust_sigma": None if np.isnan(robust_sigma) else round(robust_sigma, 6),
+        "lower_bound": None if np.isnan(lower_bound) else round(lower_bound, 6),
+        "upper_bound": None if np.isnan(upper_bound) else round(upper_bound, 6),
+        "outlier_count": len(outlier_points),
+        "outlier_fraction": None if n == 0 else round(len(outlier_points) / n, 6),
+        "outlier_points": outlier_points,
+        "warnings": diagnostic_warnings,
+        "definitions": {
+            "status": "'pass' when no residual points fall outside the MAD bounds; 'warn' when one or more residual outliers are found.",
+            "n_residuals": "Number of residuals available for the MAD outlier check.",
+            "residual_median": "Median residual; the robust center of model errors.",
+            "residual_mad": "Median absolute deviation of residuals from the residual median; robust spread measure.",
+            "robust_sigma": "MAD converted to an approximate standard-deviation scale using 1.4826 * MAD.",
+            "lower_bound": "Lower residual outlier bound: residual_median - 3 * robust_sigma.",
+            "upper_bound": "Upper residual outlier bound: residual_median + 3 * robust_sigma.",
+            "outlier_count": "Number of fitted residual points outside the MAD bounds.",
+            "outlier_fraction": "Share of residual points outside the MAD bounds.",
+            "outlier_points": "Dated fitted observations whose residuals fall outside the MAD bounds.",
+            "warnings": "Plain-English notes about MAD residual outliers, if any.",
+        },
+    }
 
     # 4. Extract changepoint summary. Prophet stores ``delta`` for trend rate
     #    changes per changepoint; for MAP fits the array is shape (1, n).
@@ -982,7 +973,7 @@ def prophet_tool(
     - Bad residual diagnostics are returned as warnings, not errors — the forecast is still produced.
 
     ## Output
-    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (MAE/RMSE/SMAPE/n_observations plus inline ``definitions``), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``changepoints`` (``changepoint_range``, dates, top-5 by absolute delta), ``forecast_output_file``, ``fitted_output_file``, ``decomposition_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview``, ``fitted_preview``, ``decomposition_preview``, ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``component_analysis``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation; do not narrate file paths.
+    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (MAE/RMSE/SMAPE/n_observations plus inline ``definitions``), ``residual_diagnostics`` (MAD residual bounds, outlier count/fraction, dated outlier points, plain-English ``warnings``, plus inline ``definitions``), ``changepoints`` (``changepoint_range``, dates, top-5 by absolute delta), ``forecast_output_file``, ``fitted_output_file``, ``decomposition_output_file``, ``forecast_image``, ``horizon``, ``forecast_preview``, ``fitted_preview``, ``decomposition_preview``, ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``component_analysis``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation; do not narrate file paths.
     """
     return run_prophet_pipeline(
         file_name=file_name,
