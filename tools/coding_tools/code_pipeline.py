@@ -12,8 +12,13 @@ Pipeline order
        The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
        so generated scripts cannot read those variables even if static checks were bypassed.
 
-On Semgrep or judge failure, the tool returns the generated source in JSON for review but does **not**
-write to disk or run the script. Callers should pass ``previous_code_violation`` on the next attempt.
+On Semgrep or judge failure, the tool returns the generated source under ``code_generation.code`` so the
+orchestrator can diagnose policy violations; nothing is saved or executed. Callers should pass
+``previous_code_violation`` on the next attempt.
+
+When both gates pass and the script runs, ``code_generation`` contains **only**
+``explanation`` and ``code_safety_evaluation`` — no ``code`` or ``filename`` keys — plus
+top-level ``execution`` and ``plots``. The script is still written to ``pipeline_run.py`` on disk for the sandbox runner.
 
 All session files, including generated ``pipeline_run.py``, live at ``./agent_filesystem/<session-folder>/``.
 
@@ -54,7 +59,7 @@ from skills.loader import LoadPatternSkills
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
 
-# Plot artifacts the per-question run folder may contain. Anything else (csv/xlsx) lands at
+# Plot artifacts the per-tool-call run folder may contain. Anything else (csv/xlsx) lands at
 # session root via the ``safe_to_*`` patches, so this set is intentionally tiny.
 PLOT_FILE_EXTENSIONS = frozenset({".png", ".svg"})
 
@@ -174,22 +179,24 @@ def _code_pipeline_impl(
             included in the model prompt so the retry respects policy. Empty on first attempt.
 
     Returns:
-        A **JSON string** (parse it) with two keys:
+        A **JSON string** (parse it) with keys ``code_generation``, ``execution``, and on success ``plots``.
 
         **code_generation** — Always present.
-        - If the model returns no code: ``code`` is empty; ``detail`` explains; ``execution`` is null.
-        - If **Semgrep** or the **LLM judge** fails: ``code`` still contains the **generated source** so you can
+        - If the model returns no code: ``code`` is ``""``; ``explanation`` may be partial; ``execution`` is null.
+        - If **Semgrep** or the **LLM judge** fails: ``code`` contains the **generated source** (string) so you can
           review it against ``code_safety_evaluation.detail``; ``execution`` is null; nothing is saved to disk.
-        - If codegen, Semgrep, and the judge all pass: ``code`` is the generated source, ``explanation``
-          summarizes it, ``code_safety_evaluation`` has ``passed: true``; the same source is written to ``pipeline_run.py``.
+        - If codegen, Semgrep, and the judge all pass: ``code_generation`` has **only** ``explanation`` and ``code_safety_evaluation``
+          (``passed: true``); no ``code`` or ``filename``. The source is written to ``pipeline_run.py`` and executed.
 
         **execution** — null when the script was not run (failures above). Otherwise an object
         with ``stdout``, ``stderr``, and ``returncode`` from the subprocess. If the run hits
         the configured timeout, ``returncode`` is 124 and ``error`` describes the timeout.
 
+        **plots** — List of logical paths under ``agent_filesystem/.../run_<id>/`` for plot files produced in this invocation (empty list if none). Present whenever the pipeline reaches execution (successful safety gates).
+
     After any safety failure, the **next** call should pass **previous_code_violation** with the
     prior attempt’s ``code_safety_evaluation.detail`` (Semgrep/judge text). You may still refine
-    **task** if needed;     do not retry with an empty **previous_code_violation** as if nothing failed.
+    **task** if needed; do not retry with an empty **previous_code_violation** as if nothing failed.
     """
     # ------------------------------------------------------------------
     # Step 1 — Codegen (structured object: filename, explanation, code)
@@ -318,13 +325,12 @@ def _code_pipeline_impl(
         out_path.write_text(code, encoding="utf-8")
         save_span.update(output={"path": str(out_path)}, metadata={"bytes_written": len(code.encode("utf-8"))})
     gen = {
-        "code": code,
         "explanation": explanation,
         "code_safety_evaluation": {"passed": True},
     }
 
     # ------------------------------------------------------------------
-    # Step 4 — Allocate per-question plot folder
+    # Step 4 — Allocate per-tool-call plot folder
     #
     # Each ``code_pipeline`` invocation gets its own ``run_<run_id>/`` subfolder under the
     # session workspace. ``plt.savefig`` writes are routed there by the runtime patch, so
@@ -346,7 +352,7 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 5 — Run script: subprocess, no shell, project root as cwd
     # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
-    # The third argv carries the per-question plot folder across the process boundary;
+    # The third argv carries the per-tool-call plot folder across the process boundary;
     # RunnableConfig does not propagate to subprocesses, so we pass it explicitly.
     # ------------------------------------------------------------------
     cmd = [
@@ -381,7 +387,7 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     # Step 6 — Collect plot artifacts
     #
-    # Scan the per-question run folder for plot files. Returned as logical
+    # Scan the per-tool-call run folder for plot files. Returned as logical
     # ``agent_filesystem/<session>/run_<run_id>/<file>`` paths so the UI can fetch them
     # via the ``GET /artifact`` endpoint. By listing only the run folder we get perfect
     # per-message isolation: previous questions live under different ``run_<id>/`` and
@@ -406,12 +412,10 @@ def code_pipeline(
     data_profile: str = "",
     previous_code_violation: str = "",
 ) -> str:
-    """LangChain wrapper for the traced code pipeline implementation."""
+    """Run codegen, Semgrep, judge, save `pipeline_run.py`, execute sandbox. JSON: success `code_generation` is only explanation + passed flag; safety failure includes source."""
     # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
     active_skills = (runtime.state or {}).get("active_skills", [])
-    # The injected LangChain tool-call id becomes the per-run folder id so the API
-    # can find the plots produced by this exact call without scanning tool JSON.
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""
 
     return _code_pipeline_impl(

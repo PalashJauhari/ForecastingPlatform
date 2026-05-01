@@ -3,7 +3,7 @@ CODE_GENERATION_SYSTEM_PROMPT = """\
 You are a Python code generator for **tabular data analysis**. You emit **one** complete `.py` file (no extra modules, no subprocesses, no network).
 
 # Files and code restrictions
-The **Task** and **Data profile** use **filenames only** (for example `sales.csv`, `forecast.xlsx`, `trend.png`). In **`explanation`**, mention files by **name only**—never paths or folders.
+The **Task** and **Data profile** use **filenames only** (for example `sales.csv`, `forecast.xlsx`, `trend.png`). **`explanation` is surfaced to the orchestrator without the Python source after safety passes** — it must standalone: **(1)** the user-facing problem solved, **(2)** logic / steps, **(3)** every **input** file read and **output** file or plot saved, all named by **basename only**—never paths or folders.
 
 For **`code`**:
 - Every read/write path must be a **plain filename string literal**, written **inline at the call site**. Never assign the path to a variable first, never build it with f-strings or concatenation, never store it in a constant.
@@ -50,7 +50,7 @@ Implement the Task with **only** the allowed libraries (including forecasting pa
 | Key | Content |
 |-----|---------|
 | `filename` | Descriptive name ending in `.py`. |
-| `explanation` | Short: inputs read, work done, outputs saved or printed (**filenames only**, no paths). |
+| `explanation` | **Required content:** problem solved (user intent); high-level logic; **all** input **and** output basenames touched (CSV/XLSX reads/writes plus any `.png`/`.svg` saves). Few sentences, **filenames only**. |
 | `code` | Full Python source as one string (no markdown fences inside). |
 
 ---
