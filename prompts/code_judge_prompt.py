@@ -30,7 +30,7 @@ You are the **final review step** before a generated Python script is saved and 
 
 ## C. Imports
 
-Approved packages only: `pandas`, `numpy` (no numpy I/O), `scikit-learn`, `scipy`, `matplotlib`, **`statsmodels`** (e.g. SARIMAX, ARIMA, `tsa` diagnostics), **`pmdarima`** (e.g. `auto_arima`), **`prophet`** (univariate forecasting with `Prophet`), and stdlib `math`, `datetime`, `re`, `collections`, `itertools`, `functools`. These mirror the forecasting libraries used by the bound `sarima_tool` and `prophet_tool`; use them only for modelling/diagnostics aligned with the **task** — not to bypass tabular/plot path rules above. Built-ins are fine. `os` is **never allowed**, no matter what the reason is.
+Approved packages only: `pandas`, `numpy` (no numpy I/O), **`sklearn`** (the `scikit-learn` PyPI distribution — `import sklearn`, `from sklearn...`), `scipy`, `matplotlib`, **`statsmodels`** (e.g. SARIMAX, ARIMA, `tsa` diagnostics), **`pmdarima`** (e.g. `auto_arima`), **`prophet`** (univariate forecasting with `Prophet`), and stdlib `math`, `datetime`, `re`, `collections`, `itertools`, `functools`. These mirror the forecasting libraries used by the bound `sarima_tool` and `prophet_tool`; use them only for modelling/diagnostics aligned with the **task** — not to bypass tabular/plot path rules above. Built-ins are fine. `os` is **never allowed**, no matter what the reason is.
 
 ## D. Structure
 

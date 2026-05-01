@@ -59,7 +59,7 @@ Implement the Task with **only** the allowed libraries (including forecasting pa
 
 - **pandas** — `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` only for tabular I/O.
 - **numpy** — numerics only (no numpy file I/O).
-- **scikit-learn**, **scipy**, **matplotlib** (`pyplot as plt`) as needed. Plots may be saved via `plt.savefig("name.png")` / `plt.savefig("name.svg")` (basename only).
+- **sklearn** (PyPI package `scikit-learn`) — `import sklearn`, `from sklearn....`, **scipy**, **matplotlib** (`pyplot as plt`) as needed. Plots may be saved via `plt.savefig("name.png")` / `plt.savefig("name.svg")` (basename only). Do **not** use `joblib.dump`/`joblib.load` for model persistence (blocked by policy).
 - **statsmodels** — ARIMA/SARIMAX (`statsmodels.tsa.statespace.sarimax`, etc.), `tsa` diagnostics, consistent with **`sarima_tool`** usage patterns.
 - **pmdarima** — `pmdarima.auto_arima` and related ARIMA helpers, consistent with **`sarima_tool`**.
 - **prophet** — `from prophet import Prophet` and forecasting/decomposition workflows, consistent with **`prophet_tool`**.
