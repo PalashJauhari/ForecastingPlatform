@@ -21,7 +21,9 @@ class BuildCodegenRequirementOutput(BaseModel):
     detailed_requirement: str = Field(
         description=(
             "Structured execution brief that can be reviewed before code generation. "
-            "Any saved figure filenames must end in .png or .svg only (not .pdf/.jpg/etc.)."
+            "Any saved figure filenames must end in .png or .svg only (not .pdf/.jpg/etc.). "
+            "When execution needs a script, the brief should instruct **only 2–3 short print lines** "
+            "describing pipeline purpose (not verbose logging), unless printed numeric output is explicitly required."
         ),
     )
     dataset_paths: list[str] = Field(

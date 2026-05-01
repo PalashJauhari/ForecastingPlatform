@@ -36,6 +36,7 @@ Return one JSON object with exactly these keys:
 7. If the user’s question likely can be answered directly without code, say so clearly inside the requirement instead of forcing unnecessary execution.
 8. If code is required, the requirement must clearly name the input file or files. If the task should save a result, it must clearly name the desired output filename (tabular: `.csv`/`.xlsx`; **plots: `.png` or `.svg` only**). If the task only needs computed stats or a displayed result, say that printing/displaying the result is enough and do not invent an output file.
 9. Do not overlap or reuse input and output filenames incorrectly. Make input/output naming explicit and unambiguous.
+10. **Console narration:** Tell the codegen step that the generated script should use **only 2–3 short `print(...)` lines total** (e.g. one line on what it loads, one on the main computation, one on what was written or summarized). Do **not** ask for verbose logging, debug traces, row-by-row output, or more than three narrative prints—bare numeric tables or summaries the user asked for may still print as needed.
 
 # How to write `detailed_requirement`
 Write a structured execution brief. Include these sections when relevant and keep the order stable:
@@ -54,7 +55,7 @@ Write a structured execution brief. Include these sections when relevant and kee
 - **Known Findings From Profiling**: Include likely primary dataset, candidate columns, join relationships, and important detected issues when available.
 - **Required Preprocessing**: Be explicit about datetime parsing, sorting, deduplication, merging, missing values, aggregation, reshaping, and validation when relevant.
 - **Forecasting / Evaluation Constraints**: Preserve chronological order, avoid future leakage, avoid random train/test splits for time-series work, and prefer time-aware evaluation when forecasting is requested.
-- **Output Expectations**: Describe the expected result or artifacts clearly. Explicitly mention the desired output filename when a file should be saved (tabular: `.csv`/`.xlsx`; figures/charts: **`.png` or `.svg` only**). If no file should be saved, state that printed/displayed results are enough.
+- **Output Expectations**: Describe the expected result or artifacts clearly. Explicitly mention the desired output filename when a file should be saved (tabular: `.csv`/`.xlsx`; figures/charts: **`.png` or `.svg` only**). If no file should be saved, state that printed/displayed results are enough. Prefer requiring **exactly 2–3 brief `print` lines** to describe pipeline intent (see rule 10), unless the Task needs extra printed numeric output.
 - **Unresolved Ambiguities**: Include only ambiguities that still matter for safe execution.
 
 # Clarification rules

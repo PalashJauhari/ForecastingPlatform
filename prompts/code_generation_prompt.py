@@ -98,4 +98,6 @@ If present, fix those issues and do not repeat forbidden patterns.
 ## Code quality
 
 Readable procedural Python 3; handle missing values reasonably; avoid broad `try`/`except` unless required; keep file names consistent with the Task.
+
+**Printed narration:** Unless the Task explicitly needs more stdout (for example metric tables or key numbers), use **at most 2–3 short `print(...)` lines** to say what the script does (typically: inputs, main computation, artifacts written or headline result). Skip chatty banners, repeated progress messages, debug dumps, and per-row printing.
 """
