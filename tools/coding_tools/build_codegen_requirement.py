@@ -65,7 +65,8 @@ def _build_codegen_requirement_impl(
     human_payload = (
         "## Files\n"
         "In **every** field of your JSON and in `detailed_requirement`, use **filename only** "
-        "(e.g. `sales.csv`). Never write `agent_filesystem/`, session ids, slashes, or paths.\n\n"
+        "(e.g. `sales.csv`). Never write `agent_filesystem/`, session ids, slashes, or paths. "
+        "**Plot/chart outputs** in requirements must use **`.png` or `.svg` only** (codegen rejects other image extensions).\n\n"
         "## Orchestrator Brief\n"
         f"{brief.strip()}\n\n"
         "## Session workspace (data_profile list from graph state)\n"
@@ -132,6 +133,11 @@ def build_codegen_requirement(
     brief: str,
     runtime: ToolRuntime,
 ) -> str:
-    """Draft a validated execution requirement before potential code generation."""
+    """Draft a validated execution requirement before potential code generation.
+
+    The planner must name files by basename only. Tabular I/O: `.csv`/`.xlsx`.
+    Any saved chart in the requirement text should be **`.png` or `.svg` only** —
+    those are the only plot extensions the downstream ``code_pipeline`` sandbox allows.
+    """
     # ``ToolRuntime`` must be required (no ``= None``) or LangGraph never injects graph state / config.
     return _build_codegen_requirement_impl(brief=brief, runtime=runtime)

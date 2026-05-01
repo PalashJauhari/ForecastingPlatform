@@ -36,7 +36,7 @@ plt.savefig("trend" + ".png")        # concatenation
 ```
 
 # Objective
-Implement the Task with **only** the allowed libraries.
+Implement the Task with **only** the allowed libraries (including forecasting packages below when the Task needs ARIMA/SARIMA/auto-ARIMA, statsmodels diagnostics, or Prophet).
 
 # Non-negotiables
 1. **Response shape:** Reply with **only** one JSON object—no markdown, no prose before/after, no outer code fences.
@@ -60,7 +60,12 @@ Implement the Task with **only** the allowed libraries.
 - **pandas** — `pd.read_csv`, `pd.read_excel`, `df.to_csv`, `df.to_excel` only for tabular I/O.
 - **numpy** — numerics only (no numpy file I/O).
 - **scikit-learn**, **scipy**, **matplotlib** (`pyplot as plt`) as needed. Plots may be saved via `plt.savefig("name.png")` / `plt.savefig("name.svg")` (basename only).
+- **statsmodels** — ARIMA/SARIMAX (`statsmodels.tsa.statespace.sarimax`, etc.), `tsa` diagnostics, consistent with **`sarima_tool`** usage patterns.
+- **pmdarima** — `pmdarima.auto_arima` and related ARIMA helpers, consistent with **`sarima_tool`**.
+- **prophet** — `from prophet import Prophet` and forecasting/decomposition workflows, consistent with **`prophet_tool`**.
 - Stdlib: **built-ins**, **`math`**, **`datetime`**, **`re`**, **`collections`**, **`itertools`**, **`functools`**.
+
+Forecasting libs must **not** replace pandas for session **input/output** paths: reads/writes stay **`pd.read_csv` / `pd.read_excel` / `.to_csv` / `.to_excel`** only, with basename string literals as already required.
 
 ---
 

@@ -19,7 +19,10 @@ class BuildCodegenRequirementOutput(BaseModel):
     """Validated output returned by the requirement-building tool."""
 
     detailed_requirement: str = Field(
-        description="Structured execution brief that can be reviewed before code generation.",
+        description=(
+            "Structured execution brief that can be reviewed before code generation. "
+            "Any saved figure filenames must end in .png or .svg only (not .pdf/.jpg/etc.)."
+        ),
     )
     dataset_paths: list[str] = Field(
         default_factory=list,

@@ -28,13 +28,13 @@ Return one JSON object with exactly these keys:
 
 # Rules
 1. Preserve the orchestrator's actual intent.
-2. **Filenames only** in all prose and lists: e.g. `sales.csv`, `forecast.csv`. Never write path prefixes, folders, or `agent_filesystem`. In `dataset_paths`, each entry is one **basename**, `.csv` or `.xlsx` only.
+2. **Filenames only** in all prose and lists: e.g. `sales.csv`, `forecast.csv`. Never write path prefixes, folders, or `agent_filesystem`. In `dataset_paths`, each entry is one **basename**, `.csv` or `.xlsx` only (inputs). **Charts/plots** saved by generated code must be named with **`.png` or `.svg` only** (e.g. `revenue_trend.png`, `residuals.svg`). Never specify `.pdf`, `.jpg`, `.jpeg`, `.tiff`, or other image formats — they are rejected by codegen safety and the sandbox.
 3. Treat the latest profiling result as a source of constraints, not background decoration.
 4. Do not silently guess business-critical facts such as the primary dataset, time column, target column, join keys, or forecast definition when they remain unclear.
 5. If clarification is needed, ask only the single most important blocking question.
 6. Keep the requirement operational and specific, not conversational.
 7. If the user’s question likely can be answered directly without code, say so clearly inside the requirement instead of forcing unnecessary execution.
-8. If code is required, the requirement must clearly name the input file or files. If the task should save a result, it must clearly name the desired output filename. If the task only needs computed stats or a displayed result, say that printing/displaying the result is enough and do not invent an output file.
+8. If code is required, the requirement must clearly name the input file or files. If the task should save a result, it must clearly name the desired output filename (tabular: `.csv`/`.xlsx`; **plots: `.png` or `.svg` only**). If the task only needs computed stats or a displayed result, say that printing/displaying the result is enough and do not invent an output file.
 9. Do not overlap or reuse input and output filenames incorrectly. Make input/output naming explicit and unambiguous.
 
 # How to write `detailed_requirement`
@@ -54,7 +54,7 @@ Write a structured execution brief. Include these sections when relevant and kee
 - **Known Findings From Profiling**: Include likely primary dataset, candidate columns, join relationships, and important detected issues when available.
 - **Required Preprocessing**: Be explicit about datetime parsing, sorting, deduplication, merging, missing values, aggregation, reshaping, and validation when relevant.
 - **Forecasting / Evaluation Constraints**: Preserve chronological order, avoid future leakage, avoid random train/test splits for time-series work, and prefer time-aware evaluation when forecasting is requested.
-- **Output Expectations**: Describe the expected result or artifacts clearly. Explicitly mention the desired output filename when a file should be saved. If no file should be saved, state that printed/displayed results are enough.
+- **Output Expectations**: Describe the expected result or artifacts clearly. Explicitly mention the desired output filename when a file should be saved (tabular: `.csv`/`.xlsx`; figures/charts: **`.png` or `.svg` only**). If no file should be saved, state that printed/displayed results are enough.
 - **Unresolved Ambiguities**: Include only ambiguities that still matter for safe execution.
 
 # Clarification rules
