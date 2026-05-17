@@ -1,0 +1,6 @@
+id: interpretation
+name: Interpretation
+description: >
+  Use when turning model outputs into user-facing conclusions—avoiding overclaiming,
+  stating caveats, separating correlation from causation, and tying results to the decision.
+tags: [communication, caveats]

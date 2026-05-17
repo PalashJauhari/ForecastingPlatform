@@ -10,7 +10,9 @@ Endpoints (must match FastAPI ``Form`` / ``File`` field names):
   file field ``files`` (same name the server expects for ``UploadFile``).
 - ``POST /run`` — ``application/x-www-form-urlencoded``-style body via
   ``data=``: ``query``, ``session_id``.
+- ``POST /run/stream`` — JSON ``query`` / ``session_id``; streamed SSE frames (scripting helper :meth:`iter_run_stream`).
 - ``POST /resume`` — ``data=``: ``resume_value``, ``session_id``.
+- ``POST /resume/stream`` — JSON ``resume_value`` / ``session_id`` (:meth:`iter_resume_stream`).
 - ``GET  /artifact/{session_id}/{path}`` — built via :meth:`GaussianBlurrApiClient.artifact_url`,
   used by the Dash UI's ``html.Img(src=...)`` to render plot artifacts inline.
 
@@ -20,9 +22,10 @@ normalizes missing keys so callers can use ``.get()`` safely.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import requests
 
@@ -89,15 +92,16 @@ def _normalize_agent_json(data: dict[str, Any]) -> dict[str, Any]:
     data.setdefault("question", None)
     data.setdefault("summary", None)
     data.setdefault("last_tool_result", None)
+    data.setdefault("codegen_requirement", None)
     return data
 
 
 class GaussianBlurrApiClient:
     """
-    Stateless wrapper around ``requests`` for the three public agent routes.
+    Stateless wrapper around ``requests`` for the FastAPI GaussianBlurr endpoints.
 
-    A shared :class:`requests.Session` is used for TCP keep-alive and consistent
-    headers (``Accept: application/json`` on JSON endpoints).
+    A shared :class:`requests.Session` keeps TCP keep-alive; responses default to JSON unless a method
+    (e.g. :meth:`iter_run_stream`) sets ``Accept: text/event-stream`` per request.
     """
 
     def __init__(self, base_url: str | None = None) -> None:
@@ -178,7 +182,7 @@ class GaussianBlurrApiClient:
         Run one orchestrator turn (``POST /run``).
 
         Returns a dict that always includes ``interrupted``, ``question``, ``summary``,
-        ``last_tool_result``, and on failure ``error`` (str) instead of a successful payload.
+        ``last_tool_result``, ``codegen_requirement`` (dict or ``None`` when absent), and on failure ``error`` (str) instead of a successful payload.
         """
         url = f"{self._base}/run"
         try:
@@ -233,3 +237,74 @@ class GaussianBlurrApiClient:
         if not isinstance(data, dict):
             return {"error": "Unexpected response shape from API."}
         return _normalize_agent_json(data)
+
+    def iter_run_stream(self, query: str, session_id: str) -> Iterator[dict[str, Any]]:
+        """
+        Consume ``POST /run/stream`` (SSE), yielding decoded JSON payloads from each ``data:`` frame.
+
+        Surface transport failures as ``ConnectionError``.
+        """
+
+        url = f"{self._base}/run/stream"
+        try:
+            with self._session.post(
+                url,
+                json={"session_id": session_id, "query": query},
+                headers={"Accept": "text/event-stream"},
+                stream=True,
+                timeout=AGENT_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                buffer = ""
+                for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
+                    if not chunk:
+                        continue
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    while True:
+                        sep = buffer.find("\n\n")
+                        if sep == -1:
+                            break
+                        frame = buffer[:sep]
+                        buffer = buffer[sep + 2 :]
+                        for raw_line in frame.split("\n"):
+                            line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+                            if not line.startswith("data: "):
+                                continue
+                            payload = json.loads(line[6:])
+                            yield payload
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError("Cannot reach API. Start uvicorn or set GAUSSIANBLURR_API_URL.") from exc
+
+    def iter_resume_stream(self, resume_value: str, session_id: str) -> Iterator[dict[str, Any]]:
+        """Same envelope contract as :meth:`iter_run_stream`, but resumes after ``interrupt``."""
+
+        url = f"{self._base}/resume/stream"
+        try:
+            with self._session.post(
+                url,
+                json={"session_id": session_id, "resume_value": resume_value},
+                headers={"Accept": "text/event-stream"},
+                stream=True,
+                timeout=AGENT_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                buffer = ""
+                for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
+                    if not chunk:
+                        continue
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    while True:
+                        sep = buffer.find("\n\n")
+                        if sep == -1:
+                            break
+                        frame = buffer[:sep]
+                        buffer = buffer[sep + 2 :]
+                        for raw_line in frame.split("\n"):
+                            line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+                            if not line.startswith("data: "):
+                                continue
+                            payload = json.loads(line[6:])
+                            yield payload
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError("Cannot reach API. Start uvicorn or set GAUSSIANBLURR_API_URL.") from exc
+

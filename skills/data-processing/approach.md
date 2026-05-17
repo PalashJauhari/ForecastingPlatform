@@ -28,3 +28,8 @@ This skill guides how to clean, reshape, combine, and prepare data in a way that
     *   Good preprocessing reduces ambiguity for feature engineering, modeling, and interpretation.
     *   If processing choices can materially affect the conclusion, surface them as assumptions or caveats.
     *   The best data-processing plan makes later steps simpler, not more fragile.
+
+## Tool mapping (processing)
+
+- **`code_pipeline`** — Primary way to execute multi-step cleaning, reshaping, and joins with auditable code; use **`build_codegen_requirement`** first when the pipeline is large or policy-sensitive.
+- Combine with the **data-grain-and-integrity** skill when joins or aggregation change row meaning—verify duplicates and counts before and after.

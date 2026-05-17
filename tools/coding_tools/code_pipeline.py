@@ -2,12 +2,19 @@
 ``code_pipeline`` tool implementation (generate → Semgrep → judge → save → run).
 
 Pipeline order
-    1. **Codegen** — structured output with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
-       may include task, data profile, and optional ``## Previous code policy violations`` on retry.
-    2. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
-    3. **LLM judge** — semantic/policy check (``run_llm_judge``).
-    4. **Save** — ``pipeline_run.py`` at ``agent_filesystem/<session>/pipeline_run.py`` (overwrites).
-    5. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
+
+    When ``detail_execution_requirement_first`` is **true**:
+    **Preflight planner** — structured ``CodegenPreflightOutput`` using graph state (profiling,
+    ``LoadReasoningSkills``, messages); result is surfaced as ``codegen_requirement`` in the tool JSON
+    and codegen uses ``detailed_requirement`` as the task brief.
+
+    2. **Codegen** — structured output with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
+       may include task (or planner ``detailed_requirement`` when preflight ran), data profile,
+       and optional ``## Previous code policy violations`` on retry.
+    3. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
+    4. **LLM judge** — semantic/policy check (``run_llm_judge``).
+    5. **Save** — ``pipeline_run.py`` at ``agent_filesystem/<session>/pipeline_run.py`` (overwrites).
+    6. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
        (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
        The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
        so generated scripts cannot read those variables even if static checks were bypassed.
@@ -31,6 +38,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -56,6 +64,7 @@ from session_paths import (
 )
 from skills.loader import LoadPatternSkills
 
+from .code_pipeline_preflight import run_codegen_preflight
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
 
@@ -114,6 +123,11 @@ def _env_for_sandbox_subprocess() -> dict[str, str]:
     return out
 
 
+def _finalize_tool_payload(body: dict[str, Any], codegen_requirement: dict[str, Any] | None) -> str:
+    """Attach optional preflight snapshot; ``codegen_requirement`` is JSON ``null`` when preflight skipped."""
+    return json.dumps({**body, "codegen_requirement": codegen_requirement}, default=str)
+
+
 class CodePipelineInput(BaseModel):
     """
     Arguments exposed to the orchestrator for ``code_pipeline``.
@@ -152,10 +166,23 @@ class CodePipelineInput(BaseModel):
             "Empty on the first attempt. Helps the model fix the issue without repeating the violation."
         ),
     )
+    detail_execution_requirement_first: bool = Field(
+        default=False,
+        description=(
+            "When **true**, run an internal planner that expands **task** into a structured execution brief using "
+            "workspace profiling and chat state (**codegen_requirement** in the tool result), then codegen follows that brief. "
+            "Use for larger or multi-step work. Prefer **false** on Semgrep/judge/runtime retries when you fold the tightened "
+            "spec back into **task** / **data_profile** unless the job shape materially changed."
+        ),
+    )
+
+
 @observe(name="tool.code_pipeline", as_type="tool")
 def _code_pipeline_impl(
     task: str,
     tool_call_id: str,
+    runtime: ToolRuntime,
+    detail_execution_requirement_first: bool = False,
     data_profile: str = "",
     previous_code_violation: str = "",
     session_id: str = "default",
@@ -194,10 +221,26 @@ def _code_pipeline_impl(
 
         **plots** — List of logical paths under ``agent_filesystem/.../run_<id>/`` for plot files produced in this invocation (empty list if none). Present whenever the pipeline reaches execution (successful safety gates).
 
-    After any safety failure, the **next** call should pass **previous_code_violation** with the
-    prior attempt’s ``code_safety_evaluation.detail`` (Semgrep/judge text). You may still refine
-    **task** if needed; do not retry with an empty **previous_code_violation** as if nothing failed.
+        **codegen_requirement** — When ``detail_execution_requirement_first`` was ``true``: object ``{ detailed_requirement, dataset_paths, assumptions }``. Otherwise JSON ``null``.
+
+        After any safety failure, the **next** call should pass **previous_code_violation** with the
+        prior attempt’s ``code_safety_evaluation.detail`` (Semgrep/judge text). You may still refine
+        **task** if needed; do not retry with an empty **previous_code_violation** as if nothing failed.
     """
+    codegen_requirement_snap: dict[str, Any] | None = None
+    effective_task = task.strip()
+    if detail_execution_requirement_first:
+        preflight_out = run_codegen_preflight(orchestrator_task=task.strip(), runtime=runtime)
+        codegen_requirement_snap = preflight_out.model_dump()
+        effective_task = preflight_out.detailed_requirement.strip()
+
+    langfuse.update_current_span(
+        metadata={
+            "detail_execution_requirement_first": str(detail_execution_requirement_first).lower(),
+            "has_codegen_requirement_snap": codegen_requirement_snap is not None,
+        },
+    )
+
     # ------------------------------------------------------------------
     # Step 1 — Codegen (structured object: filename, explanation, code)
     # ------------------------------------------------------------------
@@ -210,7 +253,7 @@ def _code_pipeline_impl(
     # Keep implementation guidance in the user payload so codegen sees one fully-assembled spec.
     user_payload = (
         "## Task\n"
-        f"{task.strip()}\n\n"
+        f"{effective_task}\n\n"
         "## Data Profile\n"
         f"{data_profile.strip() or '(none)'}\n\n"
         "## Vetted Code Patterns\n"
@@ -226,7 +269,7 @@ def _code_pipeline_impl(
             resp = llm.invoke(prompt_messages)
         except Exception as e:
             generation.update(output={"error": str(e)}, metadata={"has_data_profile": bool(data_profile.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
-            result = json.dumps(
+            result = _finalize_tool_payload(
                 {
                     "code_generation": {
                         "code": "",
@@ -238,7 +281,7 @@ def _code_pipeline_impl(
                     },
                     "execution": None,
                 },
-                default=str,
+                codegen_requirement_snap,
             )
             langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
             return result
@@ -251,7 +294,7 @@ def _code_pipeline_impl(
     # Step 2a — Empty codegen: skip expensive checks and disk I/O
     # ------------------------------------------------------------------
     if not code:
-        result = json.dumps(
+        result = _finalize_tool_payload(
             {
                 "code_generation": {
                     "code": "",
@@ -260,7 +303,7 @@ def _code_pipeline_impl(
                 },
                 "execution": None,
             },
-            default=str,
+            codegen_requirement_snap,
         )
         langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "no_code"})
         return result
@@ -273,7 +316,7 @@ def _code_pipeline_impl(
         semgrep_span.update(output=semgrep_report, metadata={"passed": semgrep_report["passed"], "violation_count": len(semgrep_report["violations"])})
     if not semgrep_report["passed"]:
         # Return the blocked source so the caller can inspect it and retry with `previous_code_violation`.
-        result = json.dumps(
+        result = _finalize_tool_payload(
             {
                 "code_generation": {
                     "code": code,
@@ -285,7 +328,7 @@ def _code_pipeline_impl(
                 },
                 "execution": None,
             },
-            default=str,
+            codegen_requirement_snap,
         )
         langfuse.update_current_span(metadata={"final_stage": "semgrep", "status": "blocked"})
         return result
@@ -295,12 +338,12 @@ def _code_pipeline_impl(
     # ------------------------------------------------------------------
     judge_ok, judge_detail = run_llm_judge(
         code=code,
-        task=task,
+        task=effective_task,
         model_name=JUDGE_MODEL,
     )
     if not judge_ok:
         # Mirror the Semgrep failure shape so the orchestrator can handle both safety gates the same way.
-        result = json.dumps(
+        result = _finalize_tool_payload(
             {
                 "code_generation": {
                     "code": code,
@@ -309,7 +352,7 @@ def _code_pipeline_impl(
                 },
                 "execution": None,
             },
-            default=str,
+            codegen_requirement_snap,
         )
         langfuse.update_current_span(metadata={"final_stage": "llm_judge", "status": "blocked"})
         return result
@@ -400,7 +443,7 @@ def _code_pipeline_impl(
             if f.is_file() and f.suffix.lower() in PLOT_FILE_EXTENSIONS:
                 plots.append(f"agent_filesystem/{sid}/run_{run_id}/{f.name}")
 
-    result = json.dumps({"code_generation": gen, "execution": execution, "plots": plots}, default=str)
+    result = _finalize_tool_payload({"code_generation": gen, "execution": execution, "plots": plots}, codegen_requirement_snap)
     langfuse.update_current_span(output={"code_generation_passed": True, "execution": execution, "plot_count": len(plots)}, metadata={"final_stage": "execute_subprocess", "status": "completed", "run_id": run_id})
     return result
 
@@ -411,8 +454,9 @@ def code_pipeline(
     task: str,
     data_profile: str = "",
     previous_code_violation: str = "",
+    detail_execution_requirement_first: bool = False,
 ) -> str:
-    """Run codegen, Semgrep, judge, save `pipeline_run.py`, execute sandbox. JSON: success `code_generation` is only explanation + passed flag; safety failure includes source."""
+    """Run codegen, Semgrep, judge, save `pipeline_run.py`, execute sandbox. Optional internal preflight emits `codegen_requirement`; JSON carries it when enabled."""
     # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
     session_id = session_id_from_config(runtime.config)
     active_skills = (runtime.state or {}).get("active_skills", [])
@@ -421,6 +465,8 @@ def code_pipeline(
     return _code_pipeline_impl(
         task=task,
         tool_call_id=tool_call_id,
+        runtime=runtime,
+        detail_execution_requirement_first=detail_execution_requirement_first,
         data_profile=data_profile,
         previous_code_violation=previous_code_violation,
         session_id=session_id,

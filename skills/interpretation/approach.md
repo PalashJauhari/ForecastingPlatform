@@ -28,3 +28,8 @@ This skill helps turn analytical output into careful, defensible conclusions ins
     *   Recommendations should follow from evidence, not from model output alone.
     *   If the result supports multiple actions, explain the tradeoffs.
     *   Interpretation is complete only when the user can understand both the insight and its confidence level.
+
+## Tool mapping (interpretation)
+
+- Ground claims in **`sarima_tool`** / **`prophet_tool`** JSON fields (fit quality, residuals, intervals) and in **`code_pipeline`** outputs; do not invent metrics absent from tool results.
+- When tool output is partial, say what is unknown rather than filling gaps with model narrative alone.

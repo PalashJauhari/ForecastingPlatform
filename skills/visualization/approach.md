@@ -21,3 +21,8 @@ This skill guides the creation of impactful, clear, and professional data visual
 4.  **Statistical Context**:
     *   When showing a mean, also show the variance or confidence interval.
     *   Label the axes with units (e.g., "Revenue ($M)").
+
+## Tool mapping (visualization)
+
+- **`code_pipeline`** — Only path that may produce image files (matplotlib) in this app; describe the chart intent in `task` and keep **filenames basename-only**.
+- Use **`visualization/patterns.py`** snippets when codegen needs consistent styling; align chart choice with the principles above.

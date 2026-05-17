@@ -4,9 +4,17 @@ FastAPI HTTP API for the Forecasting Platform agent.
 Endpoints
     POST /run                              — form: ``query``, ``session_id`` (``thread_id`` for the graph).
     POST /resume                           — resume after an ``ask_user`` interrupt.
+    POST /run/stream                       — JSON ``query`` / ``session_id``; SSE (``text/event-stream``) graph progress per node plus ``done`` matching ``/run``.
+    POST /resume/stream                     — JSON ``resume_value`` / ``session_id``; same SSE semantics after ``interrupt``.
     POST /upload-data                      — multipart: CSV/Excel files → ``agent_filesystem/<session>/<filename>``.
     GET  /artifact/{session_id}/{path:path} — serve a static artifact (plot or output file)
                                               from the session workspace; read-only, sandbox-checked.
+
+SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
+``{"type":"node",...}`` — one LangGraph ``updates`` step (parallel prep yields multiple frames;
+order across ``ProfileSavedData`` / ``DescribePlots`` / ``SummariseMessages`` is nondeterministic).
+``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
+``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
 Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
 Langfuse keys.
@@ -14,10 +22,11 @@ Langfuse keys.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,8 +38,10 @@ from langfuse import observe, propagate_attributes
 load_dotenv(PROJECT_ROOT / ".env")
 
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import BaseModel, Field
 
 from graph import AnalysisGraph
 from observability.langfuse_handler import build_request_metadata, get_langfuse_client
@@ -52,6 +63,15 @@ ARTIFACT_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".png", ".svg"}
 # Kept tight: only the formats ``code_pipeline``'s plot patches actually emit.
 IMAGE_EXTENSIONS = {".png", ".svg"}
 
+# ``code_pipeline`` and tool ``content`` payloads can dominate SSE frames; previews only.
+_SSE_TOOL_ARGS_MAX_CHARS = 800
+_SSE_TOOL_RESULT_MAX_CHARS = 1200
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
+
 app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
     description=(
@@ -62,6 +82,35 @@ app = FastAPI(
 )
 analysis_graph = AnalysisGraph()
 langfuse = get_langfuse_client()
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:8050",
+        "http://localhost:8050",
+        "http://0.0.0.0:8050",
+        "http://[::1]:8050",
+    ],
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:[1-9]\d*)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class StreamRunRequest(BaseModel):
+    """JSON body for ``POST /run/stream``."""
+
+    session_id: str = Field(default="default", description="Stable id used as LangGraph ``thread_id``.")
+    query: str = Field(..., min_length=1, description="Natural-language agent instruction.")
+
+
+class StreamResumeRequest(BaseModel):
+    """JSON body for ``POST /resume/stream``."""
+
+    session_id: str = Field(default="default", description="Same session id that paused on ``interrupt``.")
+    resume_value: str = Field(..., min_length=1, description="User reply to ``ask_user``.")
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +197,24 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     return images
 
 
+def _parse_codegen_requirement_from_tool_result(tool_content: Any) -> Any:
+    """
+    If ``last_tool_message`` JSON came from ``code_pipeline`` with preflight enabled, expose the object.
+    """
+    if not isinstance(tool_content, str) or not tool_content.strip():
+        return None
+    try:
+        payload = json.loads(tool_content)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cr = payload.get("codegen_requirement")
+    if cr is None or not isinstance(cr, dict):
+        return None
+    return cr
+
+
 def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build the JSON body from a graph ``invoke()`` return value.
@@ -175,6 +242,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
             "summary": None,
             "last_tool_result": None,
             "images": [],
+            "codegen_requirement": None,
         }
 
     messages = result.get("messages", [])
@@ -186,6 +254,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         (m.content for m in reversed(messages) if getattr(m, "type", "") == "tool"),
         None,
     )
+    codegen_requirement = _parse_codegen_requirement_from_tool_result(last_tool_result)
     tool_call_ids = _collect_current_turn_tool_call_ids(messages)
     images = _images_for_turn(session_id, tool_call_ids)
 
@@ -195,6 +264,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         "summary": last_ai,
         "last_tool_result": last_tool_result,
         "images": images,
+        "codegen_requirement": codegen_requirement,
     }
 
 
@@ -220,6 +290,189 @@ def get_unique_upload_name(session_id: str, filename: str) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Streaming / SSE helpers
+# ---------------------------------------------------------------------------
+
+
+def _sse(payload: dict[str, Any]) -> bytes:
+    """Encode one Server-Sent Events ``data`` frame (newline-terminated UTF-8)."""
+
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n".encode("utf-8")
+
+
+def _truncate_sse_preview(raw: Any, limit: int) -> str:
+    """Prefer human-readable truncation for heterogeneous tool payloads."""
+
+    body = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+    if len(body) <= limit:
+        return body
+    return body[: max(0, limit - 1)] + "…"
+
+
+def _sanitize_tool_calls_for_sse(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """
+    Project LangChain ``tool_calls`` into JSON-safe previews (heavy ``code_pipeline`` args trimmed).
+
+    OpenAI-compatible dicts expose ``arguments`` strings; LangChain maps some providers to parsed ``args`` dicts.
+    """
+    out: list[dict[str, Any]] = []
+    for tc in tool_calls or []:
+        if isinstance(tc, dict):
+            name = tc.get("name")
+            tc_id = tc.get("id")
+            args = tc.get("args") if tc.get("args") is not None else tc.get("arguments")
+        else:
+            name = getattr(tc, "name", None)
+            tc_id = getattr(tc, "id", None)
+            args = getattr(tc, "args", None)
+        preview = _truncate_sse_preview(args, _SSE_TOOL_ARGS_MAX_CHARS)
+        out.append({"name": name, "id": tc_id, "args_preview": preview})
+    return out
+
+
+def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
+    """
+    Recover invoke-shaped terminal dict from the compiled graph checkpoint.
+
+    Copies ``interrupts`` from LangGraph snapshot state onto ``__interrupt__``, matching terminal ``invoke`` results.
+    """
+    snap = graph.get_state({"configurable": {"thread_id": session_id}})
+    values_payload = getattr(snap, "values", None)
+    merged: Dict[str, Any] = dict(values_payload or {})
+    ints = getattr(snap, "interrupts", ()) or ()
+    if ints:
+        merged["__interrupt__"] = list(ints)
+    return merged
+
+
+def stream_events_from_langgraph_chunk(session_id: str, update: Any) -> Iterator[Dict[str, Any]]:
+    """Expand one ``graph.stream(..., stream_mode=\"updates\")`` chunk into SSE-ready payloads."""
+
+    if not isinstance(update, dict) or not update:
+        yield {"type": "debug", "session_id": session_id, "payload": update}
+        return
+
+    # ``updates`` can bundle multiple sibling nodes finishing the same tick (parallel fan-out).
+    items = list(update.items())
+    items.sort(key=lambda kv: kv[0])
+    for node_name, payload in items:
+        yield stream_event_single_node(session_id, node_name, payload)
+
+
+def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> Dict[str, Any]:
+    """Map ``{node_name: partial_state_delta}`` to a compact client-facing envelope."""
+
+    event: Dict[str, Any] = {
+        "type": "node",
+        "session_id": session_id,
+        "node": node_name,
+        "status": "completed",
+    }
+
+    # LangGraph emits this virtual key whenever ``interrupt()`` pauses execution.
+    if node_name == "__interrupt__":
+        interrupt_tuple = payload if isinstance(payload, (tuple, list)) else (payload,)
+        first = interrupt_tuple[0] if interrupt_tuple else None
+        value = getattr(first, "value", None) if first is not None else None
+        question_preview = ""
+        if isinstance(value, dict):
+            question_preview = str(value.get("question", value))
+        elif value is not None:
+            question_preview = str(value)
+        event["label"] = "Awaiting human input"
+        event["interrupt_preview"] = _truncate_sse_preview(question_preview or "(interrupt)", 400)
+        return event
+
+    if not isinstance(payload, dict):
+        event["label"] = node_name.replace("_", " ").title()
+        return event
+
+    if node_name == "Orchestrator":
+        event["label"] = "Orchestrator"
+        msgs = payload.get("messages") or []
+        for msg in reversed(msgs):
+            if isinstance(msg, AIMessage):
+                tool_calls = list(getattr(msg, "tool_calls", None) or [])
+                event["had_tool_calls"] = bool(tool_calls)
+                if tool_calls:
+                    event["tool_calls"] = _sanitize_tool_calls_for_sse(tool_calls)
+                break
+
+    elif node_name == "RunTools":
+        event["label"] = "Run tools"
+        msgs = payload.get("messages") or []
+        previews: list[dict[str, Any]] = []
+        for msg in msgs:
+            if isinstance(msg, ToolMessage):
+                previews.append(
+                    {
+                        "name": getattr(msg, "name", None) or "tool",
+                        "tool_call_id": getattr(msg, "tool_call_id", None),
+                        "content_preview": _truncate_sse_preview(msg.content, _SSE_TOOL_RESULT_MAX_CHARS),
+                    }
+                )
+        event["tool_results"] = previews
+
+    elif node_name == "IdentifySkills":
+        skills = payload.get("active_skills") or []
+        event["label"] = "Expert skills routed"
+        event["active_skills"] = skills
+        event["active_skill_count"] = len(skills)
+
+    elif node_name == "ProfileSavedData":
+        rows = payload.get("data_profile") or []
+        event["label"] = "Profiling workspace inputs"
+        event["profile_entries"] = len(rows)
+
+    elif node_name == "SummariseMessages":
+        summary = payload.get("message_summary")
+        preview = ""
+        if isinstance(summary, str) and summary.strip():
+            preview = summary.strip().split("\n")[0][:120]
+        event["label"] = "Rolling context compaction"
+        if preview:
+            event["summary_preview"] = preview + ("…" if len(summary.strip()) > 120 else "")
+
+    elif node_name == "DescribePlots":
+        event["label"] = "Describe plots (stub)"
+
+    elif node_name == "BeginTurn":
+        event["label"] = "Turn boundary"
+
+    elif node_name == "FinalAnswer":
+        event["label"] = "Assistant reply finalized"
+
+    else:
+        event["label"] = node_name.replace("_", " ").title()
+
+    return event
+
+
+def sse_event_lines_for_turn(
+    analysis: AnalysisGraph,
+    session_id: str,
+    stream_updates: Iterator[Dict[str, Any]],
+) -> Iterator[bytes]:
+    """
+    Drain one ``stream_*`` iterator, emit SSE payloads, append ``done`` via ``get_api_response``.
+
+    The generator catches failures mid-flight — clients must treat trailing ``error`` payloads as authoritative.
+    """
+
+    try:
+        for update in stream_updates:
+            for envelope in stream_events_from_langgraph_chunk(session_id, update):
+                yield _sse(envelope)
+        merged_state = _snapshot_to_invoke_shape(analysis.graph, session_id)
+        snapshot_body = get_api_response(session_id, merged_state)
+        terminal: Dict[str, Any] = {"type": "done", "session_id": session_id}
+        terminal.update(snapshot_body)
+        yield _sse(terminal)
+    except Exception as exc:
+        yield _sse({"type": "error", "session_id": session_id, "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -238,7 +491,8 @@ async def run(
         session_id  — ``thread_id`` for conversation memory.
 
     Returns
-        JSON with ``session_id``, ``summary``, ``last_tool_result``, and ``images``.
+        JSON with ``session_id``, ``summary``, ``last_tool_result``, ``images``, and optionally
+        ``codegen_requirement`` (structured preflight snapshot from ``code_pipeline`` when enabled).
         ``images`` is a list of logical artifact paths
         (``agent_filesystem/<session>/run_<tool_call_id>/<file>.png|svg``) for
         every plot produced during this turn — discovered by listing the
@@ -249,7 +503,15 @@ async def run(
     with propagate_attributes(session_id=session_id, tags=["api", "run"], metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query)):
         result = analysis_graph.run_graph(session_id, query)
         response = get_api_response(session_id, result)
-        langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None, "image_count": len(response.get("images") or [])})
+        langfuse.update_current_span(
+            output=response,
+            metadata={
+                "interrupted": response["interrupted"],
+                "has_last_tool_result": response["last_tool_result"] is not None,
+                "has_codegen_requirement": response.get("codegen_requirement") is not None,
+                "image_count": len(response.get("images") or []),
+            },
+        )
         return response
 
 
@@ -272,8 +534,57 @@ async def resume(
     with propagate_attributes(session_id=session_id, tags=["api", "resume"], metadata=build_request_metadata(endpoint="/resume", interface="fastapi", query=resume_value)):
         result = analysis_graph.resume(session_id, resume_value)
         response = get_api_response(session_id, result)
-        langfuse.update_current_span(output=response, metadata={"interrupted": response["interrupted"], "has_last_tool_result": response["last_tool_result"] is not None, "image_count": len(response.get("images") or [])})
+        langfuse.update_current_span(
+            output=response,
+            metadata={
+                "interrupted": response["interrupted"],
+                "has_last_tool_result": response["last_tool_result"] is not None,
+                "has_codegen_requirement": response.get("codegen_requirement") is not None,
+                "image_count": len(response.get("images") or []),
+            },
+        )
         return response
+
+
+@app.post("/run/stream")
+@observe(name="api.run_stream", as_type="chain", capture_output=False)
+async def run_stream(request_body: StreamRunRequest) -> StreamingResponse:
+    """
+    SSE mirror of ``POST /run``: JSON body with ``session_id`` + ``query``.
+
+    Streams ``type:node`` payloads for each LangGraph ``updates`` tick, ending with ``type:done`` whose
+    fields match ``get_api_response`` / ``POST /run``.
+    """
+
+    sid = request_body.session_id
+    query = request_body.query
+    with propagate_attributes(session_id=sid, tags=["api", "run_stream"], metadata=build_request_metadata(endpoint="/run/stream", interface="fastapi", query=query)):
+        stream_bytes = sse_event_lines_for_turn(
+            analysis_graph,
+            sid,
+            analysis_graph.stream_graph(sid, query),
+        )
+        langfuse.update_current_span(metadata={"session_id": sid, "streaming": True})
+        return StreamingResponse(stream_bytes, media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@app.post("/resume/stream")
+@observe(name="api.resume_stream", as_type="chain", capture_output=False)
+async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
+    """
+    SSE mirror of ``POST /resume``: JSON body with ``session_id`` + ``resume_value``.
+    """
+
+    sid = request_body.session_id
+    rv = request_body.resume_value
+    with propagate_attributes(session_id=sid, tags=["api", "resume_stream"], metadata=build_request_metadata(endpoint="/resume/stream", interface="fastapi", query=rv)):
+        stream_bytes = sse_event_lines_for_turn(
+            analysis_graph,
+            sid,
+            analysis_graph.stream_resume(sid, rv),
+        )
+        langfuse.update_current_span(metadata={"session_id": sid, "streaming": True, "resume": True})
+        return StreamingResponse(stream_bytes, media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.post("/upload-data")

@@ -28,3 +28,9 @@ This skill guides how to judge whether an analysis, forecast, or model is actual
     *   Check whether performance breaks on recent periods, sparse segments, edge cases, or large-value groups.
     *   Report important caveats when evaluation is thin, noisy, or incomplete.
     *   A trustworthy result explains where it works, where it fails, and how confident we should be.
+
+## Tool mapping (evaluation)
+
+- **`code_pipeline`** — Use to implement custom backtests, rolling metrics, or segment dashboards; pass clear evaluation intent in `task` and rely on session **filenames only** in arguments.
+- **`sarima_tool` / `prophet_tool`** — Treat built-in diagnostics and forecast JSON as inputs to your narrative; if the user needs deeper residual or comparative charts, follow with **`code_pipeline`**.
+- **`code_pipeline`** — Use **`detail_execution_requirement_first: true`** when the evaluation plan is multi-step so the internal planner captures metrics, splits, and outputs explicitly; then codegen runs in the same tool call.

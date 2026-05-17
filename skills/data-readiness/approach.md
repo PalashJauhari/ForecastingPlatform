@@ -28,3 +28,8 @@ This skill determines whether the available data is actually sufficient and usab
     *   State what is available, what is missing, and what assumptions are being made.
     *   Treat readiness as a gate, not a side note.
     *   A good workflow starts with confirming the data can carry the intended conclusion.
+
+## Tool mapping (readiness)
+
+- Rely on **`data_profile`** in orchestrator context and **`code_pipeline`** for exploratory profiling when the session files exist but structure is unclear.
+- **`ask_user`** — Use when the task is blocked (missing columns, no time column, ambiguous file role) rather than guessing from thin data.

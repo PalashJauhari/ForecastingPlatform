@@ -1,9 +1,8 @@
 """
 GaussianBlurr — Plotly Dash web UI.
 
-Layout, callbacks, and rendering live here. All HTTP traffic to the FastAPI
-backend goes through :class:`ui.api_client.GaussianBlurrApiClient` so this file
-stays focused on UX and state.
+Layout and rendering live here. Chat turns ``POST`` to FastAPI SSE endpoints ``/run/stream`` and
+``/resume/stream`` from the browser (see ``assets/gb_stream_ui.js``); uploads still use :class:`~ui.api_client.GaussianBlurrApiClient`.
 
 Run (from repository root)::
 
@@ -21,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dash import ALL, Dash, Input, Output, State, callback, callback_context, dcc, html
+from dash import ALL, ClientsideFunction, Dash, Input, Output, State, callback, callback_context, dcc, html
 from dash.dash_table import DataTable
 from dash.exceptions import PreventUpdate
 
@@ -149,7 +148,8 @@ def _build_layout() -> html.Div:
         children=[
             dcc.Store(id="ui-store", data=_default_store()),
             dcc.Store(id="upload-gen", data=0),
-            dcc.Store(id="agent-tick", data=0),
+            dcc.Store(id="api-base-url", data=api.base_url),
+            html.Div(id="gb-clientside-dummy", style={"display": "none"}),
             dcc.Store(id="preview-dlg", data={"open": False, "i": None}),
             html.Div(
                 className="gb-frame",
@@ -333,6 +333,13 @@ def _build_layout() -> html.Div:
                                     ),
                                 ],
                             ),
+                        ],
+                    ),
+                    html.Div(
+                        className="gb-progress-col",
+                        children=[
+                            html.Div(className="gb-progress-head", children=[html.H3("Progress")]),
+                            html.Div(id="gb-stream-progress"),
                         ],
                     ),
                 ],
@@ -598,126 +605,30 @@ def sync_preview_modal(dlg, store):
 
 
 # ---------------------------------------------------------------------------
-# Callbacks — chat (orchestrator / resume)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — chat (streaming SSE clientside)
 # ---------------------------------------------------------------------------
 
+app.clientside_callback(
+    ClientsideFunction(namespace="gb_stream_ui", function_name="clear_stream_progress"),
+    Output("gb-clientside-dummy", "children"),
+    Input("upload-gen", "data"),
+    prevent_initial_call=True,
+)
 
-@callback(
+app.clientside_callback(
+    ClientsideFunction(namespace="gb_stream_ui", function_name="submit_message_stream"),
     Output("ui-store", "data", allow_duplicate=True),
-    Output("chat-input", "value"),
-    Output("agent-tick", "data"),
+    Output("chat-input", "value", allow_duplicate=True),
     Input("btn-send", "n_clicks"),
     Input("chat-input", "n_submit"),
     State("chat-input", "value"),
     State("ui-store", "data"),
-    State("agent-tick", "data"),
+    State("api-base-url", "data"),
     prevent_initial_call=True,
 )
-def on_send(_n_clicks, _n_submit, text, store, agent_tick):
-    """
-    Append the user line and set ``agent_thinking`` so the UI can show ``Thinking`` while
-    ``complete_agent_turn`` calls ``/run`` or ``/resume`` (avoids blocking the first paint).
-    """
-    if not callback_context.triggered:
-        raise PreventUpdate
-    if not store or not text or not str(text).strip():
-        raise PreventUpdate
-    if store.get("agent_thinking"):
-        raise PreventUpdate
-    prompt = str(text).strip()
-    store = dict(store)
-    messages = list(store.get("messages") or [])
-
-    messages.append({"role": "user", "content": prompt})
-    was_resume = bool(store.get("awaiting_resume"))
-    pending_before = store.get("pending_question") or ""
-
-    store["messages"] = messages
-    store["agent_thinking"] = True
-    if was_resume:
-        store["agent_restore_pending"] = pending_before
-    else:
-        store.pop("agent_restore_pending", None)
-
-    return store, "", int(agent_tick or 0) + 1
-
-
-@callback(
-    Output("ui-store", "data", allow_duplicate=True),
-    Input("agent-tick", "data"),
-    State("ui-store", "data"),
-    prevent_initial_call=True,
-)
-def complete_agent_turn(_tick, store):
-    """After each send (``agent-tick``), call the API if ``agent_thinking`` is set."""
-    if not store or not store.get("agent_thinking"):
-        raise PreventUpdate
-    store = dict(store)
-    messages = list(store.get("messages") or [])
-    if not messages or messages[-1].get("role") != "user":
-        store["agent_thinking"] = False
-        return store
-
-    prompt = str(messages[-1].get("content") or "")
-    was_resume = bool(store.get("awaiting_resume"))
-    restore_pending = store.pop("agent_restore_pending", None)
-
-    try:
-        if was_resume:
-            data = api.resume(prompt, store["session_id"])
-        else:
-            data = api.run(prompt, store["session_id"])
-    except Exception as exc:
-        store["agent_thinking"] = False
-        if was_resume and restore_pending is not None:
-            store["awaiting_resume"] = True
-            store["pending_question"] = restore_pending
-        else:
-            store["awaiting_resume"] = False
-            store["pending_question"] = ""
-        messages.append({"role": "assistant", "content": f"Something went wrong: {exc}"})
-        store["messages"] = messages
-        return store
-
-    if data.get("interrupted"):
-        store["awaiting_resume"] = True
-        q = data.get("question") or "Please clarify."
-        store["pending_question"] = q
-        messages.append(
-            {
-                "role": "assistant",
-                "content": f"I need a bit more information before I proceed:\n\n**{q}**",
-            }
-        )
-        store["messages"] = messages
-        store["agent_thinking"] = False
-        return store
-
-    if data.get("error"):
-        if was_resume and restore_pending is not None:
-            store["awaiting_resume"] = True
-            store["pending_question"] = restore_pending
-        else:
-            store["awaiting_resume"] = False
-            store["pending_question"] = ""
-        messages.append({"role": "assistant", "content": f"Something went wrong: {data['error']}"})
-        store["messages"] = messages
-        store["agent_thinking"] = False
-        return store
-
-    store["awaiting_resume"] = False
-    store["pending_question"] = ""
-    summary = data.get("summary") or ""
-    # The API returns ``images``: logical paths under
-    # ``agent_filesystem/<session>/run_<tool_call_id>/...`` produced during this turn.
-    # We attach them to the assistant message so each chat bubble carries (and only
-    # ever shows) the plots from its own turn — no regex scan over tool output.
-    images = list(data.get("images") or [])
-    reply = summary if summary else "Done."
-    messages.append({"role": "assistant", "content": reply, "output_images": images})
-    store["messages"] = messages
-    store["agent_thinking"] = False
-    return store
 
 
 # ---------------------------------------------------------------------------
@@ -883,6 +794,32 @@ def render_all(store):
                     )
                 )
             else:
+                codegen_req = m.get("codegen_requirement") or {}
+                plan_blocks: list = []
+                if isinstance(codegen_req, dict) and codegen_req.get("detailed_requirement"):
+                    plan_blocks.append(
+                        html.Details(
+                            open=False,
+                            style={
+                                "marginTop": "10px",
+                                "padding": "8px 10px",
+                                "borderRadius": "8px",
+                                "border": "1px solid #E8E8E6",
+                                "background": "#FAFAF8",
+                            },
+                            children=[
+                                html.Summary(
+                                    "Execution plan (code pipeline)",
+                                    style={"cursor": "pointer", "fontWeight": 600, "color": "#444"},
+                                ),
+                                dcc.Markdown(
+                                    str(codegen_req["detailed_requirement"]),
+                                    dangerously_allow_html=False,
+                                    className="gb-md",
+                                ),
+                            ],
+                        )
+                    )
                 bubble = html.Div(
                     style={
                         "maxWidth": "640px",
@@ -896,6 +833,7 @@ def render_all(store):
                     },
                     children=[
                         dcc.Markdown(content, dangerously_allow_html=False, className="gb-md"),
+                        *plan_blocks,
                         *extras,
                         _meta_row(is_user=False),
                     ],
@@ -906,19 +844,6 @@ def render_all(store):
                 )
                 blocks.append(row)
         chat_children: list = list(blocks)
-        if store.get("agent_thinking"):
-            chat_children.append(
-                html.Div(
-                    "Thinking",
-                    style={
-                        "fontSize": "13px",
-                        "color": "#9A9A97",
-                        "letterSpacing": "0.06em",
-                        "marginTop": "6px",
-                        "paddingLeft": "2px",
-                    },
-                )
-            )
         chat = html.Div(
             style={"width": "100%", "maxWidth": "100%", "boxSizing": "border-box"},
             children=chat_children,

@@ -28,3 +28,8 @@ This skill helps translate a user request into a precise data science problem be
     *   Prefer the lightest method that can answer the question credibly.
     *   Separate “what the user asked for” from “what the data can support.”
     *   A well-framed problem should make the next tool choice obvious and defensible.
+
+## Tool mapping (framing)
+
+- **`ask_user`** — Use when constraints, target definition, horizon, or success criteria are missing and block a defensible plan.
+- **`build_codegen_requirement`** — Use once the problem is specific enough to translate into a structured execution spec before **`code_pipeline`**.

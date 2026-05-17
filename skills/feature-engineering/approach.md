@@ -28,3 +28,8 @@ This skill guides how to design predictive inputs that are useful, realistic, an
     *   Every important feature should have a reason to exist.
     *   If a transformation changes scale or interpretation, carry that into evaluation and explanation.
     *   Feature engineering is successful when it improves predictive usefulness without hiding the underlying logic.
+
+## Tool mapping (features)
+
+- Implement feature builds in **`code_pipeline`** with explicit train vs scoring period logic; document lags and rolling windows in `task`.
+- **`build_codegen_requirement`** helps lock leakage constraints before codegen when the feature set is non-trivial.

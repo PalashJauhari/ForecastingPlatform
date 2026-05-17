@@ -17,6 +17,10 @@ graph:
   recursion_limit: 100   # max super-steps per single run (stops runaway loops)
   max_concurrency: 2      # max parallel runnable work where the engine applies it
 
+# Skill router: cap how many playbooks load into orchestrator / codegen context per turn.
+skills:
+  max_selected: 8
+
 # Optional OpenAI throttling on every ``ChatOpenAI`` (``langchain_core.rate_limiters.InMemoryRateLimiter``).
 # Set ``enabled: false`` to turn off. Shared across orchestrator, codegen, judge, summarisation.
 llm_rate_limit:

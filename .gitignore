@@ -40,6 +40,9 @@ htmlcov/
 *.swo
 .DS_Store
 
+# --- Generated artifacts (plots, exports; not source) ---
+artifact/
+
 # --- Agent workspace (runtime data, not source) ---
 agent_filesystem/
 
