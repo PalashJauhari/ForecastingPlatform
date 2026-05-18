@@ -794,32 +794,6 @@ def render_all(store):
                     )
                 )
             else:
-                codegen_req = m.get("codegen_requirement") or {}
-                plan_blocks: list = []
-                if isinstance(codegen_req, dict) and codegen_req.get("detailed_requirement"):
-                    plan_blocks.append(
-                        html.Details(
-                            open=False,
-                            style={
-                                "marginTop": "10px",
-                                "padding": "8px 10px",
-                                "borderRadius": "8px",
-                                "border": "1px solid #E8E8E6",
-                                "background": "#FAFAF8",
-                            },
-                            children=[
-                                html.Summary(
-                                    "Execution plan (code pipeline)",
-                                    style={"cursor": "pointer", "fontWeight": 600, "color": "#444"},
-                                ),
-                                dcc.Markdown(
-                                    str(codegen_req["detailed_requirement"]),
-                                    dangerously_allow_html=False,
-                                    className="gb-md",
-                                ),
-                            ],
-                        )
-                    )
                 bubble = html.Div(
                     style={
                         "maxWidth": "640px",
@@ -833,7 +807,6 @@ def render_all(store):
                     },
                     children=[
                         dcc.Markdown(content, dangerously_allow_html=False, className="gb-md"),
-                        *plan_blocks,
                         *extras,
                         _meta_row(is_user=False),
                     ],

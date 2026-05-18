@@ -33,4 +33,4 @@ This skill guides how to judge whether an analysis, forecast, or model is actual
 
 - **`code_pipeline`** — Use to implement custom backtests, rolling metrics, or segment dashboards; pass clear evaluation intent in `task` and rely on session **filenames only** in arguments.
 - **`sarima_tool` / `prophet_tool`** — Treat built-in diagnostics and forecast JSON as inputs to your narrative; if the user needs deeper residual or comparative charts, follow with **`code_pipeline`**.
-- **`code_pipeline`** — Use **`detail_execution_requirement_first: true`** when the evaluation plan is multi-step so the internal planner captures metrics, splits, and outputs explicitly; then codegen runs in the same tool call.
+- **`code_pipeline`** — Use with a structured **`task`** (detailed **`requirements`**, **`input`** / **`output`** basename lists) when the evaluation plan is multi-step so codegen and the runtime sandbox match the intended files and metrics.

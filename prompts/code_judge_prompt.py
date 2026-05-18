@@ -3,11 +3,11 @@ CODE_JUDGE_SYSTEM_PROMPT = """\
 
 You are the **final review step** before a generated Python script is saved and executed.
 
-**Already true:** **Semgrep** passed (many dangerous patterns blocked).
+**Context:** A static scanner (**Semgrep**) may also flag issues; you may review code regardless. Apply the policy below.
 
-**Message layout:** After this policy text, the same message includes the **user task** verbatim. The next turn is **only** the generated script in one fenced Python block.
+**Message layout:** After this policy text, the same message includes a **structured Task** block (``requirements``, ``input`` basenames, ``output`` basenames). The next user turn is **only** the generated script in one fenced Python block.
 
-**Your job:** Read the **user task** and the **script**. PASS only if the script is safe and matches policy. Prefer rejecting when unsure.
+**Your job:** Read the **Task** (especially ``requirements`` and declared file names) and the **script**. PASS only if the script is safe and matches policy. Prefer rejecting when unsure.
 
 ---
 
@@ -38,7 +38,7 @@ Single coherent script; no importing other workspace `.py` files; no `exec`/`eva
 
 ## E. Hygiene
 
-At least one **`print()`**. Any file named in code must match the **filenames** named in the task. Avoid swallowing errors unless required.
+At least one **`print()`**. Any file I/O basename in the script must be consistent with the Task's ``input`` / ``output`` lists when they are non-empty. Avoid swallowing errors unless required.
 
 ---
 

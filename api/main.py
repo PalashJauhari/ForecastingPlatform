@@ -196,24 +196,6 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     return images
 
 
-def _parse_codegen_requirement_from_tool_result(tool_content: Any) -> Any:
-    """
-    If ``last_tool_message`` JSON came from ``code_pipeline`` with preflight enabled, expose the object.
-    """
-    if not isinstance(tool_content, str) or not tool_content.strip():
-        return None
-    try:
-        payload = json.loads(tool_content)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    cr = payload.get("codegen_requirement")
-    if cr is None or not isinstance(cr, dict):
-        return None
-    return cr
-
-
 def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build the JSON body from a graph ``invoke()`` return value.
@@ -241,7 +223,6 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
             "summary": None,
             "last_tool_result": None,
             "images": [],
-            "codegen_requirement": None,
         }
 
     messages = result.get("messages", [])
@@ -253,7 +234,6 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         (m.content for m in reversed(messages) if getattr(m, "type", "") == "tool"),
         None,
     )
-    codegen_requirement = _parse_codegen_requirement_from_tool_result(last_tool_result)
     tool_call_ids = _collect_current_turn_tool_call_ids(messages)
     images = _images_for_turn(session_id, tool_call_ids)
 
@@ -263,7 +243,6 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         "summary": last_ai,
         "last_tool_result": last_tool_result,
         "images": images,
-        "codegen_requirement": codegen_requirement,
     }
 
 
@@ -568,8 +547,7 @@ async def run(
         session_id  — ``thread_id`` for conversation memory.
 
     Returns
-        JSON with ``session_id``, ``summary``, ``last_tool_result``, ``images``, and optionally
-        ``codegen_requirement`` (structured preflight snapshot from ``code_pipeline`` when enabled).
+        JSON with ``session_id``, ``summary``, ``last_tool_result``, ``images``.
         ``images`` is a list of logical artifact paths
         (``agent_filesystem/<session>/run_<tool_call_id>/<file>.png|svg``) for
         every plot produced during this turn — discovered by listing the
@@ -585,7 +563,6 @@ async def run(
             metadata={
                 "interrupted": response["interrupted"],
                 "has_last_tool_result": response["last_tool_result"] is not None,
-                "has_codegen_requirement": response.get("codegen_requirement") is not None,
                 "image_count": len(response.get("images") or []),
             },
         )
@@ -616,7 +593,6 @@ async def resume(
             metadata={
                 "interrupted": response["interrupted"],
                 "has_last_tool_result": response["last_tool_result"] is not None,
-                "has_codegen_requirement": response.get("codegen_requirement") is not None,
                 "image_count": len(response.get("images") or []),
             },
         )

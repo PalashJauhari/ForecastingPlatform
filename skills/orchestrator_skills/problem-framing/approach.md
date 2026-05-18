@@ -32,4 +32,4 @@ This skill helps translate a user request into a precise data science problem be
 ## Tool mapping (framing)
 
 - **`ask_user`** — Use when constraints, target definition, horizon, or success criteria are missing and block a defensible plan.
-- **`build_codegen_requirement`** — Use once the problem is specific enough to translate into a structured execution spec before **`code_pipeline`**.
+- Use a structured **`code_pipeline`** **`task`** (requirements + input/output file lists) once the problem is specific enough to name datasets and deliverables before codegen.

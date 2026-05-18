@@ -31,5 +31,5 @@ This skill guides how to clean, reshape, combine, and prepare data in a way that
 
 ## Tool mapping (processing)
 
-- **`code_pipeline`** — Primary way to execute multi-step cleaning, reshaping, and joins with auditable code; use **`build_codegen_requirement`** first when the pipeline is large or policy-sensitive.
+- **`code_pipeline`** — Primary way to execute multi-step cleaning, reshaping, and joins with auditable code; pass a structured **`task`** (`requirements`, `input`, `output` basenames) for larger pipelines.
 - Combine with the **data-grain-and-integrity** skill when joins or aggregation change row meaning—verify duplicates and counts before and after.

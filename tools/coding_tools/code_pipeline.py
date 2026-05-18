@@ -1,42 +1,16 @@
 """
-``code_pipeline`` tool implementation (generate → Semgrep → judge → save → run).
+``code_pipeline`` tool: codegen → Semgrep → LLM judge → save → run (sandboxed).
 
-Pipeline order
-
-    When ``detail_execution_requirement_first`` is **true**:
-    **Preflight planner** — structured ``CodegenPreflightOutput`` using graph state (profiling,
-    ``LoadReasoningSkills``, messages); result is surfaced as ``codegen_requirement`` in the tool JSON
-    and codegen uses ``detailed_requirement`` as the task brief.
-
-    2. **Codegen** — structured output with ``CODE_GENERATION_SYSTEM_PROMPT``; user message
-       may include task (or planner ``detailed_requirement`` when preflight ran), data profile,
-       and optional ``## Previous code policy violations`` on retry.
-    3. **Semgrep** — static rules in ``code_scan/codegen_scan_semgrep.yaml``.
-    4. **LLM judge** — semantic/policy check (``run_llm_judge``).
-    5. **Save** — ``pipeline_run.py`` at ``agent_filesystem/<session>/pipeline_run.py`` (overwrites).
-    6. **Execute** — same Python interpreter, project root as cwd, via ``code_scan/run_pipeline_sandboxed.py``
-       (runtime I/O patches, 200 MiB RLIMIT_AS, BLAS single-thread env, Linux CPU‑0 affinity); wall-clock timeout in parent.
-       The subprocess receives a **sanitized** copy of the parent environment (LLM and Langfuse secrets removed)
-       so generated scripts cannot read those variables even if static checks were bypassed.
-
-On Semgrep or judge failure, the tool returns the generated source under ``code_generation.code`` so the
-orchestrator can diagnose policy violations; nothing is saved or executed. Callers should pass
-``previous_code_violation`` on the next attempt.
-
-When both gates pass and the script runs, ``code_generation`` contains **only**
-``explanation`` and ``code_safety_evaluation`` — no ``code`` or ``filename`` keys — plus
-top-level ``execution`` and ``plots``. The script is still written to ``pipeline_run.py`` on disk for the sandbox runner.
-
-All session files, including generated ``pipeline_run.py``, live at ``./agent_filesystem/<session-folder>/``.
-
-The LangChain ``@tool`` docstring on ``code_pipeline`` is what the orchestrator model sees; this
-module docstring is for developers maintaining the implementation.
+See module docstring in the LangChain ``@tool`` wrapper for orchestrator-facing behavior.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -45,14 +19,17 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
 from langfuse import observe
-from pydantic import BaseModel, Field
 
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
     get_langfuse_client,
     serialize_message,
 )
-from output_validation.code_generation import CodeGenerationOutput
+from output_validation.code_generation import (
+    CodeGenerationOutput,
+    CodePipelineInput,
+    CodePipelineTask,
+)
 from prompts.code_generation_prompt import CODE_GENERATION_SYSTEM_PROMPT
 from session_paths import (
     ensure_session_dirs,
@@ -64,35 +41,23 @@ from session_paths import (
 )
 from skills.loader import LoadPatternSkills
 
-from .code_pipeline_preflight import run_codegen_preflight
 from .code_scan.llm_judge import run_llm_judge
-from .code_scan.semgrep_scan import format_semgrep_issues, run_semgrep_scan
+from .code_scan.safety_check import SafetyCheckResult
+from .code_scan.semgrep_scan import run_semgrep_scan
 
-# Plot artifacts the per-tool-call run folder may contain. Anything else (csv/xlsx) lands at
-# session root via the ``safe_to_*`` patches, so this set is intentionally tiny.
 PLOT_FILE_EXTENSIONS = frozenset({".png", ".svg"})
 
-# ---------------------------------------------------------------------------
-# Config (loaded once at import)
-# ---------------------------------------------------------------------------
-
-# Repo root (``ForecastingPlatform/``): parents are coding_tools → tools → project.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-# Model names (``models.*`` in config.yaml).
 CODING_MODEL = cfg["models"].get("code_generation", "gpt-4o-mini")
 JUDGE_MODEL = cfg["models"].get("code_judge", cfg["models"].get("code_generation", "gpt-4o-mini"))
-# Execution limits: prefer ``code_pipeline``; fall back to legacy ``run_python_file`` for older configs.
 _pipe = cfg.get("code_pipeline") or cfg.get("run_python_file") or {}
-# Hard stop for the child process (seconds); raises ``TimeoutExpired`` in the parent.
 TIMEOUT = float(_pipe.get("timeout_seconds", 120))
 
-# Subprocess always runs ``run_pipeline_sandboxed.py`` so ``runtime_patch_scan`` wraps I/O before user code.
 SANDBOX_RUNNER = Path(__file__).resolve().parent / "code_scan" / "run_pipeline_sandboxed.py"
 langfuse = get_langfuse_client()
 
-# Strip these from the codegen subprocess env (denylist — not a scan of user source).
 _SANDBOX_ENV_DENY_EXACT: frozenset[str] = frozenset(
     {
         "OPENAI_API_KEY",
@@ -114,7 +79,7 @@ _SANDBOX_ENV_DENY_EXACT: frozenset[str] = frozenset(
 _SANDBOX_ENV_DENY_PREFIX: tuple[str, ...] = ("LANGFUSE_",)
 
 
-def _env_for_sandbox_subprocess() -> dict[str, str]:
+def env_for_sandbox_subprocess() -> dict[str, str]:
     """Parent ``os.environ`` minus credentials the generated script must not see."""
     out = dict(os.environ)
     for key in list(out):
@@ -123,319 +88,226 @@ def _env_for_sandbox_subprocess() -> dict[str, str]:
     return out
 
 
-def _finalize_tool_payload(body: dict[str, Any], codegen_requirement: dict[str, Any] | None) -> str:
-    """Attach optional preflight snapshot; ``codegen_requirement`` is JSON ``null`` when preflight skipped."""
-    return json.dumps({**body, "codegen_requirement": codegen_requirement}, default=str)
+def merge_gate_violations(sem: SafetyCheckResult, judge: SafetyCheckResult) -> dict[str, str]:
+    """Combine Semgrep and judge failures into one ``code_violation`` map (keys ``semgrep`` / ``judge``)."""
+    out: dict[str, str] = {}
+    if not sem.passed and sem.detail:
+        out["semgrep"] = sem.detail
+    if not judge.passed and judge.detail:
+        out["judge"] = judge.detail
+    return out
 
 
-class CodePipelineInput(BaseModel):
-    """
-    Arguments exposed to the orchestrator for ``code_pipeline``.
-
-    Field descriptions are shown in the tool schema LangChain binds to the model; keep them aligned
-    with ``graph_prompts`` (paths, retries) and with ``CODE_GENERATION_SYSTEM_PROMPT``.
-    """
-
-    task: str = Field(
-        description=(
-            "Required. Natural-language analysis spec. Name every dataset by **filename** only (.csv / .xlsx), "
-            "e.g. `Input: sales.csv` or `Input1: a.csv | Input 2: b.xlsx`. "
-            "If saving, give the **output filename** (e.g. `Output: forecast.csv`). "
-            "If only printing stats, omit output. No full workspace paths, no `./`. "
-            "Examples: "
-            "'Input: sales.csv | Output: forecast.csv | Fit a regression and save predictions.' "
-            "'Input: sales.csv | Print summary statistics.' "
-            "'Input 1: orders.csv | Input 2: returns.csv | Output: merged.csv | Merge on date.'"
-        ),
-    )
-    data_profile: str = Field(
-        default="",
-        description=(
-            "Optional. Structured description of each input file the script will read: column names, dtypes, "
-            "date formats, nullability, and sample rows if helpful. "
-            "Derive this from the **Session workspace** ``data_profile`` list in context (and prior tool results); "
-            "or run a small exploratory **code_pipeline** step first and summarize findings here. "
-            "Use an empty string only when the profile is unknown."
-        ),
-    )
-    previous_code_violation: str = Field(
-        default="",
-        description=(
-            "Optional. When this is a **retry** after Semgrep or the LLM judge rejected an earlier attempt, "
-            "paste the prior **coding policy / safety** failure (e.g. forbidden import, bad path, judge detail). "
-            "Empty on the first attempt. Helps the model fix the issue without repeating the violation."
-        ),
-    )
-    detail_execution_requirement_first: bool = Field(
-        default=False,
-        description=(
-            "When **true**, run an internal planner that expands **task** into a structured execution brief using "
-            "workspace profiling and chat state (**codegen_requirement** in the tool result), then codegen follows that brief. "
-            "Use for larger or multi-step work. Prefer **false** on Semgrep/judge/runtime retries when you fold the tightened "
-            "spec back into **task** / **data_profile** unless the job shape materially changed."
-        ),
-    )
+def execution_needs_code_attachment(execution: dict[str, Any]) -> bool:
+    """True when the tool should echo generated ``code`` so the model can fix timeout/errors/nonzero exit."""
+    if execution.get("returncode") == 124:
+        return True
+    if execution.get("error"):
+        return True
+    if (execution.get("stderr") or "").strip():
+        return True
+    if execution.get("returncode", 0) not in (0, None):
+        return True
+    return False
 
 
 @observe(name="tool.code_pipeline", as_type="tool")
-def _code_pipeline_impl(
-    task: str,
+def code_pipeline_impl(
+    task: CodePipelineTask,
+    data_profile: str,
+    active_skills: list[str],
+    previous_code_violation: str,
+    session_id: str,
     tool_call_id: str,
     runtime: ToolRuntime,
-    detail_execution_requirement_first: bool = False,
-    data_profile: str = "",
-    previous_code_violation: str = "",
-    session_id: str = "default",
-    active_skills: list[str] = [],
 ) -> str:
-    """Generate, validate, save, and run Python for a tabular-data task in one tool call.
-
-    Use when the user needs **new** Python code written and executed against files under
-    ``agent_filesystem/`` (transformations, models, reports). The tool runs a dedicated
-    codegen model, applies a **Semgrep** scan and an **LLM judge** before saving, writes the script to
-    ``agent_filesystem/<session>/pipeline_run.py`` (overwritten each time), then executes it in a
-    subprocess with a wall-clock timeout and resource-related environment limits.
-
-    Do not use for: answering from already-loaded data alone (use read tools), or when the
-    user only needs a file listing.
-
-    Args:
-        task: Natural-language job naming inputs/outputs by **filename** (see tool schema); codegen expands to full paths in code.
-        data_profile: Optional per-file structure and samples; empty if unknown.
-        previous_code_violation: Optional text describing a **prior** Semgrep/judge failure on a previous codegen attempt;
-            included in the model prompt so the retry respects policy. Empty on first attempt.
-
-    Returns:
-        A **JSON string** (parse it) with keys ``code_generation``, ``execution``, and on success ``plots``.
-
-        **code_generation** — Always present.
-        - If the model returns no code: ``code`` is ``""``; ``explanation`` may be partial; ``execution`` is null.
-        - If **Semgrep** or the **LLM judge** fails: ``code`` contains the **generated source** (string) so you can
-          review it against ``code_safety_evaluation.detail``; ``execution`` is null; nothing is saved to disk.
-        - If codegen, Semgrep, and the judge all pass: ``code_generation`` has **only** ``explanation`` and ``code_safety_evaluation``
-          (``passed: true``); no ``code`` or ``filename``. The source is written to ``pipeline_run.py`` and executed.
-
-        **execution** — null when the script was not run (failures above). Otherwise an object
-        with ``stdout``, ``stderr``, and ``returncode`` from the subprocess. If the run hits
-        the configured timeout, ``returncode`` is 124 and ``error`` describes the timeout.
-
-        **plots** — List of logical paths under ``agent_filesystem/.../run_<id>/`` for plot files produced in this invocation (empty list if none). Present whenever the pipeline reaches execution (successful safety gates).
-
-        **codegen_requirement** — When ``detail_execution_requirement_first`` was ``true``: object ``{ detailed_requirement, dataset_paths, assumptions }``. Otherwise JSON ``null``.
-
-        After any safety failure, the **next** call should pass **previous_code_violation** with the
-        prior attempt’s ``code_safety_evaluation.detail`` (Semgrep/judge text). You may still refine
-        **task** if needed; do not retry with an empty **previous_code_violation** as if nothing failed.
     """
-    codegen_requirement_snap: dict[str, Any] | None = None
-    effective_task = task.strip()
-    if detail_execution_requirement_first:
-        preflight_out = run_codegen_preflight(orchestrator_task=task.strip(), runtime=runtime)
-        codegen_requirement_snap = preflight_out.model_dump()
-        effective_task = preflight_out.detailed_requirement.strip()
+    Run codegen, Semgrep, LLM judge, then save ``pipeline_run.py`` and execute in the sandbox.
 
-    langfuse.update_current_span(
-        metadata={
-            "detail_execution_requirement_first": str(detail_execution_requirement_first).lower(),
-            "has_codegen_requirement_snap": codegen_requirement_snap is not None,
-        },
-    )
+    Returns a JSON string: task fields (``requirements`` / ``input`` / ``output``) plus
+    ``code`` (only when gates fail or execution needs a retry), ``stdout`` / ``stderr``,
+    ``code_violation``, and ``plots``.
+    """
+    del runtime  # Signature matches LangChain ``ToolRuntime``; reserved for future hooks.
 
-    # ------------------------------------------------------------------
-    # Step 1 — Codegen (structured object: filename, explanation, code)
-    # ------------------------------------------------------------------
+    # --- Codegen: static system prompt; Human carries task JSON, optional retry text, profile, patterns ---
     llm = make_llm(
         model=CODING_MODEL,
         temperature=0,
         output_schema=CodeGenerationOutput,
     )
     pattern_guidance = LoadPatternSkills(active_skills)
-    # Keep implementation guidance in the user payload so codegen sees one fully-assembled spec.
-    user_payload = (
-        "## Task\n"
-        f"{effective_task}\n\n"
-        "## Data Profile\n"
-        f"{data_profile.strip() or '(none)'}\n\n"
-        "## Vetted Code Patterns\n"
-        f"{pattern_guidance.strip() if pattern_guidance else '(none)'}"
-    )
-
+    violation = previous_code_violation.strip()
+    data_block = data_profile.strip() or "(none)"
+    patterns_block = pattern_guidance.strip() if pattern_guidance else "(none)"
+    blocks = [f"## Task (structured)\n{json.dumps(task.model_dump(), ensure_ascii=False, indent=2)}"]
+    if violation:
+        blocks.append(f"## Previous code policy violations\n{violation}")
+    blocks.append(f"## Data Profile\n{data_block}")
+    blocks.append(f"## Vetted Code Patterns\n{patterns_block}")
+    user_payload = "\n\n".join(blocks)
     prompt_messages = [
         SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
         HumanMessage(content=user_payload),
     ]
+
     with langfuse.start_as_current_observation(name="code_pipeline.codegen", as_type="generation", model=CODING_MODEL, input=[serialize_message(message) for message in prompt_messages]) as generation:
         try:
             resp = llm.invoke(prompt_messages)
         except Exception as e:
-            generation.update(output={"error": str(e)}, metadata={"has_data_profile": bool(data_profile.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
-            result = _finalize_tool_payload(
-                {
-                    "code_generation": {
-                        "code": "",
-                        "explanation": "",
-                        "code_safety_evaluation": {
-                            "passed": False,
-                            "detail": f"Code generation failed to produce valid structured output: {e}",
-                        },
-                    },
-                    "execution": None,
+            generation.update(
+                output={"error": str(e)},
+                metadata={
+                    "has_data_profile": bool(data_profile.strip()),
+                    "has_previous_code_violation": bool(previous_code_violation.strip()),
                 },
-                codegen_requirement_snap,
             )
             langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
-            return result
-        generation.update(output=resp.model_dump(), metadata={"has_data_profile": bool(data_profile.strip()), "has_previous_code_violation": bool(previous_code_violation.strip())})
+            return json.dumps(
+                {
+                    **task.model_dump(),
+                    "code": "",
+                    "stdout": None,
+                    "stderr": None,
+                    "code_violation": {"codegen": f"Code generation failed to produce valid structured output: {e}"},
+                    "plots": [],
+                },
+                default=str,
+            )
+        generation.update(
+            output=resp.model_dump(),
+            metadata={
+                "has_data_profile": bool(data_profile.strip()),
+                "has_previous_code_violation": bool(previous_code_violation.strip()),
+            },
+        )
 
     code = resp.code.strip()
-    explanation = resp.explanation.strip()
 
-    # ------------------------------------------------------------------
-    # Step 2a — Empty codegen: skip expensive checks and disk I/O
-    # ------------------------------------------------------------------
     if not code:
-        result = _finalize_tool_payload(
-            {
-                "code_generation": {
-                    "code": "",
-                    "explanation": explanation,
-                    "code_safety_evaluation": {"passed": False, "detail": "No code returned from model."},
-                },
-                "execution": None,
-            },
-            codegen_requirement_snap,
-        )
         langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "no_code"})
-        return result
-
-    # ------------------------------------------------------------------
-    # Step 2b — Semgrep (static patterns; see codegen_scan_semgrep.yaml)
-    # ------------------------------------------------------------------
-    with langfuse.start_as_current_observation(name="code_pipeline.semgrep", as_type="span", input={"code": code}) as semgrep_span:
-        semgrep_report = run_semgrep_scan(code)
-        semgrep_span.update(output=semgrep_report, metadata={"passed": semgrep_report["passed"], "violation_count": len(semgrep_report["violations"])})
-    if not semgrep_report["passed"]:
-        # Return the blocked source so the caller can inspect it and retry with `previous_code_violation`.
-        result = _finalize_tool_payload(
+        return json.dumps(
             {
-                "code_generation": {
-                    "code": code,
-                    "explanation": explanation,
-                    "code_safety_evaluation": {
-                        "passed": False,
-                        "detail": format_semgrep_issues(semgrep_report["violations"]),
-                    },
-                },
-                "execution": None,
+                **task.model_dump(),
+                "code": "",
+                "stdout": None,
+                "stderr": None,
+                "code_violation": {"codegen": "No code returned from model."},
+                "plots": [],
             },
-            codegen_requirement_snap,
+            default=str,
         )
-        langfuse.update_current_span(metadata={"final_stage": "semgrep", "status": "blocked"})
-        return result
 
-    # ------------------------------------------------------------------
-    # Step 2c — LLM judge (task alignment, policy gaps Semgrep can miss)
-    # ------------------------------------------------------------------
-    judge_ok, judge_detail = run_llm_judge(
-        code=code,
-        task=effective_task,
-        model_name=JUDGE_MODEL,
+    # --- Static scan + LLM judge (both run when code is non-empty); on failure return code + violations ---
+    with langfuse.start_as_current_observation(name="code_pipeline.semgrep", as_type="span", input={"code_len": len(code)}) as semgrep_span:
+        sem = run_semgrep_scan(code)
+        semgrep_span.update(
+            output={"passed": sem.passed, "detail": sem.detail[:2000] if sem.detail else ""},
+            metadata={
+                "passed": sem.passed,
+                "violation_count": len(sem.violations or []),
+            },
+        )
+
+    judge = run_llm_judge(code=code, task=task, model_name=JUDGE_MODEL)
+
+    langfuse.update_current_span(
+        metadata={
+            "semgrep_passed": str(sem.passed).lower(),
+            "judge_passed": str(judge.passed).lower(),
+        }
     )
-    if not judge_ok:
-        # Mirror the Semgrep failure shape so the orchestrator can handle both safety gates the same way.
-        result = _finalize_tool_payload(
-            {
-                "code_generation": {
-                    "code": code,
-                    "explanation": explanation,
-                    "code_safety_evaluation": {"passed": False, "detail": judge_detail},
-                },
-                "execution": None,
-            },
-            codegen_requirement_snap,
-        )
-        langfuse.update_current_span(metadata={"final_stage": "llm_judge", "status": "blocked"})
-        return result
 
-    # ------------------------------------------------------------------
-    # Step 3 — Persist only after both gates pass (fixed name for the runner)
-    # ------------------------------------------------------------------
+    if not sem.passed or not judge.passed:
+        viol = merge_gate_violations(sem, judge)
+        return json.dumps(
+            {
+                **task.model_dump(),
+                "code": code,
+                "stdout": None,
+                "stderr": None,
+                "code_violation": viol,
+                "plots": [],
+            },
+            default=str,
+        )
+
+    # --- Persist script and run sandbox child; optional IO allowlist as 4th CLI arg JSON ---
     ensure_session_dirs(session_id)
     run_logical = logical_pipeline_run_path(session_id)
     out_path = resolve_agent_path(session_id, run_logical)
     session_workspace = session_root(session_id)
+
     with langfuse.start_as_current_observation(name="code_pipeline.save_script", as_type="span", input={"logical_path": run_logical}) as save_span:
         out_path.write_text(code, encoding="utf-8")
-        save_span.update(output={"path": str(out_path)}, metadata={"bytes_written": len(code.encode("utf-8"))})
-    gen = {
-        "explanation": explanation,
-        "code_safety_evaluation": {"passed": True},
-    }
+        save_span.update(
+            output={"path": str(out_path)},
+            metadata={"bytes_written": len(code.encode("utf-8"))},
+        )
 
-    # ------------------------------------------------------------------
-    # Step 4 — Allocate per-tool-call plot folder
-    #
-    # Each ``code_pipeline`` invocation gets its own ``run_<run_id>/`` subfolder under the
-    # session workspace. ``plt.savefig`` writes are routed there by the runtime patch, so
-    # the API can find the plots produced by this specific tool call by looking up the
-    # tool call id and listing the matching run folder. Tabular outputs (csv/xlsx) still
-    # land at session root and remain reusable across questions.
-    #
-    # ``run_id`` is the LangChain ``tool_call_id`` (sanitized for filesystem use).
-    # ``sarima_tool`` and ``prophet_tool`` do **not** write plot files — only this tool
-    # does — so aligning folder names with each tool-call id keeps per-turn plots
-    # discoverable alongside other tools' ``ToolMessage`` ids without guessing paths.
-    # ------------------------------------------------------------------
     run_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(tool_call_id or "")).strip("_") or "unknown_run"
     run_workspace = session_workspace / f"run_{run_id}"
-    # ``apply_patches`` will mkdir again inside the subprocess; we create here too so the
-    # parent can scan the folder after execution even if the script wrote nothing.
     run_workspace.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Step 5 — Run script: subprocess, no shell, project root as cwd
-    # (memory / BLAS / CPU affinity: see ``run_pipeline_sandboxed.py``).
-    # The third argv carries the per-tool-call plot folder across the process boundary;
-    # RunnableConfig does not propagate to subprocesses, so we pass it explicitly.
-    # ------------------------------------------------------------------
-    cmd = [
+    io_allowlist_path: str | None = None
+    if task.input or task.output:
+        # Ephemeral JSON passed to run_pipeline_sandboxed so reads/writes stay on declared basenames.
+        tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        json.dump({"input": list(task.input), "output": list(task.output)}, tf, ensure_ascii=False)
+        tf.close()
+        io_allowlist_path = tf.name
+
+    cmd: list[str] = [
         sys.executable,
         str(SANDBOX_RUNNER),
         str(out_path),
         str(session_workspace),
         str(run_workspace),
     ]
-    with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT, "session_id": session_id, "run_id": run_id}) as execution_span:
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(PROJECT_ROOT),
-                env=_env_for_sandbox_subprocess(),
-                capture_output=True,
-                text=True,
-                timeout=TIMEOUT,
-                check=False,
-            )
-            # Non-zero returncode is still a successful tool result (caller inspects stderr/stdout).
-            execution = {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "returncode": proc.returncode}
-        except subprocess.TimeoutExpired as e:
-            # SIGKILL path: returncode 124 convention; surface partial streams if the OS attached them.
-            err = f"Execution exceeded timeout ({TIMEOUT}s). Process was terminated."
-            out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-            err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
-            combined = (err_out + "\n" + err).strip() if err_out else err
-            execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
-        execution_span.update(output=execution, metadata={"returncode": execution["returncode"], "timed_out": execution["returncode"] == 124, "stdout_length": len(execution.get("stdout", "")), "stderr_length": len(execution.get("stderr", ""))})
+    if io_allowlist_path:
+        cmd.append(io_allowlist_path)
 
-    # ------------------------------------------------------------------
-    # Step 6 — Collect plot artifacts
-    #
-    # Scan the per-tool-call run folder for plot files. Returned as logical
-    # ``agent_filesystem/<session>/run_<run_id>/<file>`` paths so the UI can fetch them
-    # via the ``GET /artifact`` endpoint. By listing only the run folder we get perfect
-    # per-message isolation: previous questions live under different ``run_<id>/`` and
-    # never leak into the current tool result.
-    # ------------------------------------------------------------------
+    execution: dict[str, Any] = {"stdout": "", "stderr": "", "returncode": -1}
+    try:
+        with langfuse.start_as_current_observation(name="code_pipeline.execute_subprocess", as_type="span", input={"command": cmd, "cwd": str(PROJECT_ROOT), "timeout_seconds": TIMEOUT, "session_id": session_id, "run_id": run_id}) as execution_span:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(PROJECT_ROOT),
+                    env=env_for_sandbox_subprocess(),
+                    capture_output=True,
+                    text=True,
+                    timeout=TIMEOUT,
+                    check=False,
+                )
+                execution = {
+                    "stdout": proc.stdout or "",
+                    "stderr": proc.stderr or "",
+                    "returncode": proc.returncode,
+                }
+            except subprocess.TimeoutExpired as e:
+                err = f"Execution exceeded timeout ({TIMEOUT}s). Process was terminated."
+                out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
+                err_out = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
+                combined = (err_out + "\n" + err).strip() if err_out else err
+                execution = {"error": err, "stdout": out, "stderr": combined, "returncode": 124}
+            execution_span.update(
+                output=execution,
+                metadata={
+                    "returncode": execution["returncode"],
+                    "timed_out": execution["returncode"] == 124,
+                    "stdout_length": len(execution.get("stdout", "") or ""),
+                    "stderr_length": len(execution.get("stderr", "") or ""),
+                },
+            )
+    finally:
+        if io_allowlist_path:
+            try:
+                Path(io_allowlist_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Collect plot paths written under this run_* folder (PNG/SVG only).
     plots: list[str] = []
     if run_workspace.exists():
         sid = session_dir_for_paths(session_id)
@@ -443,32 +315,53 @@ def _code_pipeline_impl(
             if f.is_file() and f.suffix.lower() in PLOT_FILE_EXTENSIONS:
                 plots.append(f"agent_filesystem/{sid}/run_{run_id}/{f.name}")
 
-    result = _finalize_tool_payload({"code_generation": gen, "execution": execution, "plots": plots}, codegen_requirement_snap)
-    langfuse.update_current_span(output={"code_generation_passed": True, "execution": execution, "plot_count": len(plots)}, metadata={"final_stage": "execute_subprocess", "status": "completed", "run_id": run_id})
-    return result
+    # Success path: omit ``code`` unless execution failed badly enough that the model should patch it.
+    out_body: dict[str, Any] = {
+        **task.model_dump(),
+        "stdout": execution.get("stdout") or "",
+        "stderr": execution.get("stderr") or "",
+        "code_violation": None,
+        "plots": plots,
+    }
+
+    if execution_needs_code_attachment(execution):
+        out_body["code"] = code
+        rc = execution.get("returncode")
+        err_msg = execution.get("error")
+        parts: dict[str, str] = {}
+        if (execution.get("stderr") or "").strip():
+            parts["stderr"] = (execution.get("stderr") or "").strip()
+        if err_msg:
+            parts["timeout"] = str(err_msg)
+        if rc not in (None, 0) and rc != 124 and not parts.get("stderr"):
+            parts["returncode"] = f"non-zero exit: {rc}"
+        out_body["code_violation"] = parts if parts else {"runtime": "Execution completed with issues; see stderr."}
+
+    langfuse.update_current_span(
+        output={"execution": execution, "plot_count": len(plots)},
+        metadata={"final_stage": "execute_subprocess", "status": "completed", "run_id": run_id},
+    )
+    return json.dumps(out_body, default=str)
 
 
 @tool(args_schema=CodePipelineInput)
 def code_pipeline(
     runtime: ToolRuntime,
-    task: str,
+    task: CodePipelineTask,
     data_profile: str = "",
     previous_code_violation: str = "",
-    detail_execution_requirement_first: bool = False,
 ) -> str:
-    """Run codegen, Semgrep, judge, save `pipeline_run.py`, execute sandbox. Optional internal preflight emits `codegen_requirement`; JSON carries it when enabled."""
-    # ``ToolRuntime`` first (required, no default) so it injects from LangGraph; defaults follow for Python syntax.
+    """Generate Python with Semgrep + LLM judge, save ``pipeline_run.py``, run in sandbox. Returns JSON string."""
     session_id = session_id_from_config(runtime.config)
     active_skills = (runtime.state or {}).get("active_skills", [])
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""
 
-    return _code_pipeline_impl(
+    return code_pipeline_impl(
         task=task,
-        tool_call_id=tool_call_id,
-        runtime=runtime,
-        detail_execution_requirement_first=detail_execution_requirement_first,
         data_profile=data_profile,
+        active_skills=active_skills,
         previous_code_violation=previous_code_violation,
         session_id=session_id,
-        active_skills=active_skills,
+        tool_call_id=tool_call_id,
+        runtime=runtime,
     )

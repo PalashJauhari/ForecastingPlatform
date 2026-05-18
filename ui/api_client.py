@@ -92,7 +92,6 @@ def _normalize_agent_json(data: dict[str, Any]) -> dict[str, Any]:
     data.setdefault("question", None)
     data.setdefault("summary", None)
     data.setdefault("last_tool_result", None)
-    data.setdefault("codegen_requirement", None)
     return data
 
 
@@ -182,7 +181,7 @@ class GaussianBlurrApiClient:
         Run one orchestrator turn (``POST /run``).
 
         Returns a dict that always includes ``interrupted``, ``question``, ``summary``,
-        ``last_tool_result``, ``codegen_requirement`` (dict or ``None`` when absent), and on failure ``error`` (str) instead of a successful payload.
+        ``last_tool_result``, and on failure ``error`` (str) instead of a successful payload.
         """
         url = f"{self._base}/run"
         try:

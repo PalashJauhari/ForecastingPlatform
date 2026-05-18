@@ -32,4 +32,4 @@ This skill guides how to design predictive inputs that are useful, realistic, an
 ## Tool mapping (features)
 
 - Implement feature builds in **`code_pipeline`** with explicit train vs scoring period logic; document lags and rolling windows in `task`.
-- **`build_codegen_requirement`** helps lock leakage constraints before codegen when the feature set is non-trivial.
+- Frame features with explicit input/output basenames in **`code_pipeline`** **`task`** objects so leakage and join keys are pinned before codegen.

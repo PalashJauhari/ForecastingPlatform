@@ -304,9 +304,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
 
       var summary = donePayload.summary || "Done.";
       var images = donePayload.images || [];
-      var cr = donePayload.codegen_requirement;
       var amsg = { role: "assistant", content: summary, output_images: images };
-      if (cr && typeof cr === "object") amsg.codegen_requirement = cr;
       chat.messages.push(amsg);
       return [chat, ""];
     } catch (e) {
