@@ -1,5 +1,5 @@
 """
-GaussianBlurr — Plotly Dash web UI.
+Agentic Forecasting Platform — Plotly Dash web UI.
 
 Layout and rendering live here. Chat turns ``POST`` to FastAPI SSE endpoints ``/run/stream`` and
 ``/resume/stream`` from the browser (see ``assets/gb_stream_ui.js``); uploads still use :class:`~ui.api_client.GaussianBlurrApiClient`.
@@ -110,7 +110,7 @@ def _favicon_logo_img(size: int = 30) -> html.Img:
     px = f"{size}px"
     return html.Img(
         src=f"/assets/{_LOGO_FILENAME}",
-        alt="GaussianBlurr",
+        alt="Agentic Forecasting Platform",
         width=size,
         height=size,
         style={
@@ -404,7 +404,7 @@ app = Dash(
     suppress_callback_exceptions=True,
     assets_folder=str(Path(__file__).resolve().parent / "assets"),
 )
-app.title = "GaussianBlurr"
+app.title = "Agentic Forecasting Platform"
 _tab_icon = app.get_asset_url(_LOGO_FILENAME)
 _favicon_link = f'<link rel="icon" type="image/png" href="{_tab_icon}" sizes="any" />'
 if "{%favicon%}" in app.index_string:

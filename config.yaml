@@ -1,4 +1,4 @@
-# GaussianBlurr — models, middleware tuning, and workspace paths
+# Agentic Forecasting Platform — models, middleware tuning, and workspace paths
 
 models:
   orchestrator: "gpt-5.4-mini"

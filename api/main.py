@@ -72,9 +72,9 @@ _SSE_HEADERS = {
 }
 
 app = FastAPI(
-    title="GaussianBlurr — Forecasting Platform",
+    title="Agentic Forecasting Platform",
     description=(
-        "HTTP API for the GaussianBlurr forecasting agent. Send natural-language tasks; the agent "
+        "HTTP API for an agentic forecasting workspace. Send natural-language tasks; the agent "
         "reads workspace data, may pause for **Planner** clarification (interrupt / resume), and can generate "
         "and run analysis code under guardrails. Upload CSV or Excel into the session input area first when needed."
     ),
