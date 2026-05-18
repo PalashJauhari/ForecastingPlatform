@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterator, List, Literal
 
@@ -33,7 +34,6 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
-from pydantic import BaseModel, Field
 from psycopg import Connection
 from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
@@ -84,7 +84,6 @@ GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
 
 _m = cfg["models"]
 PLANNER_MODEL = _m.get("planner") or _m["orchestrator"]
-TODO_GATE_MODEL = _m.get("todo_completion_gate") or _m["orchestrator"]
 
 
 class TodoEntry(TypedDict):
@@ -107,7 +106,7 @@ class AgentState(TypedDict):
     Keys
         messages             — full conversation (HumanMessage, AIMessage, ToolMessage).
                                Uses ``add_messages`` reducer: append, deduplicate by id,
-                               honour ``RemoveMessage`` for truncation.
+                               honour ``RemoveMessage`` for truncation. ``/run`` user text uses HumanMessage ids ``user_input-{uuid}``.
         message_summary      — running summary of evicted messages, grows across
                                summarisation cycles (node ``SummariseConversationalSummary``).
         data_profile         — list of per-file profiling dicts from
@@ -128,17 +127,6 @@ class AgentState(TypedDict):
     active_planner_skills: List[str]
 
 
-class TodoGateMessage(BaseModel):
-    """Structured nudge when the todo list is not fully complete."""
-
-    content: str = Field(
-        description=(
-            "Full markdown HumanMessage body: incomplete todos, urgency to finish via tools "
-            "and update_todo until completed."
-        )
-    )
-
-
 # ---------------------------------------------------------------------------
 # Tools and LLM (module-level, built once)
 # ---------------------------------------------------------------------------
@@ -156,11 +144,6 @@ planner_llm = make_llm(
     model=PLANNER_MODEL,
     temperature=0,
     output_schema=PlannerStructuredResponse,
-)
-todo_gate_llm = make_llm(
-    model=TODO_GATE_MODEL,
-    temperature=0,
-    output_schema=TodoGateMessage,
 )
 langfuse = get_langfuse_client()
 
@@ -409,24 +392,22 @@ def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _fallback_todo_gate_message(incomplete: List[dict[str, Any]]) -> str:
-    lines: List[str] = []
+def _pending_todos_message(incomplete: List[dict[str, Any]]) -> str:
+    """Deterministic workflow text: one line per item not yet completed."""
+    lines: List[str] = [
+        "## Workflow instruction",
+        "",
+    ]
     for t in incomplete:
         tid = t.get("id", "?")
         content = t.get("content", "")
-        lines.append(f"- `{tid}`: {content} (status: {t.get('status', '')})")
-    body = "\n".join(lines)
-    return (
-        "## Workflow instruction\n"
-        "The session todo list is **not** fully completed. Continue with tools and **`update_todo`** "
-        "until every item is **`completed`**, unless the user goal truly cannot proceed.\n\n"
-        "**Incomplete todos:**\n"
-        f"{body}"
-    )
+        st = t.get("status", "")
+        lines.append(f"Pending todo: `{tid}` — {content} (status: {st})")
+    return "\n".join(lines)
 
 
 def todo_completion_gate(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """If todos remain incomplete, inject a workflow AIMessage via ``models.todo_completion_gate`` (fallback on error).
+    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items only.
 
     Uses ``AIMessage`` so the user's last ``HumanMessage`` stays the turn boundary for API
     helpers (e.g. plot discovery in ``api.main._collect_current_turn_tool_call_ids``).
@@ -439,55 +420,13 @@ def todo_completion_gate(state: AgentState, config: RunnableConfig) -> Dict[str,
             obs.update(metadata={"action": "pass"})
         return {}
 
-    fb = _fallback_todo_gate_message(incomplete)
-    payload = json.dumps(incomplete, indent=2, ensure_ascii=False, default=str)
-    gate_system = SystemMessage(
-        content=(
-            "You write exactly one concise workflow reminder as markdown for an autonomous forecasting agent.\n"
-            "- The todos JSON lists current items; only items whose status is not \"completed\" need finishing.\n"
-            "- Say clearly what remains and that it must continue with tools and **`update_todo`** until every item "
-            "is **completed**, unless impossible.\n"
-            "- Do not invent todos; only refer to ids and contents given.\n"
-            "- Prefer a short intro plus bullets for incomplete items (id + status)."
+    content = _pending_todos_message(incomplete)
+    with observation_parented_to_run(langfuse, config, name="graph.TodoCompletionGate", as_type="span") as obs:
+        obs.update(
+            output=content[:4000],
+            metadata={"action": "block", "incomplete_todos": len(incomplete)},
         )
-    )
-    gate_human = HumanMessage(content=f"## Current todos (JSON)\n```json\n{payload}\n```")
-
-    gate_content = fb
-    with observation_parented_to_run(
-        langfuse,
-        config,
-        name="graph.TodoCompletionGate",
-        as_type="chain",
-    ):
-        gate_messages = [gate_system, gate_human]
-        try:
-            with observation_parented_to_run(
-                langfuse,
-                config,
-                name="graph.TodoCompletionGate.llm",
-                as_type="generation",
-                model=TODO_GATE_MODEL,
-                input=serialize_messages(gate_messages),
-            ) as generation:
-                step_raw = todo_gate_llm.invoke(gate_messages, config=config)
-                if isinstance(step_raw, TodoGateMessage):
-                    candidate = step_raw.content.strip()
-                elif isinstance(step_raw, dict):
-                    candidate = str(step_raw.get("content", "")).strip()
-                else:
-                    candidate = str(getattr(step_raw, "content", "") or "").strip()
-                if candidate:
-                    gate_content = candidate
-                generation.update(
-                    output=gate_content[:4000],
-                    metadata={"incomplete_todos": len(incomplete), "used_fallback": str(gate_content == fb)},
-                )
-        except Exception:
-            gate_content = fb
-        langfuse.update_current_span(metadata={"action": "block", "incomplete_todos": len(incomplete)})
-
-    return {"messages": [AIMessage(content=gate_content)]}
+    return {"messages": [AIMessage(content=content)]}
 
 
 def route_after_todo_gate(state: AgentState) -> str:
@@ -518,7 +457,7 @@ class AnalysisGraph:
     Wrapper around the compiled LangGraph ``StateGraph``.
 
     Notes
-        * **Models** — ``models.orchestrator`` (tool agent), ``models.planner`` (structured plan / clarification), ``models.todo_completion_gate`` (incomplete-todo nudge); ``code_generation`` / ``code_judge`` from ``config.yaml`` apply inside ``code_pipeline``.
+        * **Models** — ``models.orchestrator`` (tool agent), ``models.planner`` (structured plan / clarification); ``code_generation`` / ``code_judge`` from ``config.yaml`` apply inside ``code_pipeline``. Incomplete todos inject a deterministic workflow message (no extra model).
         * **Tools** — ``code_pipeline``, ``sarima_tool``, ``prophet_tool``, ``update_todo``.
         * **Prep** — serial **ProfileSavedData** → **SummariseConversationalSummary** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**. After **RunTools**: **ProfileSavedData_PostTools** → **Orchestrator** (skills unchanged from prep).
         * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
@@ -626,7 +565,7 @@ class AnalysisGraph:
         pins = langfuse_pin if langfuse_pin is not None else self._langfuse_invoke_metadata_pins()
         config = self._thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(
-            {"messages": [HumanMessage(content=user_query)]},
+            {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]},
             config=config,
             stream_mode="updates",
         )
@@ -651,7 +590,7 @@ class AnalysisGraph:
     ) -> Dict[str, Any]:
         pins = self._langfuse_invoke_metadata_pins()
         config = self._thread_config(session_id, langfuse_pin=pins)
-        result = self.graph.invoke({"messages": [HumanMessage(content=user_query)]}, config=config)
+        result = self.graph.invoke({"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]}, config=config)
         langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
 

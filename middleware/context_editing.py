@@ -48,17 +48,22 @@ def estimate_tokens(messages: list) -> int:
 
 
 def find_human_truncation_cut(messages: list, keep: int) -> int | None:
-    """
-    Index into *messages* at which truncation begins, aligned to HumanMessage boundaries only.
-
-    Walks forward from the naive ``len - keep`` index until ``HumanMessage`` is found.
-    Returns ``None`` if no Human boundary exists ahead of that index (truncation deferred).
-    """
+    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut."""
     candidate = max(0, len(messages) - keep)
-    while candidate < len(messages):
-        if isinstance(messages[candidate], HumanMessage):
-            return candidate
-        candidate += 1
+    idx = candidate
+    while idx < len(messages):
+        m = messages[idx]
+        if isinstance(m, HumanMessage):
+            mid = getattr(m, "id", None)
+            s = "" if mid is None else str(mid)
+            if s == "user_input" or s.startswith("user_input-"):
+                return idx
+        idx += 1
+    idx = candidate
+    while idx < len(messages):
+        if isinstance(messages[idx], HumanMessage):
+            return idx
+        idx += 1
     return None
 
 

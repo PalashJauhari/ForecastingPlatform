@@ -3,7 +3,6 @@
 models:
   orchestrator: "gpt-5.4-mini"
   planner: "gpt-5.4-mini"
-  todo_completion_gate: "gpt-5.4-mini"
   identify_planner_skills: "gpt-5.4-mini"
   identify_orchestrator_skills: "gpt-5.4-mini"
   code_generation: "gpt-5.4-mini"
@@ -27,7 +26,7 @@ skills:
   max_planner_selected: 3
 
 # Optional OpenAI throttling on every ``ChatOpenAI`` (``langchain_core.rate_limiters.InMemoryRateLimiter``).
-# Set ``enabled: false`` to turn off. Shared across planner, orchestrator, todo gate, codegen, judge, summarisation, etc.
+# Set ``enabled: false`` to turn off. Shared across planner, orchestrator, codegen, judge, summarisation, etc.
 llm_rate_limit:
   enabled: true
   requests_per_second: 1.0
