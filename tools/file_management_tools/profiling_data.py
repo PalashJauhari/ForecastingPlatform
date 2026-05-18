@@ -4,7 +4,8 @@ Session tabular profiling for the flat per-session workspace.
 Used by the ``data_profile`` graph node in ``graph/graph.py``. Profiling reads every
 top-level ``.csv`` / ``.xlsx`` file in ``agent_filesystem/<session>/`` and
 returns a list of per-file summaries stored only in graph state
-(``data_profile``).
+(``data_profile``). Numeric columns include a ``stats`` field (``describe()``)
+inside each matching ``column_profiles`` entry.
 """
 
 from __future__ import annotations
@@ -12,10 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-from langfuse import observe
-
-from session_paths import ensure_session_dirs, session_root
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 _HEAD_ROWS = 5
@@ -61,7 +58,7 @@ def _head_records(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _numeric_summary(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """Return ``describe()`` output for numeric columns only."""
+    """Return ``describe()`` rows keyed by column name (numeric columns only). Used inside ``_column_profiles``."""
     numeric_df = df.select_dtypes(include="number")
     if numeric_df.empty:
         return {}
@@ -77,12 +74,14 @@ def _numeric_summary(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
 
 
 def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
-    """Build per-column stats, including low-cardinality value lists."""
+    """Build per-column stats, including low-cardinality value lists and ``describe()`` for numeric columns."""
     row_count = int(len(df))
+    numeric_by_name = _numeric_summary(df)
     profiles: list[dict[str, Any]] = []
 
     for column in df.columns:
         series = df[column]
+        key = str(column)
         non_null = series.dropna()
         null_count = int(series.isna().sum())
         non_null_count = int(series.notna().sum())
@@ -90,7 +89,7 @@ def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
         is_low_cardinality = unique_count <= _LOW_CARDINALITY_MAX_UNIQUE
 
         profile: dict[str, Any] = {
-            "name": str(column),
+            "name": key,
             "dtype": str(series.dtype),
             "non_null_count": non_null_count,
             "null_count": null_count,
@@ -98,6 +97,8 @@ def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
             "unique_count": unique_count,
             "is_low_cardinality": is_low_cardinality,
         }
+        if key in numeric_by_name:
+            profile["stats"] = numeric_by_name[key]
         if is_low_cardinality:
             unique_values = non_null.drop_duplicates().tolist()
             profile["unique_values"] = [_to_json_value(value) for value in unique_values]
@@ -108,13 +109,12 @@ def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _profile_one_file(file_name: str, df: pd.DataFrame) -> dict[str, Any]:
-    """Return profile dict for graph state ``data_profile``: file, row_count, head, column_profiles, numeric_summary."""
+    """Return profile dict for graph state ``data_profile``: file, row_count, head, column_profiles (with ``stats`` on numeric columns)."""
     return {
         "file": file_name,
         "row_count": int(len(df)),
         "head": _head_records(df),
         "column_profiles": _column_profiles(df),
-        "numeric_summary": _numeric_summary(df),
     }
 
 

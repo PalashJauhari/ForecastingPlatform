@@ -12,7 +12,7 @@ Endpoints
 
 SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
 ``{"type":"node",...}`` — one LangGraph ``updates`` step per finished node (serial prep:
-``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``MergePrep``, …).
+``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``SelectPlannerSkills``, …).
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
@@ -342,8 +342,6 @@ def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
 
 # Omitted from SSE / UI progress (noisy join / bookkeeping nodes).
 _SSE_SKIP_PROGRESS_NODES = frozenset({
-    "MergePrep",
-    "MergeTools",
     "ProfileSavedData_PostTools",
 })
 
@@ -440,12 +438,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         event["label"] = "Orchestrator skills selected"
         event["active_skills"] = skills
         event["active_skill_count"] = len(skills)
-
-    elif node_name == "MergePrep":
-        event["label"] = "Parallel prep joined"
-
-    elif node_name == "MergeTools":
-        event["label"] = "Post-tool profile joined"
 
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []

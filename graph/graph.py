@@ -3,10 +3,10 @@ LangGraph entrypoint for the data-analysis agent: serial prep, skill nodes, Plan
 Orchestrator, tools, todo gate, checkpointing.
 
 Prep path: **BeginTurn** → **ProfileSavedData** → **SummariseConversationalSummary**
-→ **MergePrep** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**
+→ **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**
 → (**RunTools** | **TodoCompletionGate** → … | **FinalAnswer** → END).
 
-After **RunTools**: **ProfileSavedData_PostTools** → **MergeTools** → **Orchestrator**
+After **RunTools**: **ProfileSavedData_PostTools** → **Orchestrator**
 (resume with existing ``skill_guidance`` / ``active_skills`` from prep).
 """
 
@@ -185,20 +185,6 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
         rows: List[Any] = profile_session_workspace(session_id)
         obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
         return {"data_profile": rows}
-
-
-def merge_prep(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Noop between serial prep and planner skill selection (trace only)."""
-    with observation_parented_to_run(langfuse, config, name="graph.MergePrep", as_type="span") as obs:
-        obs.update(metadata={})
-    return {}
-
-
-def merge_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Noop after serial post-tool profiling (trace only)."""
-    with observation_parented_to_run(langfuse, config, name="graph.MergeTools", as_type="span") as obs:
-        obs.update(metadata={})
-    return {}
 
 
 def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -545,7 +531,7 @@ class AnalysisGraph:
     Notes
         * **Models** — ``models.orchestrator`` (tool agent), ``models.planner`` (structured plan / clarification), ``models.todo_completion_gate`` (incomplete-todo nudge); ``code_generation`` / ``code_judge`` from ``config.yaml`` apply inside ``code_pipeline``.
         * **Tools** — ``code_pipeline``, ``sarima_tool``, ``prophet_tool``, ``update_todo``.
-        * **Prep** — serial **ProfileSavedData** → **SummariseConversationalSummary** → **MergePrep** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**. After **RunTools**: **ProfileSavedData_PostTools** → **MergeTools** → **Orchestrator** (skills unchanged from prep).
+        * **Prep** — serial **ProfileSavedData** → **SummariseConversationalSummary** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**. After **RunTools**: **ProfileSavedData_PostTools** → **Orchestrator** (skills unchanged from prep).
         * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield LangGraph ``stream_mode="updates"`` chunks (one dict per finished node batch). After the iterator exits, read the checkpoint snapshot and merge ``__interrupt__`` when Human-in-the-loop pauses mid-turn (same semantics as terminal ``invoke``).
     """
@@ -573,8 +559,6 @@ class AnalysisGraph:
         builder.add_node("BeginTurn", begin_turn)
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
-        builder.add_node("MergePrep", merge_prep)
-        builder.add_node("MergeTools", merge_tools)
         builder.add_node("SelectPlannerSkills", select_planner_skills_step)
         builder.add_node("SelectOrchestratorSkills", select_orchestrator_skills_step)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
@@ -587,8 +571,7 @@ class AnalysisGraph:
         builder.set_entry_point("BeginTurn")
         builder.add_edge("BeginTurn", "ProfileSavedData")
         builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-        builder.add_edge("SummariseConversationalSummary", "MergePrep")
-        builder.add_edge("MergePrep", "SelectPlannerSkills")
+        builder.add_edge("SummariseConversationalSummary", "SelectPlannerSkills")
         builder.add_edge("SelectPlannerSkills", "Planner")
         builder.add_edge("Planner", "SelectOrchestratorSkills")
         builder.add_edge("SelectOrchestratorSkills", "Orchestrator")
@@ -603,8 +586,7 @@ class AnalysisGraph:
             {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
         )
         builder.add_edge("RunTools", "ProfileSavedData_PostTools")
-        builder.add_edge("ProfileSavedData_PostTools", "MergeTools")
-        builder.add_edge("MergeTools", "Orchestrator")
+        builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
         builder.add_edge("FinalAnswer", END)
 
         return builder.compile(checkpointer=self.checkpointer)

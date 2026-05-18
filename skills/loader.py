@@ -1,4 +1,4 @@
-"""Expert Skill Loader: Ingests Reasoning (.md) and Patterns (.py) from the skills/ library."""
+"""Expert Skill Loader: Ingests Reasoning (.md) from the skills/ library."""
 
 from __future__ import annotations
 
@@ -53,22 +53,6 @@ def LoadPlannerSkills(skill_names: list[str]) -> str:
             continue
         text = (skill_path / "approach.md").read_text(encoding="utf-8")
         sections.append(f"## PLANNER SKILL: {skill_path.name.upper()}\n{text}")
-    return "\n\n".join(sections)
-
-
-@observe(name="skills.LoadPatternSkills")
-def LoadPatternSkills(skill_names: list[str]) -> str:
-    """Ingest ``patterns.py`` for requested **orchestrator** skills (codegen pattern library)."""
-    sections: list[str] = []
-    for name in skill_names:
-        skill_path = path_for_orchestrator_skill(name)
-        if skill_path is None:
-            continue
-        pattern_path = skill_path / "patterns.py"
-        if not pattern_path.is_file():
-            continue
-        code = pattern_path.read_text(encoding="utf-8")
-        sections.append(f"# Pattern Library: {skill_path.name.upper()}\n{code}")
     return "\n\n".join(sections)
 
 

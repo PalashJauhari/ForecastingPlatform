@@ -1,12 +1,12 @@
 # Skills library (`skills/`)
 
-Domain playbooks live under **`orchestrator_skills/`** (execution-time reasoning and codegen **`patterns.py`**) and **`planner_skills/`** (task decomposition before execution). Each skill folder contains:
+Domain playbooks live under **`orchestrator_skills/`** (execution-time reasoning; optional **`patterns.py`** reference snippets) and **`planner_skills/`** (task decomposition before execution). Each skill folder contains:
 
 | File | Purpose |
 |------|---------|
 | **`skill.yaml`** | **Routing metadata** — `id` (must match folder name), `name`, `description`, optional **`aliases`** for legacy ids after merges. |
 | **`approach.md`** | Full reasoning text injected when the skill is selected. |
-| **`patterns.py`** | Optional; vetted snippets injected into **`code_pipeline`** codegen. |
+| **`patterns.py`** | Optional; vetted code examples (repository reference; not auto-injected). |
 
 ## Naming convention
 

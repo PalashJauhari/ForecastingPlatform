@@ -67,14 +67,12 @@ def build_topology_graph():
         "BeginTurn",
         "ProfileSavedData",
         "SummariseConversationalSummary",
-        "MergePrep",
         "SelectPlannerSkills",
         "Planner",
         "SelectOrchestratorSkills",
         "Orchestrator",
         "RunTools",
         "ProfileSavedData_PostTools",
-        "MergeTools",
         "TodoCompletionGate",
         "FinalAnswer",
     ):
@@ -83,8 +81,7 @@ def build_topology_graph():
     builder.set_entry_point("BeginTurn")
     builder.add_edge("BeginTurn", "ProfileSavedData")
     builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-    builder.add_edge("SummariseConversationalSummary", "MergePrep")
-    builder.add_edge("MergePrep", "SelectPlannerSkills")
+    builder.add_edge("SummariseConversationalSummary", "SelectPlannerSkills")
     builder.add_edge("SelectPlannerSkills", "Planner")
     builder.add_edge("Planner", "SelectOrchestratorSkills")
     builder.add_edge("SelectOrchestratorSkills", "Orchestrator")
@@ -99,8 +96,7 @@ def build_topology_graph():
         {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
     )
     builder.add_edge("RunTools", "ProfileSavedData_PostTools")
-    builder.add_edge("ProfileSavedData_PostTools", "MergeTools")
-    builder.add_edge("MergeTools", "Orchestrator")
+    builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
     builder.add_edge("FinalAnswer", END)
     return builder.compile()
 

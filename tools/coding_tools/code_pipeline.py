@@ -41,7 +41,6 @@ from session_paths import (
     session_id_from_config,
     session_root,
 )
-from skills.loader import LoadPatternSkills
 
 from .code_scan.llm_judge import run_llm_judge
 from .code_scan.safety_check import SafetyCheckResult
@@ -100,16 +99,21 @@ def merge_gate_violations(sem: SafetyCheckResult, judge: SafetyCheckResult) -> d
     return out
 
 
-def execution_needs_code_attachment(execution: dict[str, Any]) -> bool:
-    """True when the tool should echo generated ``code`` so the model can fix timeout/errors/nonzero exit."""
+def sandbox_run_needs_code_for_retry(execution: dict[str, Any]) -> bool:
+    """True when the sandbox subprocess failed or was noisy; include ``code`` in the tool JSON for a retry."""
+    # Timeout: parent ``subprocess.run`` uses 124 when ``TimeoutExpired`` is caught.
     if execution.get("returncode") == 124:
         return True
+    # Timeout or other wrapper error message (see TimeoutExpired handler in this module).
     if execution.get("error"):
         return True
+    # Any stderr text (warnings count): script may have succeeded but needs review.
     if (execution.get("stderr") or "").strip():
         return True
+    # Non-zero process exit without stderr (or stderr already captured above).
     if execution.get("returncode", 0) not in (0, None):
         return True
+    # Exit 0, no error key, empty stderr — omit ``code`` from the tool result.
     return False
 
 
@@ -117,7 +121,6 @@ def execution_needs_code_attachment(execution: dict[str, Any]) -> bool:
 def code_pipeline_impl(
     task: CodePipelineTask,
     data_profile: str,
-    active_skills: list[str],
     previous_code_violation: str,
     session_id: str,
     tool_call_id: str,
@@ -132,21 +135,18 @@ def code_pipeline_impl(
     """
     del runtime  # Signature matches LangChain ``ToolRuntime``; reserved for future hooks.
 
-    # --- Codegen: static system prompt; Human carries task JSON, optional retry text, profile, patterns ---
+    # --- Codegen: static system prompt; Human carries task JSON, optional retry text, data profile ---
     llm = make_llm(
         model=CODING_MODEL,
         temperature=0,
         output_schema=CodeGenerationOutput,
     )
-    pattern_guidance = LoadPatternSkills(active_skills)
     violation = previous_code_violation.strip()
     data_block = data_profile.strip() or "(none)"
-    patterns_block = pattern_guidance.strip() if pattern_guidance else "(none)"
     blocks = [f"## Task (structured)\n{json.dumps(task.model_dump(), ensure_ascii=False, indent=2)}"]
     if violation:
         blocks.append(f"## Previous code policy violations\n{violation}")
     blocks.append(f"## Data Profile\n{data_block}")
-    blocks.append(f"## Vetted Code Patterns\n{patterns_block}")
     user_payload = "\n\n".join(blocks)
     prompt_messages = [
         SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
@@ -157,13 +157,7 @@ def code_pipeline_impl(
         try:
             resp = llm.invoke(prompt_messages)
         except Exception as e:
-            generation.update(
-                output={"error": str(e)},
-                metadata={
-                    "has_data_profile": bool(data_profile.strip()),
-                    "has_previous_code_violation": bool(previous_code_violation.strip()),
-                },
-            )
+            generation.update(output={"error": str(e)})
             langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
             return json.dumps(
                 {
@@ -175,13 +169,7 @@ def code_pipeline_impl(
                 },
                 default=str,
             )
-        generation.update(
-            output=resp.model_dump(),
-            metadata={
-                "has_data_profile": bool(data_profile.strip()),
-                "has_previous_code_violation": bool(previous_code_violation.strip()),
-            },
-        )
+        generation.update(output=resp.model_dump())
 
     code = resp.code.strip()
 
@@ -314,7 +302,7 @@ def code_pipeline_impl(
             if f.is_file() and f.suffix.lower() in PLOT_FILE_EXTENSIONS:
                 plots.append(f"agent_filesystem/{sid}/run_{run_id}/{f.name}")
 
-    # Success path: ``task`` is not echoed (already in the tool call). Omit ``code`` unless execution needs a retry patch.
+    # Success path: ``task`` is not echoed (already in the tool call). Omit ``code`` unless ``sandbox_run_needs_code_for_retry``.
     out_body: dict[str, Any] = {
         "stdout": execution.get("stdout") or "",
         "stderr": execution.get("stderr") or "",
@@ -322,7 +310,7 @@ def code_pipeline_impl(
         "plots": plots,
     }
 
-    if execution_needs_code_attachment(execution):
+    if sandbox_run_needs_code_for_retry(execution):
         out_body["code"] = code
         rc = execution.get("returncode")
         err_msg = execution.get("error")
@@ -351,13 +339,11 @@ def code_pipeline(
 ) -> str:
     """Generate Python with Semgrep + LLM judge, save ``pipeline_run.py``, run in sandbox. Returns JSON (no task echo)."""
     session_id = session_id_from_config(runtime.config)
-    active_skills = (runtime.state or {}).get("active_skills", [])
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""
 
     return code_pipeline_impl(
         task=task,
         data_profile=data_profile,
-        active_skills=active_skills,
         previous_code_violation=previous_code_violation,
         session_id=session_id,
         tool_call_id=tool_call_id,

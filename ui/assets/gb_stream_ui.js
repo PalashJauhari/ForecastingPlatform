@@ -48,8 +48,6 @@ function gbAppendProgressSub(progressEl, boldText, restText) {
 
 /** Node ids not shown in the progress panel (bookkeeping; server may already omit them). */
 var GB_PROGRESS_SKIP_NODES = {
-  MergePrep: true,
-  MergeTools: true,
   ProfileSavedData_PostTools: true,
 };
 
