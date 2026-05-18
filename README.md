@@ -17,7 +17,7 @@ Most forecasting demos stop at fitting a model. This project focuses on the surr
 ## Core Features
 
 - **Natural-language forecasting workflow**: upload data, ask for forecasts, comparisons, plots, or analysis, and receive structured outputs.
-- **Custom LangGraph agent**: planner, orchestrator, tool execution, todo completion gate, skill selection, and final-answer flow.
+- **Custom LangGraph agent**: planner, orchestrator, tool execution, deterministic todo-completion gate (lists pending todos; no extra model call), skill selection, and final-answer flow.
 - **Forecasting tools**: SARIMA/SARIMAX via `statsmodels` and optional `pmdarima.auto_arima`; Prophet with trend, seasonality, residual, and component summaries.
 - **Sandboxed analysis code**: LLM-generated Python is statically scanned, reviewed, saved as `pipeline_run.py`, and executed in a restricted subprocess.
 - **Session workspace**: each chat session stores uploads, generated tables, scripts, and plot artifacts under `agent_filesystem/<session>/`.
@@ -80,7 +80,7 @@ START -> BeginTurn -> ProfileSavedData -> SummariseConversationalSummary
 ```text
 api/                         FastAPI app, run/resume/upload/artifact endpoints
 graph/                       LangGraph state machine and agent execution
-middleware/                  LLM factory, rate limiting, context summarisation
+middleware/                  LLM factory, rate limiting; token-aware truncation + running summarisation
 tools/
   forecasting/               SARIMA and Prophet forecasting tools
   coding_tools/              Code generation, safety checks, sandbox runner
@@ -249,6 +249,7 @@ The browser UI does not receive the OpenAI key. It only talks to the FastAPI bac
 - The app uses a session id as the LangGraph `thread_id`.
 - Forecasting tools intentionally do not generate images directly; plotting is routed through the guarded `code_pipeline`.
 - `data_profile` is held in graph state and refreshed before orchestration and after tool execution.
+- **Context trimming**: old messages beyond a token estimate are summarized into `message_summary` and dropped via `RemoveMessage`, with cuts aligned at `HumanMessage` boundaries (`middleware/context_editing.py`). `/run` and `/run/stream` append each user utterance as a `HumanMessage` with id `user_input-{uuid}` (unique per LangGraph merge rules; truncation prefers these ids when trimming).
 - Langfuse tracing is optional; the app still runs without Langfuse credentials.
 
 ## Resume Summary
