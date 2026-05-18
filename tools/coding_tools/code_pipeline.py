@@ -124,9 +124,9 @@ def code_pipeline_impl(
     """
     Run codegen, Semgrep, LLM judge, then save ``pipeline_run.py`` and execute in the sandbox.
 
-    Returns a JSON string: task fields (``requirements`` / ``input`` / ``output``) plus
-    ``code`` (only when gates fail or execution needs a retry), ``stdout`` / ``stderr``,
-    ``code_violation``, and ``plots``.
+    Returns a JSON string with ``stdout`` / ``stderr`` / ``code_violation`` / ``plots``,
+    and ``code`` only when safety gates fail or execution needs a retry patch.
+    The structured ``task`` is not repeated (it is already in the tool call message).
     """
     del runtime  # Signature matches LangChain ``ToolRuntime``; reserved for future hooks.
 
@@ -165,7 +165,6 @@ def code_pipeline_impl(
             langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "invalid_structured_output"})
             return json.dumps(
                 {
-                    **task.model_dump(),
                     "code": "",
                     "stdout": None,
                     "stderr": None,
@@ -188,7 +187,6 @@ def code_pipeline_impl(
         langfuse.update_current_span(metadata={"final_stage": "codegen", "status": "no_code"})
         return json.dumps(
             {
-                **task.model_dump(),
                 "code": "",
                 "stdout": None,
                 "stderr": None,
@@ -222,7 +220,6 @@ def code_pipeline_impl(
         viol = merge_gate_violations(sem, judge)
         return json.dumps(
             {
-                **task.model_dump(),
                 "code": code,
                 "stdout": None,
                 "stderr": None,
@@ -315,9 +312,8 @@ def code_pipeline_impl(
             if f.is_file() and f.suffix.lower() in PLOT_FILE_EXTENSIONS:
                 plots.append(f"agent_filesystem/{sid}/run_{run_id}/{f.name}")
 
-    # Success path: omit ``code`` unless execution failed badly enough that the model should patch it.
+    # Success path: ``task`` is not echoed (already in the tool call). Omit ``code`` unless execution needs a retry patch.
     out_body: dict[str, Any] = {
-        **task.model_dump(),
         "stdout": execution.get("stdout") or "",
         "stderr": execution.get("stderr") or "",
         "code_violation": None,
@@ -351,7 +347,7 @@ def code_pipeline(
     data_profile: str = "",
     previous_code_violation: str = "",
 ) -> str:
-    """Generate Python with Semgrep + LLM judge, save ``pipeline_run.py``, run in sandbox. Returns JSON string."""
+    """Generate Python with Semgrep + LLM judge, save ``pipeline_run.py``, run in sandbox. Returns JSON (no task echo)."""
     session_id = session_id_from_config(runtime.config)
     active_skills = (runtime.state or {}).get("active_skills", [])
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""

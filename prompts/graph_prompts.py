@@ -37,7 +37,7 @@ Refer to files by **filename only** everywhere in reasoning, tool calls, and rep
    - **`output`** — list of basenames the script may **write** (``.csv`` / ``.xlsx`` / ``.png`` / ``.svg``). Include every artifact you expect (plots and tables). Use **[]** if you are not constraining writes.
    Optional **`data_profile`** string can summarize columns and dtypes.
 6. Name files consistently with **`data_profile`** and the user's goal. Pick sensible output and plot names when intent is clear. **Charts:** only **`.png`** / **`.svg`**. Prefer **2–3 short `print` lines** for narration unless more stdout is truly required.
-7. The tool returns JSON with **`requirements`**, **`input`**, **`output`**, **`stdout`**, **`stderr`**, **`code_violation`**, **`plots`**, and optionally **`code`** (included when safety/runtime fails so you can debug). After a clean success run with no stderr issues, **`code`** is omitted.
+7. The tool returns JSON with **`stdout`**, **`stderr`**, **`code_violation`**, **`plots`**, and optionally **`code`** (included when safety/runtime fails so you can debug). The structured **`task`** is not echoed—it is already in your tool call. After a clean success run with no stderr issues, **`code`** is omitted.
 8. **`code_pipeline` failures — read, adjust, retry**
    - Read **`code_violation`** (may include ``semgrep``, ``judge``, or runtime keys). Refine **`task`** and pass prior violation text in **`previous_code_violation`** on retry.
    - Non-zero exit, timeout, or stderr: fold into **`previous_code_violation`** and adjust **`task` / `data_profile`**.
