@@ -13,7 +13,7 @@ from .sarima_tool import (
     SarimaToolInput,
 )
 from .skill_selection import OrchestratorSkillPick, PlannerSkillPick
-from .write_todos import TodoItem, WriteTodosInput
+from .write_todos import TodoStatus
 
 __all__ = [
     "CodeGenerationOutput",
@@ -26,6 +26,5 @@ __all__ = [
     "PlannerSkillPick",
     "ResidualAnalysisOutput",
     "SarimaToolInput",
-    "TodoItem",
-    "WriteTodosInput",
+    "TodoStatus",
 ]

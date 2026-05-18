@@ -85,7 +85,6 @@ tools/
     ask_user.py                              # Not bound on orchestrator (legacy / future use)
   planning/
     update_todo.py                           # Patch one todo status by id
-    write_todos.py                           # Legacy full-list tool (not bound on orchestrator)
   coding_tools/
     code_pipeline.py                         # codegen → Semgrep → judge → save → run_pipeline_sandboxed
     code_scan/
@@ -106,7 +105,7 @@ output_validation/
   code_generation.py                         # Pydantic: CodePipelineTask, codegen output, tool input schema
   judge_output.py                            # Pydantic: LLM judge
   skill_selection.py                         # Pydantic: OrchestratorSkillPick, PlannerSkillPick
-  write_todos.py                             # Pydantic models for ``write_todos`` tool args
+  write_todos.py                             # Shared ``TodoStatus`` literal for Planner / ``update_todo``
 api/
   main.py                                    # POST /run, /resume, /upload-data; GET /artifact/… for plots & files
 ui/
