@@ -12,7 +12,7 @@ Endpoints
 
 SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
 ``{"type":"node",...}`` — one LangGraph ``updates`` step (parallel prep yields multiple frames;
-order across ``ProfileSavedData`` / ``DescribePlots`` / ``SummariseMessages`` is nondeterministic).
+order across ``ProfileSavedData`` / ``DescribePlots`` / ``SummariseConversationalSummary`` is nondeterministic).
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
@@ -412,6 +412,24 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
                     }
                 )
         event["tool_results"] = previews
+        todos_raw = payload.get("todos")
+        normalized_todos: list[dict[str, Any]] = []
+        if isinstance(todos_raw, list):
+            _max_td = 50
+            _max_content = 400
+            for item in todos_raw[:_max_td]:
+                if not isinstance(item, dict):
+                    continue
+                ct = item.get("content")
+                st = item.get("status")
+                if ct is None and st is None:
+                    continue
+                content_s = _truncate_sse_preview(ct if ct is not None else "", _max_content)
+                status_s = _truncate_sse_preview(st if st is not None else "", 64)
+                normalized_todos.append({"content": content_s, "status": status_s})
+            if normalized_todos:
+                event["todos"] = normalized_todos
+                event["todo_count"] = len(normalized_todos)
 
     elif node_name == "IdentifySkills":
         skills = payload.get("active_skills") or []
@@ -424,7 +442,7 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         event["label"] = "Profiling workspace inputs"
         event["profile_entries"] = len(rows)
 
-    elif node_name == "SummariseMessages":
+    elif node_name == "SummariseConversationalSummary":
         summary = payload.get("message_summary")
         preview = ""
         if isinstance(summary, str) and summary.strip():

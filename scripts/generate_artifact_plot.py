@@ -3,7 +3,7 @@
 Render the ForecastingPlatform LangGraph topology to a PNG under ``artifact/``.
 
 Mirrors ``graph.graph.AnalysisGraph.build_graph``:
-``BeginTurn`` → parallel ``ProfileSavedData``, ``DescribePlots``, ``SummariseMessages`` →
+``BeginTurn`` → parallel ``ProfileSavedData``, ``DescribePlots``, ``SummariseConversationalSummary`` →
 ``IdentifySkills`` → ``Orchestrator`` → (``RunTools`` | ``FinalAnswer`` → END);
 ``RunTools`` → ``BeginTurn``.
 
@@ -61,7 +61,7 @@ def build_topology_graph():
     builder.add_node("BeginTurn", noop)
     builder.add_node("ProfileSavedData", noop)
     builder.add_node("DescribePlots", noop)
-    builder.add_node("SummariseMessages", noop)
+    builder.add_node("SummariseConversationalSummary", noop)
     builder.add_node("IdentifySkills", noop)
     builder.add_node("Orchestrator", noop)
     builder.add_node("RunTools", noop)
@@ -70,10 +70,10 @@ def build_topology_graph():
     builder.set_entry_point("BeginTurn")
     builder.add_edge("BeginTurn", "ProfileSavedData")
     builder.add_edge("BeginTurn", "DescribePlots")
-    builder.add_edge("BeginTurn", "SummariseMessages")
+    builder.add_edge("BeginTurn", "SummariseConversationalSummary")
     builder.add_edge("ProfileSavedData", "IdentifySkills")
     builder.add_edge("DescribePlots", "IdentifySkills")
-    builder.add_edge("SummariseMessages", "IdentifySkills")
+    builder.add_edge("SummariseConversationalSummary", "IdentifySkills")
     builder.add_edge("IdentifySkills", "Orchestrator")
     builder.add_conditional_edges(
         "Orchestrator",

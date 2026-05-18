@@ -108,18 +108,10 @@ def _column_profiles(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _profile_one_file(file_name: str, df: pd.DataFrame) -> dict[str, Any]:
-    """Return the full profile schema used in graph state ``data_profile``."""
-    columns = [str(column) for column in df.columns]
-    dtypes = {str(column): str(dtype) for column, dtype in df.dtypes.items()}
-    null_counts = {str(column): int(df[column].isna().sum()) for column in df.columns}
-
+    """Return profile dict for graph state ``data_profile``: file, row_count, head, column_profiles, numeric_summary."""
     return {
         "file": file_name,
         "row_count": int(len(df)),
-        "column_count": int(len(columns)),
-        "columns": columns,
-        "dtypes": dtypes,
-        "null_counts": null_counts,
         "head": _head_records(df),
         "column_profiles": _column_profiles(df),
         "numeric_summary": _numeric_summary(df),

@@ -16,7 +16,99 @@ function truncate(s, maxLen) {
   return s.slice(0, maxLen - 1) + "…";
 }
 
-/** Turn one SSE envelope into `{ bold, rest }` for monospace progress rows. */
+function gbAppendProgressLine(progressEl, boldText, restText) {
+  if (!progressEl) return;
+  var row = document.createElement("div");
+  row.className = "gb-progress-line";
+  if (boldText) {
+    var s = document.createElement("strong");
+    s.textContent = boldText;
+    row.appendChild(s);
+  }
+  if (restText) row.appendChild(document.createTextNode(restText));
+  progressEl.appendChild(row);
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+function gbAppendProgressSub(progressEl, boldText, restText) {
+  if (!progressEl) return;
+  var row = document.createElement("div");
+  row.className = "gb-progress-line gb-progress-sub";
+  if (boldText) {
+    var s = document.createElement("strong");
+    s.textContent = boldText;
+    row.appendChild(s);
+  }
+  if (restText) {
+    row.appendChild(document.createTextNode(restText ? " " + restText : ""));
+  }
+  progressEl.appendChild(row);
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+function gbAppendOrchestratorProgress(progressEl, ev) {
+  var tc = Array.isArray(ev.tool_calls) ? ev.tool_calls : [];
+  gbAppendProgressLine(progressEl, "Orchestrator", tc.length ? " — planned tools:" : "");
+  for (var j = 0; j < tc.length; j++) {
+    var t = tc[j] || {};
+    var n = t.name || "?";
+    var ap = truncate(t.args_preview || "", 800);
+    var row = document.createElement("div");
+    row.className = "gb-progress-line gb-progress-sub";
+    var sn = document.createElement("strong");
+    sn.textContent = n;
+    row.appendChild(sn);
+    var codeEl = document.createElement("code");
+    codeEl.className = "gb-mono";
+    codeEl.textContent = ap ? " " + ap : "";
+    row.appendChild(codeEl);
+    progressEl.appendChild(row);
+  }
+  if (!tc.length && ev.had_tool_calls === false) {
+    gbAppendProgressSub(progressEl, "", "(no tools)");
+  }
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+function gbAppendRunToolsProgress(progressEl, ev) {
+  gbAppendProgressLine(progressEl, "RunTools", "");
+  var todos = Array.isArray(ev.todos) ? ev.todos : [];
+  if (todos.length) {
+    var ul = document.createElement("ul");
+    ul.className = "gb-progress-todos";
+    for (var i = 0; i < todos.length; i++) {
+      var td = todos[i];
+      var li = document.createElement("li");
+      var st = (td && td.status) || "";
+      var ct = truncate((td && td.content) || "", 500);
+      li.textContent = (st ? "[" + String(st) + "] " : "") + ct;
+      ul.appendChild(li);
+    }
+    progressEl.appendChild(ul);
+  }
+  var tr = Array.isArray(ev.tool_results) ? ev.tool_results : [];
+  for (var k = 0; k < tr.length; k++) {
+    var x = tr[k];
+    var name = (x && x.name) || "tool";
+    var cp = x && x.content_preview ? truncate(String(x.content_preview), 280) : "";
+    var crow = document.createElement("div");
+    crow.className = "gb-progress-line gb-progress-sub";
+    var b = document.createElement("strong");
+    b.textContent = name;
+    crow.appendChild(b);
+    if (cp) {
+      crow.appendChild(document.createTextNode(" "));
+      var ce = document.createElement("code");
+      ce.className = "gb-mono";
+      ce.textContent = cp;
+      crow.appendChild(ce);
+    }
+    progressEl.appendChild(crow);
+  }
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+/** Turn one SSE envelope into `{ bold, rest }` for monospace progress rows (non-special nodes). */
 function gbProgressBoldRest(ev) {
   if (!ev || typeof ev !== "object") return { bold: "event", rest: " — " + String(ev) };
   var node = ev.node || "";
@@ -36,30 +128,6 @@ function gbProgressBoldRest(ev) {
     var ip = ev.interrupt_preview || "";
     return { bold: "__interrupt__", rest: ip ? " — " + truncate(ip, 200) : " — clarification" };
   }
-  if (node === "Orchestrator") {
-    var tc = ev.tool_calls || [];
-    if (tc.length) {
-      var parts = tc.map(function (t) {
-        var n = t.name || "?";
-        var ap = truncate(t.args_preview || "", 120);
-        return ap ? n + "(" + ap + ")" : n;
-      });
-      return { bold: boldName, rest: " — " + parts.join(", ") };
-    }
-    return { bold: boldName, rest: ev.had_tool_calls === false ? " — (no tools)" : "" };
-  }
-  if (node === "RunTools") {
-    var tr = ev.tool_results || [];
-    if (tr.length) {
-      var names = tr
-        .map(function (x) {
-          return x.name + (x.content_preview ? " · " + truncate(x.content_preview, 80) : "");
-        })
-        .join(" | ");
-      return { bold: boldName, rest: " — " + truncate(names, 220) };
-    }
-    return { bold: boldName, rest: "" };
-  }
   if (node === "IdentifySkills") {
     var cnt = ev.active_skill_count != null ? " (" + ev.active_skill_count + ")" : "";
     var sk =
@@ -70,7 +138,7 @@ function gbProgressBoldRest(ev) {
     var pe = ev.profile_entries != null ? " · " + ev.profile_entries + " files profiled" : "";
     return { bold: boldName, rest: pe };
   }
-  if (node === "SummariseMessages" && ev.summary_preview) {
+  if (node === "SummariseConversationalSummary" && ev.summary_preview) {
     return { bold: boldName, rest: " — " + truncate(ev.summary_preview, 180) };
   }
 
@@ -78,18 +146,13 @@ function gbProgressBoldRest(ev) {
   return { bold: boldName, rest: label ? " — " + truncate(label, 120) : "" };
 }
 
-function gbAppendProgressLine(progressEl, boldText, restText) {
-  if (!progressEl) return;
-  var row = document.createElement("div");
-  row.className = "gb-progress-line";
-  if (boldText) {
-    var s = document.createElement("strong");
-    s.textContent = boldText;
-    row.appendChild(s);
-  }
-  if (restText) row.appendChild(document.createTextNode(restText));
-  progressEl.appendChild(row);
-  progressEl.scrollTop = progressEl.scrollHeight;
+function gbAppendStreamNode(progressEl, payload) {
+  if (!payload || payload.type !== "node") return;
+  var node = payload.node || "";
+  if (node === "Orchestrator") return gbAppendOrchestratorProgress(progressEl, payload);
+  if (node === "RunTools") return gbAppendRunToolsProgress(progressEl, payload);
+  var pr = gbProgressBoldRest(payload);
+  gbAppendProgressLine(progressEl, pr.bold, pr.rest);
 }
 
 /**
@@ -130,6 +193,10 @@ async function gbParseSSEStream(response, progressEl) {
         if (payload.type === "done") {
           donePayload = payload;
           gbAppendProgressLine(progressEl, "done", "");
+          continue;
+        }
+        if (payload.type === "node") {
+          gbAppendStreamNode(progressEl, payload);
           continue;
         }
         var pr = gbProgressBoldRest(payload);

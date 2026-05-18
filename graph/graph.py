@@ -2,12 +2,13 @@
 LangGraph entrypoint for the data-analysis agent: parallel prep, skills, orchestrator, tools, checkpointing.
 
 Flow on each turn (and after **RunTools**): **BeginTurn** → parallel **ProfileSavedData**,
-**DescribePlots**, **SummariseMessages** → **IdentifySkills** → **Orchestrator** →
+**DescribePlots**, **SummariseConversationalSummary** → **IdentifySkills** → **Orchestrator** →
 (**RunTools** | **FinalAnswer** → END). Tool execution loops back to **BeginTurn**.
 Code execution goes through ``code_pipeline`` (optional preflight, codegen, Semgrep, judge, run).
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import os
 from operator import add
@@ -37,8 +38,11 @@ from typing_extensions import NotRequired, TypedDict
 from middleware.context_editing import truncate_and_summarize
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
+    LANGFUSE_PARENT_OBS_METADATA_KEY,
+    LANGFUSE_TRACE_ID_METADATA_KEY,
     extract_usage_details,
     get_langfuse_client,
+    observation_parented_to_run,
     serialize_message,
     serialize_messages,
 )
@@ -88,7 +92,7 @@ class AgentState(TypedDict):
                                Uses ``add_messages`` reducer: append, deduplicate by id,
                                honour ``RemoveMessage`` for truncation.
         message_summary      — running summary of evicted messages, grows across
-                               summarisation cycles (node ``SummariseMessages``).
+                               summarisation cycles (node ``SummariseConversationalSummary``).
         data_profile         — list of per-file profiling dicts from
                                ``profiling_data.profile_session_workspace`` (node ``ProfileSavedData``).
         skill_guidance       — concatenated ``approach.md`` text from ``LoadReasoningSkills`` (node ``IdentifySkills``).
@@ -131,7 +135,7 @@ langfuse = get_langfuse_client()
 
 def begin_turn(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Fan-out anchor for parallel prep; trace only."""
-    with langfuse.start_as_current_observation(name="graph.BeginTurn", as_type="span") as obs:
+    with observation_parented_to_run(langfuse, config, name="graph.BeginTurn", as_type="span") as obs:
         obs.update(metadata={})
     return {}
 
@@ -141,7 +145,7 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
     Delegate to ``profiling_data.profile_session_workspace`` and set state key ``data_profile``.
     """
     session_id = session_id_from_config(config)
-    with langfuse.start_as_current_observation(name="graph.ProfileSavedData", as_type="span") as obs:
+    with observation_parented_to_run(langfuse, config, name="graph.ProfileSavedData", as_type="span") as obs:
         rows: List[Any] = profile_session_workspace(session_id)
         obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
         return {"data_profile": rows}
@@ -149,90 +153,132 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
 
 def describe_plots(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Stub for future plot / artifact descriptions into state."""
-    with langfuse.start_as_current_observation(name="graph.DescribePlots", as_type="span") as obs:
+    with observation_parented_to_run(langfuse, config, name="graph.DescribePlots", as_type="span") as obs:
         obs.update(metadata={})
     return {}
 
 
-@observe(name="graph.SummariseMessages", capture_input=False, capture_output=False)
-def summarise_messages(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Evict old turns into ``message_summary`` when over token threshold."""
-    messages = state["messages"]
-    summary = state.get("message_summary", "")
-    summary, _kept, remove_ops = truncate_and_summarize(
-        messages, summary, KEEP_RECENT, TOKEN_THRESHOLD,
-    )
-    return {"message_summary": summary, "messages": remove_ops}
+def summarise_conversational_summary(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Evict old turns into ``message_summary`` when over token threshold (async summarisation in a fresh event loop)."""
+
+    def _run_truncation() -> tuple[str, list, list]:
+        return asyncio.run(
+            truncate_and_summarize(
+                state["messages"],
+                state.get("message_summary", ""),
+                KEEP_RECENT,
+                TOKEN_THRESHOLD,
+                runnable_config=config,
+            )
+        )
+
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.SummariseConversationalSummary",
+        as_type="chain",
+        capture_input=False,
+        capture_output=False,
+    ):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            summary, _kept, remove_ops = _run_truncation()
+        else:
+            raise RuntimeError(
+                "SummariseConversationalSummary invoked under a running event loop; "
+                "use asynchronous graph execution (ainvoke) for this stack."
+            )
+        return {"message_summary": summary, "messages": remove_ops}
 
 
-@observe(name="graph.IdentifySkills", capture_input=False, capture_output=False)
 def identify_skills_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Route to skill folders and load reasoning text for orchestrator context."""
-    messages = state["messages"]
-    data_profile_rows = state.get("data_profile", [])
-    active_skills = route_skills_llm(messages, data_profile_rows)
-    skill_guidance = LoadReasoningSkills(active_skills)
-    return {"active_skills": active_skills, "skill_guidance": skill_guidance}
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.IdentifySkills",
+        capture_input=False,
+        capture_output=False,
+        as_type="chain",
+    ):
+        messages = state["messages"]
+        data_profile_rows = state.get("data_profile") or []
+        active_skills = route_skills_llm(messages, data_profile_rows)
+        skill_guidance = LoadReasoningSkills(active_skills)
+        return {"active_skills": active_skills, "skill_guidance": skill_guidance}
 
 
-@observe(name="graph.Orchestrator", capture_input=False, capture_output=False)
 def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """
     Core agent node: builds context from state and invokes the tool-bound LLM.
     """
-    messages = state["messages"]
-    summary = state.get("message_summary", "")
-    raw_todos = state.get("todos") or []
-    raw_pad = state.get("scratchpad") or []
-    data_profile_rows = state.get("data_profile", [])
-    skill_guidance = state.get("skill_guidance") or ""
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.Orchestrator",
+        capture_input=False,
+        capture_output=False,
+        as_type="chain",
+    ):
+        messages = state["messages"]
+        summary = state.get("message_summary", "")
+        raw_todos = state.get("todos") or []
+        raw_pad = state.get("scratchpad") or []
+        data_profile_rows = state.get("data_profile", [])
+        skill_guidance = state.get("skill_guidance") or ""
 
-    context = (
-        "## File Rules\n"
-        "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
-        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
-        "## Session Workspace\n"
-        f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
-        "### EXPERT GUIDANCE (Reasoning Skills):\n"
-        f"{skill_guidance or '(none)'}\n\n"
-        "## Current Todo List\n"
-        f"{json.dumps(raw_todos, indent=2)}\n\n"
-        "## Scratchpad\n"
-        f"{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
-        "## Conversation Summary\n"
-        f"{summary}\n\n"
-    )
-    orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
-    with langfuse.start_as_current_observation(
-        name="graph.Orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages),
-    ) as generation:
-        response = llm_with_tools.invoke(orchestrator_messages)
-        generation.update(
-            output=serialize_message(response),
-            usage_details=extract_usage_details(response),
-            metadata={"tool_calls_requested": len(getattr(response, "tool_calls", None) or [])},
+        context = (
+            "## File Rules\n"
+            "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
+            "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
+            "## Session Workspace\n"
+            f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "### EXPERT GUIDANCE (Reasoning Skills):\n"
+            f"{skill_guidance or '(none)'}\n\n"
+            "## Current Todo List\n"
+            f"{json.dumps(raw_todos, indent=2)}\n\n"
+            "## Scratchpad\n"
+            f"{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
+            "## Conversation Summary\n"
+            f"{summary}\n\n"
         )
+        orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
+        with observation_parented_to_run(
+            langfuse,
+            config,
+            name="graph.Orchestrator.llm",
+            as_type="generation",
+            model=cfg["models"]["orchestrator"],
+            input=serialize_messages(orchestrator_messages),
+        ) as generation:
+            response = llm_with_tools.invoke(orchestrator_messages, config=config)
+            generation.update(
+                output=serialize_message(response),
+                usage_details=extract_usage_details(response),
+                metadata={"tool_calls_requested": len(getattr(response, "tool_calls", None) or [])},
+            )
 
-    tool_calls = list(getattr(response, "tool_calls", None) or [])
-    ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
-    ask_user_batch_rejected = bool(ask_user_calls and len(tool_calls) > 1)
-    if ask_user_batch_rejected:
-        response = AIMessage(
-            content=(
-                "Invalid tool batch: `ask_user` must be the only tool call in a step. "
-                "Reissue either a single `ask_user` call or a tool batch that does not include `ask_user`."
-            ),
-        )
-        tool_calls = []
-    langfuse.update_current_span(metadata={"ask_user_batch_rejected": "true" if ask_user_batch_rejected else "false", "ask_user_batch_trimmed": "false"})
-    langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "had_summary_context": "true" if bool(summary) else "false"})
+        tool_calls = list(getattr(response, "tool_calls", None) or [])
+        ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
+        ask_user_batch_rejected = bool(ask_user_calls and len(tool_calls) > 1)
+        if ask_user_batch_rejected:
+            response = AIMessage(
+                content=(
+                    "Invalid tool batch: `ask_user` must be the only tool call in a step. "
+                    "Reissue either a single `ask_user` call or a tool batch that does not include `ask_user`."
+                ),
+            )
+            tool_calls = []
+        langfuse.update_current_span(metadata={"ask_user_batch_rejected": "true" if ask_user_batch_rejected else "false", "ask_user_batch_trimmed": "false"})
+        langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "had_summary_context": "true" if bool(summary) else "false"})
 
-    return {"messages": [response]}
+        return {"messages": [response]}
 
 
 def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Terminal hook after a non-tool assistant reply."""
-    with langfuse.start_as_current_observation(name="graph.FinalAnswer", as_type="span") as obs:
+    with observation_parented_to_run(langfuse, config, name="graph.FinalAnswer", as_type="span") as obs:
         obs.update(metadata={})
     return {}
 
@@ -262,7 +308,7 @@ class AnalysisGraph:
     Notes
         * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
         * **Tools** — ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos``, forecasting tools.
-        * **Prep** — ``ProfileSavedData``, ``DescribePlots``, and ``SummariseMessages`` run in parallel, then ``IdentifySkills``, then ``Orchestrator``.
+        * **Prep** — ``ProfileSavedData``, ``DescribePlots``, and ``SummariseConversationalSummary`` run in parallel, then ``IdentifySkills``, then ``Orchestrator``.
         * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield LangGraph ``stream_mode="updates"`` chunks (one dict per finished node batch). After the iterator exits, read the checkpoint snapshot and merge ``__interrupt__`` when Human-in-the-loop pauses mid-turn (same semantics as terminal ``invoke``).
     """
@@ -290,7 +336,7 @@ class AnalysisGraph:
         builder.add_node("BeginTurn", begin_turn)
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("DescribePlots", describe_plots)
-        builder.add_node("SummariseMessages", summarise_messages)
+        builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
         builder.add_node("IdentifySkills", identify_skills_step)
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
@@ -299,10 +345,10 @@ class AnalysisGraph:
         builder.set_entry_point("BeginTurn")
         builder.add_edge("BeginTurn", "ProfileSavedData")
         builder.add_edge("BeginTurn", "DescribePlots")
-        builder.add_edge("BeginTurn", "SummariseMessages")
+        builder.add_edge("BeginTurn", "SummariseConversationalSummary")
         builder.add_edge("ProfileSavedData", "IdentifySkills")
         builder.add_edge("DescribePlots", "IdentifySkills")
-        builder.add_edge("SummariseMessages", "IdentifySkills")
+        builder.add_edge("SummariseConversationalSummary", "IdentifySkills")
         builder.add_edge("IdentifySkills", "Orchestrator")
         builder.add_conditional_edges(
             "Orchestrator",
@@ -314,13 +360,31 @@ class AnalysisGraph:
 
         return builder.compile(checkpointer=self.checkpointer)
 
-    def _thread_config(self, session_id: str) -> Dict[str, Any]:
+    def _langfuse_invoke_metadata_pins(self) -> dict[str, str] | None:
+        """Pins current trace/parent IDs from the active span (caller must run under ``@observe``)."""
+        trace_id = langfuse.get_current_trace_id()
+        obs_id = langfuse.get_current_observation_id()
+        if not trace_id and not obs_id:
+            return None
+        pins: dict[str, str] = {}
+        if trace_id:
+            pins[LANGFUSE_TRACE_ID_METADATA_KEY] = str(trace_id)
+        if obs_id:
+            pins[LANGFUSE_PARENT_OBS_METADATA_KEY] = str(obs_id)
+        return pins or None
+
+    def _thread_config(self, session_id: str, *, langfuse_pin: dict[str, str] | None = None) -> Dict[str, Any]:
         """Runnable config aligned with ``run_graph`` / ``resume`` (thread + worker limits)."""
-        return {
+        out: Dict[str, Any] = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "max_concurrency": GRAPH_MAX_CONCURRENCY,
         }
+        if langfuse_pin:
+            merged = dict(out.get("metadata") or {})
+            merged.update(langfuse_pin)
+            out["metadata"] = merged
+        return out
 
     def stream_graph(
         self,
@@ -334,7 +398,8 @@ class AnalysisGraph:
         Combine with checkpoint ``get_state`` after exhaustion to reconstruct an invoke-shaped
         dict including ``__interrupt__`` when Human-in-the-loop pauses mid-turn.
         """
-        config = self._thread_config(session_id)
+        pins = self._langfuse_invoke_metadata_pins()
+        config = self._thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(
             {"messages": [HumanMessage(content=user_query)]},
             config=config,
@@ -347,7 +412,8 @@ class AnalysisGraph:
         value: Any,
     ) -> Iterator[Dict[str, Any]]:
         """Same as :meth:`stream_graph` after an ``interrupt``, using ``Command(resume=…)``."""
-        config = self._thread_config(session_id)
+        pins = self._langfuse_invoke_metadata_pins()
+        config = self._thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
 
     @observe(name="graph.run_graph", as_type="chain", capture_input=False, capture_output=False)
@@ -356,7 +422,8 @@ class AnalysisGraph:
         session_id: str,
         user_query: str,
     ) -> Dict[str, Any]:
-        config = self._thread_config(session_id)
+        pins = self._langfuse_invoke_metadata_pins()
+        config = self._thread_config(session_id, langfuse_pin=pins)
         result = self.graph.invoke({"messages": [HumanMessage(content=user_query)]}, config=config)
         langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
@@ -367,7 +434,8 @@ class AnalysisGraph:
         session_id: str,
         value: Any,
     ) -> Dict[str, Any]:
-        config = self._thread_config(session_id)
+        pins = self._langfuse_invoke_metadata_pins()
+        config = self._thread_config(session_id, langfuse_pin=pins)
         result = self.graph.invoke(Command(resume=value), config=config)
         langfuse.update_current_span(input={"session_id": session_id, "resume_value": value}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result

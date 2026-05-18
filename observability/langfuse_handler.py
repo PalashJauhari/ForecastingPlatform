@@ -3,12 +3,53 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langfuse import get_client
+from langfuse.types import TraceContext
 
 MAX_METADATA_VALUE_LEN = 200
+
+# RunnableConfig.metadata keys propagated from AnalysisGraph pins (Langfuse LangChain conventions).
+LANGFUSE_TRACE_ID_METADATA_KEY = "langfuse_trace_id"
+LANGFUSE_PARENT_OBS_METADATA_KEY = "langfuse_parent_observation_id"
+
+
+def trace_context_from_run_config(runnable_config: Any) -> TraceContext | None:
+    """
+    Recover ``TraceContext`` from ``RunnableConfig`` metadata set at graph invoke/stream entry.
+
+    Used so parallel LangGraph node threads nest under the parent trace pinned on the caller thread.
+    """
+    if not isinstance(runnable_config, Mapping):
+        return None
+    metadata = runnable_config.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    trace_id = metadata.get(LANGFUSE_TRACE_ID_METADATA_KEY)
+    if not trace_id:
+        return None
+    parent = metadata.get(LANGFUSE_PARENT_OBS_METADATA_KEY)
+    if parent:
+        return TraceContext(trace_id=str(trace_id), parent_span_id=str(parent))
+    return TraceContext(trace_id=str(trace_id))
+
+
+@contextmanager
+def observation_parented_to_run(langfuse_client: Any, runnable_config: Any, **kwargs: Any) -> Iterator[Any]:
+    """
+    ``start_as_current_observation(...)`` attaching to the pinned trace/parent span when metadata is present.
+    Keyword args mirror ``Langfuse.start_as_current_observation`` (e.g. ``name``, ``as_type``, ``input``).
+
+    Mutates ``kwargs`` only by setting ``trace_context`` when resolvable from *runnable_config*.
+    """
+    tc = trace_context_from_run_config(runnable_config)
+    if tc is not None:
+        kwargs = {**kwargs, "trace_context": tc}
+    with langfuse_client.start_as_current_observation(**kwargs) as observation:
+        yield observation
 
 
 def get_langfuse_client():
