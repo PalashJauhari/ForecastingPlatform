@@ -4,7 +4,9 @@
 See module docstring in the LangChain ``@tool`` wrapper for orchestrator-facing behavior.
 """
 
-from __future__ import annotations
+# Do NOT add ``from __future__ import annotations``. LangChain's ``@tool`` introspects the
+# ``ToolRuntime`` parameter for injection; with PEP 563 postponed evaluation the annotation
+# becomes the string ``"ToolRuntime"`` and injection is skipped → missing ``runtime`` at call time.
 
 import json
 import os
