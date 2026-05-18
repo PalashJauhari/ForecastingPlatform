@@ -730,9 +730,6 @@ def run_llm_interpretations(
 # Brief: Assemble the final JSON payload returned to the orchestrator.
 def build_response(
     *,
-    file_name: str,
-    date_column: str,
-    target_column: str,
     freq: str,
     model_spec: dict,
     fit_quality: dict,
@@ -746,9 +743,6 @@ def build_response(
     has_warnings = bool(warnings_out)
     response = {
         "status": "success_with_warnings" if has_warnings else "success",
-        "file_name": file_name,
-        "date_column": date_column,
-        "target_column": target_column,
         "frequency": freq,
         "model": model_spec,
         "fit_quality": fit_quality,
@@ -828,7 +822,16 @@ def run_sarima_pipeline(
             warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
         # 8. Pack everything into the JSON response the orchestrator will see.
-        response = build_response(file_name=file_name, date_column=date_column, target_column=target_column, freq=freq, model_spec=model_spec, fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, forecast_path=forecast_path, llm_interpretation=llm_interpretation, warnings_out=warnings_out)
+        response = build_response(
+            freq=freq,
+            model_spec=model_spec,
+            fit_quality=fit_quality,
+            residual_diagnostics=residual_diagnostics,
+            forecast_rows=forecast_rows,
+            forecast_path=forecast_path,
+            llm_interpretation=llm_interpretation,
+            warnings_out=warnings_out,
+        )
 
         # 9. Attach high-signal trace metadata for langfuse and return the JSON string.
         langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out))})
@@ -918,7 +921,7 @@ def sarima_tool(
     - Bad residual diagnostics are returned as warnings, not errors — the forecast is still produced.
 
     ## Output
-    A JSON string with: ``status``, ``file_name``, ``date_column``, ``target_column``, ``frequency``, ``model``, ``fit_quality`` (AIC/AICc/BIC/log-likelihood/converged/n_observations/n_parameters plus inline ``definitions`` for each metric), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``forecast_output_file``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. When showing results to the user, present the LLM interpretation (residual analysis + fit quality + forecast summary + improvement guidance); do not narrate file paths.
+    A JSON string with: ``status``, ``frequency``, ``model``, ``fit_quality`` (AIC/AICc/BIC/log-likelihood/converged/n_observations/n_parameters plus inline ``definitions`` for each metric), ``residual_diagnostics`` (status, Ljung-Box and Jarque-Bera p-values, residual mean/std, plain-English ``warnings``, plus inline ``definitions``), ``forecast_output_file``, ``horizon``, ``forecast_preview`` (first 12 rows), ``llm_interpretation`` (``residual_analysis``, ``fit_quality``, ``forecast_summary``, ``model_improvement_guidance`` with concrete ``possible_next_steps``), and ``warnings``. Inputs (``file_name``, ``date_column``, ``target_column``) are not echoed in the result — they appear on the tool call. When showing results to the user, present the LLM interpretation (residual analysis + fit quality + forecast summary + improvement guidance); do not narrate file paths.
     """
     return run_sarima_pipeline(
         file_name=file_name,

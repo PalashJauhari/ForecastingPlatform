@@ -385,20 +385,9 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             f"{summary}\n\n"
         )
         orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
-        with observation_parented_to_run(
-            langfuse,
-            config,
-            name="graph.Orchestrator.llm",
-            as_type="generation",
-            model=cfg["models"]["orchestrator"],
-            input=serialize_messages(orchestrator_messages),
-        ) as generation:
+        with observation_parented_to_run(langfuse, config, name="graph.Orchestrator.llm", as_type="generation", model=cfg["models"]["orchestrator"], input=serialize_messages(orchestrator_messages)) as generation:
             response = llm_with_tools.invoke(orchestrator_messages, config=config)
-            generation.update(
-                output=serialize_message(response),
-                usage_details=extract_usage_details(response),
-                metadata={"tool_calls_requested": len(getattr(response, "tool_calls", None) or [])},
-            )
+            generation.update(output=serialize_message(response), usage_details=extract_usage_details(response), metadata={"tool_calls_requested": len(getattr(response, "tool_calls", None) or [])})
 
         tool_calls = list(getattr(response, "tool_calls", None) or [])
         langfuse.update_current_span(
