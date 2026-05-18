@@ -84,8 +84,6 @@ async def summarize_evicted(
         runnable_config,
         name="context.summarize_evicted",
         as_type="chain",
-        capture_input=False,
-        capture_output=False,
     ):
         with observation_parented_to_run(
             langfuse,
@@ -118,8 +116,6 @@ async def truncate_and_summarize(
         runnable_config,
         name="context.truncate_and_summarize",
         as_type="chain",
-        capture_input=False,
-        capture_output=False,
     ):
         if estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
             langfuse.update_current_span(metadata={"token_estimate": estimate_tokens(messages), "token_threshold": token_threshold, "truncated": "false"})

@@ -2,7 +2,7 @@
 
 An analysis assistant built with a custom **LangGraph `StateGraph`**, a single **`config.yaml`** for all configuration, and a **session workspace under `agent_filesystem/<session>/`**. Tabular uploads and outputs (`.csv`, `.xlsx`) and **`pipeline_run.py`** live at the **session root** so later questions can reuse them. **Plots are produced exclusively by `code_pipeline`**: every invocation allocates a per-tool-call **`run_<tool_call_id>/`** subfolder, and **matplotlib** saves (`plt.savefig` / `Figure.savefig`) write **`.png`** / **`.svg`** only into that folder. The API discovers images for a turn by scanning the matching `run_<tool_call_id>/` folders for the tool calls in that turn and returns an explicit **`images`** list — the UI never parses tool result text to find plots. Logical paths look like **`agent_filesystem/<session>/<filename>`** for tabular files and **`agent_filesystem/<session>/run_<tool_call_id>/<plot>.png`** for plots. Before each orchestrator turn, the **`data_profile`** graph node runs **`profiling_data.profile_session_workspace`**, which fills the **`data_profile`** state field with a **list** of per-file summaries (row counts, **`head`** previews, **`column_profiles`** per-column stats, and **`numeric_summary`** where applicable). **Profiling does not write a snapshot file**—only graph state and the orchestrator’s assembled context carry the profile. There is no list/read tool on the graph.
 
-On each turn, after prep and optional message summarisation, **`IdentifySkills`** reads every skill’s **`skill.yaml`** (id, name, description) via **`skills/registry.py`**, runs one structured router LLM call, normalizes **aliases**, caps selection by **`skills.max_selected`** in **`config.yaml`**, and writes **`LoadReasoningSkills`** text (from **`approach.md`**) into orchestrator context; **`active_skills`** is stored so **`code_pipeline`** can load matching **`patterns.py`** snippets.
+On each user turn after prep + optional summarisation, graph nodes **`SelectPlannerSkills`** and **`SelectOrchestratorSkills`** (see `skills/loader.py`) each run a structured LLM against **`skills/registry.py`** manifests, normalize **aliases**, and cap **`skills.max_orchestrator_selected`** / **`skills.max_planner_selected`** via **`models.identify_orchestrator_skills`** / **`models.identify_planner_skills`**; **`LoadPlannerSkills`** / **`LoadReasoningSkills`** hydrate **`approach.md`**. **`active_skills`** / **`active_planner_skills`** are stored on state so **`code_pipeline`** can load matching **`patterns.py`** snippets.
 
 ---
 
@@ -11,11 +11,11 @@ On each turn, after prep and optional message summarisation, **`IdentifySkills`*
 - **Custom StateGraph agent** — orchestrator node + `ToolNode` (parallel tool calling), no `create_agent` black box.
 - **YAML-driven config** — orchestrator model, code-generation model, judge model, summarisation model, and middleware thresholds in `config.yaml`.
 - **OpenAI rate limiting (server-side)** — optional shared [`InMemoryRateLimiter`](https://python.langchain.com/docs/integrations/chat/openai/#rate-limiting) from `middleware/llm_rate_limit.py`, attached inside **`middleware/llm_client.make_llm`** to every `ChatOpenAI` built through that factory (orchestrator, summarisation path, codegen, optional `code_pipeline` preflight planner, judge, skill router). Tuned under `llm_rate_limit` in `config.yaml`; set `enabled: false` to disable.
-- **Six bound tools** — `code_pipeline`, `sarima_tool`, `prophet_tool`, `ask_user`, `write_scratchpad`, `write_todos`. The orchestrator uses **`make_llm`** then **`llm.bind_tools(TOOLS)`** (`graph/graph.py`); codegen paths use **`make_llm(..., output_schema=...)`** without tools.
-- **Workspace profiling (`data_profile`)** — the **`data_profile`** node runs from **START** and again after **`tools`** (`tools` → `data_profile` → `orchestrator`). It only updates the **`data_profile`** list in state (not `todos` / `scratchpad`). **`profiling_data.profile_session_workspace`** reads every top-level `.csv`/`.xlsx` directly under the session folder (basename only in each entry). Success entries include `file`, `row_count`, `head` (first five rows as dicts), `column_profiles`, and `numeric_summary`; failures are `{ "file", "error" }`. **Nothing is written to disk for profiling.** With no tabular files, **`data_profile` is `[]`**. In state it is always a **Python list**; the orchestrator passes **`json.dumps(..., indent=2)`** of that list into the **Session workspace** block of the HumanMessage for routing.
-- **Session planning in state** — `write_todos` replaces the full todo list (`content` + `status` per item); `write_scratchpad` appends a full **`note`** to state while the tool return shown in chat is a short **`summary`** (length-capped). Both merge via `Command`. The orchestrator sees **Current todo list** and **Scratchpad** as JSON each turn.
+- **Four orchestrator-bound tools** — `code_pipeline`, `sarima_tool`, `prophet_tool`, **`update_todo`**. The orchestrator uses **`make_llm`** then **`llm.bind_tools(TOOLS)`** (`graph/graph.py`); codegen paths use **`make_llm(..., output_schema=...)`** without tools. **`Planner`** replaces **`todos`** on each new user message at the prep stage; **`update_todo`** patches statuses afterward.
+- **Workspace profiling (`data_profile`)** — **ProfileSavedData** nodes run once per **prep** and again after **`RunTools`** (**ProfileSavedData_PostTools**) before **`MergeTools`** → **`Orchestrator`**. They update **`data_profile`** in state (**`profiling_data.profile_session_workspace`**).
+- **Session planning in state** — The **`Planner`** node writes **`todos`** (`id`, `content`, `status`). **`update_todo`** updates one **`status`** via **`Command`**. **`TodoCompletionGate`** blocks **`FinalAnswer`** until todos are **`completed`** or empty. **`Orchestrator`** sees todos in context JSON.
 - **Optional preflight planning inside code** — `code_pipeline` can set **`detail_execution_requirement_first: true`** to run an internal LLM planner (same model slot **`codegen_requirement`** in `config.yaml`) that reads **`data_profile`**, **`message_summary`**, **`active_skills`**, **`LoadReasoningSkills`**, and messages, then codegen follows **`detailed_requirement`**. The tool JSON includes **`codegen_requirement`** `{ detailed_requirement, dataset_paths, assumptions }` when preflight is enabled; the API forwards it to the Dash UI for display.
-- **Human-in-the-loop** — `ask_user` tool pauses the graph via `interrupt()`. The API resumes with `Command(resume=...)` when the user replies.
+- **Planner clarification** — **`interrupt()`** can pause inside the **Planner** (`phase: planner`). **`POST /resume`** continues with **`Command(resume=...)`**.
 - **Running summarisation** — when the conversation exceeds a configurable token threshold, older messages are summarised into a running summary and truncated (via `RemoveMessage`), keeping the context window manageable.
 - **Session-scoped storage** — logical paths and disk paths share the same tree under `./agent_filesystem/<session>/...` (resolved from the repo root), with **`run_<tool_call_id>/`** subfolders allocated per `code_pipeline` invocation for plot artifacts only.
 - **Graph execution cap** — LangGraph’s `recursion_limit` in `config.yaml` bounds how many super-steps a single `/run` or `/resume` call can take, which is the main protection against runaway tool loops.
@@ -28,9 +28,9 @@ On each turn, after prep and optional message summarisation, **`IdentifySkills`*
   - **Sanitized subprocess environment** — the child process that runs generated code receives a **filtered** copy of the parent’s environment: `OPENAI_API_KEY`, all `LANGFUSE_*` variables, and other listed provider credentials are **removed** before `subprocess.run` (see `_env_for_sandbox_subprocess` in `code_pipeline.py`). The API process still has the full env for real LLM calls; the sandbox script cannot read those secrets via `os.environ`, in addition to Semgrep rules that discourage env access in source.
 - **Parent timeout** — `code_pipeline` uses `subprocess.run(..., timeout=...)` from `config.yaml` (wall-clock kill of the child process).
 - **Skills** (`skills/`) — Just-in-time expertise:
-  - **`IdentifySkills`** (`skills/loader.py`) — one structured LLM call per turn; uses the **`skill.yaml`** catalog (not raw folder names only), the post-truncation message window, and **`data_profile`**; honors **`skills.max_selected`** and **alias** resolution for merged skills (e.g. `data_integrity` → `data-grain-and-integrity`).
-  - **`LoadReasoningSkills`** — concatenates each selected skill’s **`approach.md`** in full (no token cap).
-  - **`LoadPatternSkills`** — used inside **`code_pipeline`**; appends any **`patterns.py`** from the same **`active_skills`** list into the codegen user payload (skills without that file contribute nothing there).
+  - **`SelectPlannerSkills` / `SelectOrchestratorSkills`** (`skills/loader.py`) — two structured router calls (**`skills.max_*`** caps; **`skills.registry`** for catalogs + **`path_for_*_skill`**).
+  - **`LoadReasoningSkills`** / **`LoadPlannerSkills`** — **`approach.md`** hydration.
+  - **`LoadPatternSkills`** — inside **`code_pipeline`** codegen from **`patterns.py`**.
 
 - **Sessions** — `thread_id = session_id`. Checkpoints use `InMemorySaver` by default, or Postgres when `checkpointer.use_neon: true` and `DATABASE_URL` is set (e.g. Neon; survives API restarts).
 - **Observability** — optional **Langfuse** tracing: graph nodes and tools use `@observe` / nested spans; **`api/main.py`** wraps **`POST /run`** and **`POST /resume`** in **`propagate_attributes(...)`** so `session_id`, tags, and small request metadata attach to traces. **`observability/langfuse_handler.get_langfuse_client()`** uses the Langfuse SDK; if you set **`LANGFUSE_BASE_URL`** but not **`LANGFUSE_HOST`**, the client copies it into **`LANGFUSE_HOST`** for compatibility.
@@ -38,9 +38,11 @@ On each turn, after prep and optional message summarisation, **`IdentifySkills`*
 ## Graph architecture
 
 ```
-START → data_profile → orchestrator → [has tool calls?]
-                                                                        ├─ YES → ToolNode → data_profile → orchestrator (loop)
-                                                                        └─ NO  → END
+START → BeginTurn → ProfileSavedData → SummariseConversationalSummary
+     → MergePrep → SelectPlannerSkills → Planner → SelectOrchestratorSkills → Orchestrator
+     → [RunTools ‖ TodoCompletionGate → Orchestrator | FinalAnswer → END]
+
+RunTools → ProfileSavedData_PostTools → MergeTools → Orchestrator
 ```
 
 **State schema** (`graph/graph.py` — `AgentState`):
@@ -49,10 +51,12 @@ START → data_profile → orchestrator → [has tool calls?]
 |-----|------|---------|
 | `messages` | `Annotated[list, add_messages]` | Full conversation — `HumanMessage`, `AIMessage`, `ToolMessage`. Supports `RemoveMessage` for truncation. |
 | `message_summary` | `str` | Running summary of evicted messages. |
-| `data_profile` | `list` | Replaced every time the **`data_profile`** graph node runs. If the value is not a list (corrupt state), the orchestrator treats it as **`[]`**. Rendered for the LLM via **`json.dumps`** in the **Session workspace** block. |
-| `todos` | `list[dict]` | Optional. Each item: `content` (str), `status` (`pending` \| `in_progress` \| `completed`). Replaced entirely on each `write_todos` call. |
-| `scratchpad` | `Annotated[list[str], operator.add]` | Session notes, oldest→newest. Each `write_scratchpad` call supplies `[note]`; `operator.add` concatenates lists (list `+`). |
-| `active_skills` | `list[str]` | Skill folder ids chosen on the latest orchestrator step (`IdentifySkills`). Exposed to **`code_pipeline`** (pattern snippets and optional preflight planning) so routing stays aligned. |
+| `data_profile` | `list` | Refreshed by **`ProfileSavedData`** (prep) and **`ProfileSavedData_PostTools`** (after **`RunTools`**). Rendered in the **Session workspace** block. |
+| `todos` | `list[dict]` | Optional. Each item: **`id`**, **`content`**, **`status`**. **Planner** replaces the full list on each new user message; **`update_todo`** patches one **`status`**. |
+| `active_skills` | `list[str]` | Orchestrator skill ids (**`SelectOrchestratorSkills`**). |
+| `active_planner_skills` | `list[str]` | Planner skill ids (**`SelectPlannerSkills`**). |
+| `planner_skill_guidance` | `str` (optional) | Planner **`approach.md`** (**`SelectPlannerSkills`**). |
+| `skill_guidance` | `str` (optional) | Orchestrator **`approach.md`** (**`SelectOrchestratorSkills`**). |
 
 ---
 
@@ -67,11 +71,10 @@ agent_filesystem/                          # Runtime data (gitignored); one fold
 graph/
   graph.py                                   # StateGraph, AnalysisGraph
   __init__.py
-skills/                                      # One folder per skill id (hyphenated names on disk)
-  loader.py / registry.py                    # IdentifySkills, manifests, LoadReasoningSkills, LoadPatternSkills (Langfuse‑traced)
-  data-processing/  data-readiness/  data-grain-and-integrity/  evaluation-design/
-  feature-engineering/  forecasting/  interpretation/
-  problem-framing/  visualization/           # each: approach.md; forecasting/ + visualization/ also ship patterns.py
+skills/                                      # Skills library
+  orchestrator_skills/                       # Execution-time playbooks (forecasting, …)
+  planner_skills/                            # Planning / decomposition playbooks
+  loader.py / registry.py                    # skill picks, manifests, path resolution (Langfuse‑traced)
 middleware/
   llm_client.py                              # make_llm(...) — shared ChatOpenAI + rate_limiter + optional structured output
   context_editing.py                         # Truncate messages at safe turn boundaries
@@ -80,10 +83,10 @@ middleware/
   __init__.py
 tools/
   human_in_loop/
-    ask_user.py                              # Tool — interrupt-based clarifying question
+    ask_user.py                              # Not bound on orchestrator (legacy / future use)
   planning/
-    write_scratchpad.py                      # Write note → state scratchpad (append); ToolMessage uses summary
-    write_todos.py                           # Replace session todo list
+    update_todo.py                           # Patch one todo status by id
+    write_todos.py                           # Legacy full-list tool (not bound on orchestrator)
   coding_tools/
     code_pipeline_preflight.py              # Internal preflight LLM (optional first stage of code_pipeline)
     code_pipeline.py                         # Optional preflight → codegen → Semgrep → judge → save → run
@@ -97,6 +100,7 @@ tools/
     profiling_data.py                        # profile_session_workspace (graph profiling → data_profile)
 prompts/
   graph_prompts.py                           # Orchestrator SYSTEM_PROMPT
+  planner_prompt.py                          # Planner SYSTEM_PROMPT (structured plan / clarification)
   build_codegen_requirement_prompt.py        # Preflight planner system prompt (used inside code_pipeline)
   skill_identification_prompt.py             # Router persona and selection rules
   code_generation_prompt.py                  # Codegen system prompt
@@ -105,8 +109,7 @@ output_validation/
   build_codegen_requirement.py               # Pydantic: CodegenPreflightOutput (structured preflight JSON)
   code_generation.py                         # Pydantic: code generation
   judge_output.py                            # Pydantic: LLM judge
-  skill_selection.py                         # Pydantic: skill router (selected_skills)
-  scratchpad.py                              # Pydantic args for ``write_scratchpad``
+  skill_selection.py                         # Pydantic: OrchestratorSkillPick, PlannerSkillPick
   write_todos.py                             # Pydantic models for ``write_todos`` tool args
 api/
   main.py                                    # POST /run, /resume, /upload-data; GET /artifact/… for plots & files
@@ -130,7 +133,7 @@ observability/
 | `OPENAI_RATE_LIMITER` | `middleware/llm_rate_limit.py` | Optional `InMemoryRateLimiter` from `config.yaml`; consumed by `make_llm` (not wired on ad‑hoc clients that bypass the factory). |
 | — | `code_pipeline` (tool) | Codegen → Semgrep → LLM judge → save → `run_pipeline_sandboxed.py` execution. |
 
-**Graph nodes (non-middleware):** `data_profile`, `orchestrator`, `tools`.
+**Graph nodes (non-middleware):** `BeginTurn`, `ProfileSavedData`, `SummariseConversationalSummary`, `MergePrep`, `SelectPlannerSkills`, `Planner`, `SelectOrchestratorSkills`, `Orchestrator`, `RunTools`, `ProfileSavedData_PostTools`, `MergeTools`, `TodoCompletionGate`, `FinalAnswer`.
 
 ---
 
@@ -141,9 +144,7 @@ observability/
 | **code_pipeline** | `task`, optional `data_profile`, `previous_code_violation`, **`detail_execution_requirement_first`** | When **`detail_execution_requirement_first`** is **`true`**, runs internal preflight (reads graph state via `ToolRuntime`), then codegen uses **`detailed_requirement`**; **`codegen_requirement`** appears in JSON. When **`false`**, codegen follows **`task`** directly. **`data_profile`** string is optional extra hints. Injects **`LoadPatternSkills(active_skills)`** into codegen. Pipeline: structured codegen → Semgrep → LLM judge → `pipeline_run.py` → `run_pipeline_sandboxed.py` (session + **`run_<tool_call_id>/`**). **Only image-producing tool**; API exposes plots via **`images`**. Tool JSON: **`code_generation`**, **`execution`**, **`plots`**, **`codegen_requirement`** (object or **`null`**). Retry with **`previous_code_violation`** from **`code_safety_evaluation.detail`**. Older checkpoints may still reference the removed **`build_codegen_requirement`** tool name. |
 | **sarima_tool** | `file_name`, `date_column`, `target_column`, `horizon`, `seasonal_period`, `forecast_output_file`, optional `use_auto_arima` / `order` / `seasonal_order` | Deterministic ARIMA/SARIMA pipeline on a session CSV/XLSX: validate → time index → order selection (manual or **`pmdarima.auto_arima`** by AICc) → SARIMAX fit → residual diagnostics (Ljung-Box, Jarque-Bera) → forecast with 95% prediction intervals → save table at session root → four structured LLM interpretations (**`residual_analysis`**, **`fit_quality`**, **`forecast_summary`**, **`model_improvement_guidance`**). **Does not generate images** — follow up with `code_pipeline` if a chart is needed. Hard input/data errors (missing file, missing columns, non-regular spacing, missing/constant target) return a clean error JSON; bad residual diagnostics surface as warnings, not errors. **`fit_quality`** and **`residual_diagnostics`** include inline **`definitions`** so the orchestrator/LLM never has to guess what each metric means. |
 | **prophet_tool** | `file_name`, `date_column`, `target_column`, `horizon`, `changepoint_prior_scale`, `seasonality_mode`, `weekly_seasonality`, `monthly_seasonality`, `yearly_seasonality`, `forecast_output_file`, `fitted_output_file`, `decomposition_output_file` | Deterministic univariate Prophet pipeline on a session CSV/XLSX: validate → rename to **`ds`**/**`y`** → infer freq → fit Prophet (caller-controlled `changepoint_prior_scale`, `seasonality_mode`, weekly/monthly/yearly flags; fixed `changepoint_range=0.8`, `seasonality_prior_scale=10.0`, `monthly_fourier_order=5`) → fit quality (MAE/RMSE/SMAPE) + MAD-based residual outlier diagnostics (`median ± 3 * robust_sigma`) + changepoint summary → save **forecast** (future + components), **fitted** (actual + fitted + residual + components), and **decomposition** (combined fitted+forecast components) tables at session root → five structured LLM interpretations (**`residual_analysis`**, **`fit_quality`**, **`forecast_summary`**, **`component_analysis`**, **`model_improvement_guidance`**). **Does not generate images** — follow up with `code_pipeline` if a chart is needed. Hard input/data errors return a clean error JSON; residual outliers surface as warnings, not errors. **`fit_quality`** and **`residual_diagnostics`** include inline **`definitions`**. |
-| **ask_user** | `question` | Pauses the graph via `interrupt()` and surfaces a clarifying question to the user. Must be the only tool call in the step. |
-| **write_scratchpad** | `note`, `summary` | Appends `note` via `Command`; `summary` is the `ToolMessage` (≤2 lines, ≤400 chars). Full entries are JSON in **Scratchpad** each turn. |
-| **write_todos** | `todos` | Replaces the session todo list via `Command`. `ToolMessage` confirms count only; full list is in state and in **Current todo list** JSON each turn (`[]` if empty). |
+| **update_todo** | `todo_id`, `status` | Patches one todo’s **`status`** by **`id`**; required bookkeeping before finishing when todos exist. |
 
 ---
 

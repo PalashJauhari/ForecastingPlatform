@@ -11,8 +11,8 @@ Endpoints
                                               from the session workspace; read-only, sandbox-checked.
 
 SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
-``{"type":"node",...}`` — one LangGraph ``updates`` step (parallel prep yields multiple frames;
-order across ``ProfileSavedData`` / ``DescribePlots`` / ``SummariseConversationalSummary`` is nondeterministic).
+``{"type":"node",...}`` — one LangGraph ``updates`` step per finished node (serial prep:
+``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``MergePrep``, …).
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
@@ -44,7 +44,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from graph import AnalysisGraph
-from observability.langfuse_handler import build_request_metadata, get_langfuse_client
+from observability.langfuse_handler import (
+    build_request_metadata,
+    get_langfuse_client,
+    sse_stream_runnable_langfuse_pin,
+)
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,
@@ -63,12 +67,7 @@ ARTIFACT_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".png", ".svg"}
 # Kept tight: only the formats ``code_pipeline``'s plot patches actually emit.
 IMAGE_EXTENSIONS = {".png", ".svg"}
 
-# ``code_pipeline`` and tool ``content`` payloads can dominate SSE frames; previews only.
-_SSE_TOOL_ARGS_MAX_CHARS = 800
-_SSE_TOOL_RESULT_MAX_CHARS = 1200
-
 _SSE_HEADERS = {
-    "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
 
@@ -76,7 +75,7 @@ app = FastAPI(
     title="GaussianBlurr — Forecasting Platform",
     description=(
         "HTTP API for the GaussianBlurr forecasting agent. Send natural-language tasks; the agent "
-        "reads workspace data, may ask clarifying questions (interrupt / resume), and can generate "
+        "reads workspace data, may pause for **Planner** clarification (interrupt / resume), and can generate "
         "and run analysis code under guardrails. Upload CSV or Excel into the session input area first when needed."
     ),
 )
@@ -310,24 +309,41 @@ def _truncate_sse_preview(raw: Any, limit: int) -> str:
 
 
 def _sanitize_tool_calls_for_sse(tool_calls: list[Any]) -> list[dict[str, Any]]:
-    """
-    Project LangChain ``tool_calls`` into JSON-safe previews (heavy ``code_pipeline`` args trimmed).
-
-    OpenAI-compatible dicts expose ``arguments`` strings; LangChain maps some providers to parsed ``args`` dicts.
-    """
+    """Project tool calls to names only (UI progress shows tool names, not arguments)."""
     out: list[dict[str, Any]] = []
     for tc in tool_calls or []:
         if isinstance(tc, dict):
             name = tc.get("name")
-            tc_id = tc.get("id")
-            args = tc.get("args") if tc.get("args") is not None else tc.get("arguments")
         else:
             name = getattr(tc, "name", None)
-            tc_id = getattr(tc, "id", None)
-            args = getattr(tc, "args", None)
-        preview = _truncate_sse_preview(args, _SSE_TOOL_ARGS_MAX_CHARS)
-        out.append({"name": name, "id": tc_id, "args_preview": preview})
+        out.append({"name": name})
     return out
+
+
+_MAX_SSE_TODOS = 50
+_MAX_SSE_TODO_CONTENT = 400
+
+
+def _normalize_todos_for_sse(todos_raw: Any) -> tuple[list[dict[str, Any]], int]:
+    """Project graph todo rows into SSE-safe dicts (``content``, ``status``, optional ``id``)."""
+    if not isinstance(todos_raw, list):
+        return [], 0
+    normalized: list[dict[str, Any]] = []
+    for item in todos_raw[:_MAX_SSE_TODOS]:
+        if not isinstance(item, dict):
+            continue
+        ct = item.get("content")
+        st = item.get("status")
+        if ct is None and st is None:
+            continue
+        content_s = _truncate_sse_preview(ct if ct is not None else "", _MAX_SSE_TODO_CONTENT)
+        status_s = _truncate_sse_preview(st if st is not None else "", 64)
+        row: dict[str, Any] = {"content": content_s, "status": status_s}
+        tid = item.get("id")
+        if tid is not None:
+            row["id"] = _truncate_sse_preview(str(tid), 128)
+        normalized.append(row)
+    return normalized, len(normalized)
 
 
 def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
@@ -345,6 +361,14 @@ def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
     return merged
 
 
+# Omitted from SSE / UI progress (noisy join / bookkeeping nodes).
+_SSE_SKIP_PROGRESS_NODES = frozenset({
+    "MergePrep",
+    "MergeTools",
+    "ProfileSavedData_PostTools",
+})
+
+
 def stream_events_from_langgraph_chunk(session_id: str, update: Any) -> Iterator[Dict[str, Any]]:
     """Expand one ``graph.stream(..., stream_mode=\"updates\")`` chunk into SSE-ready payloads."""
 
@@ -356,6 +380,8 @@ def stream_events_from_langgraph_chunk(session_id: str, update: Any) -> Iterator
     items = list(update.items())
     items.sort(key=lambda kv: kv[0])
     for node_name, payload in items:
+        if node_name in _SSE_SKIP_PROGRESS_NODES:
+            continue
         yield stream_event_single_node(session_id, node_name, payload)
 
 
@@ -375,11 +401,13 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         first = interrupt_tuple[0] if interrupt_tuple else None
         value = getattr(first, "value", None) if first is not None else None
         question_preview = ""
+        event["label"] = "Awaiting human input"
         if isinstance(value, dict):
             question_preview = str(value.get("question", value))
+            if value.get("phase") == "planner":
+                event["label"] = "Planning clarification"
         elif value is not None:
             question_preview = str(value)
-        event["label"] = "Awaiting human input"
         event["interrupt_preview"] = _truncate_sse_preview(question_preview or "(interrupt)", 400)
         return event
 
@@ -407,39 +435,47 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
                 previews.append(
                     {
                         "name": getattr(msg, "name", None) or "tool",
-                        "tool_call_id": getattr(msg, "tool_call_id", None),
-                        "content_preview": _truncate_sse_preview(msg.content, _SSE_TOOL_RESULT_MAX_CHARS),
                     }
                 )
         event["tool_results"] = previews
-        todos_raw = payload.get("todos")
-        normalized_todos: list[dict[str, Any]] = []
-        if isinstance(todos_raw, list):
-            _max_td = 50
-            _max_content = 400
-            for item in todos_raw[:_max_td]:
-                if not isinstance(item, dict):
-                    continue
-                ct = item.get("content")
-                st = item.get("status")
-                if ct is None and st is None:
-                    continue
-                content_s = _truncate_sse_preview(ct if ct is not None else "", _max_content)
-                status_s = _truncate_sse_preview(st if st is not None else "", 64)
-                normalized_todos.append({"content": content_s, "status": status_s})
-            if normalized_todos:
-                event["todos"] = normalized_todos
-                event["todo_count"] = len(normalized_todos)
+        norm, n = _normalize_todos_for_sse(payload.get("todos"))
+        if norm:
+            event["todos"] = norm
+            event["todo_count"] = n
 
-    elif node_name == "IdentifySkills":
+    elif node_name == "Planner":
+        event["label"] = "Plan session todos"
+        norm, n = _normalize_todos_for_sse(payload.get("todos"))
+        if norm:
+            event["todos"] = norm
+            event["todo_count"] = n
+
+    elif node_name == "SelectPlannerSkills":
+        planner_skills = payload.get("active_planner_skills") or []
+        event["label"] = "Planner skills selected"
+        event["active_planner_skills"] = planner_skills
+        event["active_planner_skill_count"] = len(planner_skills)
+
+    elif node_name == "SelectOrchestratorSkills":
         skills = payload.get("active_skills") or []
-        event["label"] = "Expert skills routed"
+        event["label"] = "Orchestrator skills selected"
         event["active_skills"] = skills
         event["active_skill_count"] = len(skills)
+
+    elif node_name == "MergePrep":
+        event["label"] = "Parallel prep joined"
+
+    elif node_name == "MergeTools":
+        event["label"] = "Post-tool profile joined"
 
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []
         event["label"] = "Profiling workspace inputs"
+        event["profile_entries"] = len(rows)
+
+    elif node_name == "ProfileSavedData_PostTools":
+        rows = payload.get("data_profile") or []
+        event["label"] = "Re-profile after tools"
         event["profile_entries"] = len(rows)
 
     elif node_name == "SummariseConversationalSummary":
@@ -450,9 +486,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         event["label"] = "Rolling context compaction"
         if preview:
             event["summary_preview"] = preview + ("…" if len(summary.strip()) > 120 else "")
-
-    elif node_name == "DescribePlots":
-        event["label"] = "Describe plots (stub)"
 
     elif node_name == "BeginTurn":
         event["label"] = "Turn boundary"
@@ -488,6 +521,32 @@ def sse_event_lines_for_turn(
         yield _sse(terminal)
     except Exception as exc:
         yield _sse({"type": "error", "session_id": session_id, "error": str(exc)})
+
+
+def _sse_bytes_stream_run(
+    analysis: AnalysisGraph,
+    session_id: str,
+    query: str,
+    langfuse_pin: dict[str, str],
+) -> Iterator[bytes]:
+    yield from sse_event_lines_for_turn(
+        analysis,
+        session_id,
+        analysis.stream_graph(session_id, query, langfuse_pin=langfuse_pin),
+    )
+
+
+def _sse_bytes_stream_resume(
+    analysis: AnalysisGraph,
+    session_id: str,
+    resume_value: str,
+    langfuse_pin: dict[str, str],
+) -> Iterator[bytes]:
+    yield from sse_event_lines_for_turn(
+        analysis,
+        session_id,
+        analysis.stream_resume(session_id, resume_value, langfuse_pin=langfuse_pin),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +599,7 @@ async def resume(
     session_id: str = Form("default"),
 ):
     """
-    Resume a paused agent after an ``ask_user`` interrupt.
+    Resume a paused agent after an **interrupt** (e.g. **Planner** clarification).
 
     Form fields
         resume_value — the user's answer to the clarifying question.
@@ -565,7 +624,6 @@ async def resume(
 
 
 @app.post("/run/stream")
-@observe(name="api.run_stream", as_type="chain", capture_output=False)
 async def run_stream(request_body: StreamRunRequest) -> StreamingResponse:
     """
     SSE mirror of ``POST /run``: JSON body with ``session_id`` + ``query``.
@@ -576,18 +634,15 @@ async def run_stream(request_body: StreamRunRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     query = request_body.query
-    with propagate_attributes(session_id=sid, tags=["api", "run_stream"], metadata=build_request_metadata(endpoint="/run/stream", interface="fastapi", query=query)):
-        stream_bytes = sse_event_lines_for_turn(
-            analysis_graph,
-            sid,
-            analysis_graph.stream_graph(sid, query),
-        )
-        langfuse.update_current_span(metadata={"session_id": sid, "streaming": True})
-        return StreamingResponse(stream_bytes, media_type="text/event-stream", headers=_SSE_HEADERS)
+    pin = sse_stream_runnable_langfuse_pin()
+    return StreamingResponse(
+        _sse_bytes_stream_run(analysis_graph, sid, query, pin),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 @app.post("/resume/stream")
-@observe(name="api.resume_stream", as_type="chain", capture_output=False)
 async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
     """
     SSE mirror of ``POST /resume``: JSON body with ``session_id`` + ``resume_value``.
@@ -595,14 +650,12 @@ async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     rv = request_body.resume_value
-    with propagate_attributes(session_id=sid, tags=["api", "resume_stream"], metadata=build_request_metadata(endpoint="/resume/stream", interface="fastapi", query=rv)):
-        stream_bytes = sse_event_lines_for_turn(
-            analysis_graph,
-            sid,
-            analysis_graph.stream_resume(sid, rv),
-        )
-        langfuse.update_current_span(metadata={"session_id": sid, "streaming": True, "resume": True})
-        return StreamingResponse(stream_bytes, media_type="text/event-stream", headers=_SSE_HEADERS)
+    pin = sse_stream_runnable_langfuse_pin()
+    return StreamingResponse(
+        _sse_bytes_stream_resume(analysis_graph, sid, rv, pin),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 @app.post("/upload-data")

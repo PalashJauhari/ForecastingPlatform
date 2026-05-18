@@ -1,17 +1,19 @@
 """
-LangGraph entrypoint for the data-analysis agent: parallel prep, skills, orchestrator, tools, checkpointing.
+LangGraph entrypoint for the data-analysis agent: serial prep, skill nodes, Planner,
+Orchestrator, tools, todo gate, checkpointing.
 
-Flow on each turn (and after **RunTools**): **BeginTurn** → parallel **ProfileSavedData**,
-**DescribePlots**, **SummariseConversationalSummary** → **IdentifySkills** → **Orchestrator** →
-(**RunTools** | **FinalAnswer** → END). Tool execution loops back to **BeginTurn**.
-Code execution goes through ``code_pipeline`` (optional preflight, codegen, Semgrep, judge, run).
+Prep path: **BeginTurn** → **ProfileSavedData** → **SummariseConversationalSummary**
+→ **MergePrep** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**
+→ (**RunTools** | **TodoCompletionGate** → … | **FinalAnswer** → END).
+
+After **RunTools**: **ProfileSavedData_PostTools** → **MergeTools** → **Orchestrator**
+(resume with existing ``skill_guidance`` / ``active_skills`` from prep).
 """
 
 from __future__ import annotations
 import asyncio
 import json
 import os
-from operator import add
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterator, List, Literal
 
@@ -30,7 +32,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 from psycopg import Connection
 from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
@@ -47,15 +50,24 @@ from observability.langfuse_handler import (
     serialize_messages,
 )
 from prompts.graph_prompts import SYSTEM_PROMPT
+from prompts.planner_prompt import PLANNER_SYSTEM_PROMPT
 from session_paths import session_id_from_config
-from tools.human_in_loop.ask_user import ask_user
 from tools.coding_tools.code_pipeline import code_pipeline
 from tools.file_management_tools.profiling_data import profile_session_workspace
 from tools.forecasting.prophet_tool import prophet_tool
 from tools.forecasting.sarima_tool import sarima_tool
-from tools.planning.write_scratchpad import write_scratchpad
-from tools.planning.write_todos import write_todos
-from skills.loader import LoadReasoningSkills, IdentifySkills as route_skills_llm
+from output_validation.planner_output import (
+    NeedsPlanningClarification,
+    PlanReady,
+    PlannerStructuredResponse,
+)
+from tools.planning.update_todo import update_todo
+from skills.loader import (
+    LoadPlannerSkills,
+    LoadReasoningSkills,
+    invoke_orchestrator_skill_pick,
+    invoke_planner_skill_pick,
+)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -70,10 +82,15 @@ _USE_NEON = bool((cfg.get("checkpointer") or {}).get("use_neon"))
 GRAPH_RECURSION_LIMIT = int((cfg.get("graph") or {}).get("recursion_limit", 100))
 GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
 
+_m = cfg["models"]
+PLANNER_MODEL = _m.get("planner") or _m["orchestrator"]
+TODO_GATE_MODEL = _m.get("todo_completion_gate") or _m["orchestrator"]
+
 
 class TodoEntry(TypedDict):
-    """Single item in ``AgentState["todos"]`` (mirrors ``output_validation.write_todos``)."""
+    """Single item in ``AgentState["todos"]``."""
 
+    id: str
     content: str
     status: Literal["pending", "in_progress", "completed"]
 
@@ -95,20 +112,31 @@ class AgentState(TypedDict):
                                summarisation cycles (node ``SummariseConversationalSummary``).
         data_profile         — list of per-file profiling dicts from
                                ``profiling_data.profile_session_workspace`` (node ``ProfileSavedData``).
-        skill_guidance       — concatenated ``approach.md`` text from ``LoadReasoningSkills`` (node ``IdentifySkills``).
-        plot_descriptions    — reserved for node ``DescribePlots`` (e.g. plot captions); optional.
-        todos                — session task list maintained via ``write_todos`` (full replace each call).
-        scratchpad           — session notes; ``write_scratchpad`` sends ``[note]`` and ``operator.add`` concatenates lists.
-        active_skills        — skill folder ids chosen on the latest ``IdentifySkills`` step.
+        skill_guidance       — concatenated ``approach.md`` from orchestrator skills (node ``SelectOrchestratorSkills``).
+        planner_skill_guidance — concatenated planner ``approach.md`` text (node ``SelectPlannerSkills``).
+        todos                — session task list; **Planner** replaces on each new user turn; **update_todo** patches.
+        active_skills        — orchestrator skill ids from ``SelectOrchestratorSkills``.
+        active_planner_skills — planner skill ids from ``SelectPlannerSkills``.
     """
     messages: Annotated[list, add_messages]
     message_summary: str
     data_profile: List[Any]
     skill_guidance: NotRequired[str]
-    plot_descriptions: NotRequired[List[str]]
+    planner_skill_guidance: NotRequired[str]
     todos: NotRequired[list[TodoEntry]]
-    scratchpad: Annotated[list[str], add]
     active_skills: List[str]
+    active_planner_skills: List[str]
+
+
+class TodoGateMessage(BaseModel):
+    """Structured nudge when the todo list is not fully complete."""
+
+    content: str = Field(
+        description=(
+            "Full markdown HumanMessage body: incomplete todos, urgency to finish via tools "
+            "and update_todo until completed."
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,13 +147,21 @@ TOOLS = [
     code_pipeline,
     sarima_tool,
     prophet_tool,
-    ask_user,
-    write_scratchpad,
-    write_todos,
+    update_todo,
 ]
 
 llm = make_llm(model=cfg["models"]["orchestrator"], temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
+planner_llm = make_llm(
+    model=PLANNER_MODEL,
+    temperature=0,
+    output_schema=PlannerStructuredResponse,
+)
+todo_gate_llm = make_llm(
+    model=TODO_GATE_MODEL,
+    temperature=0,
+    output_schema=TodoGateMessage,
+)
 langfuse = get_langfuse_client()
 
 # ---------------------------------------------------------------------------
@@ -134,7 +170,7 @@ langfuse = get_langfuse_client()
 
 
 def begin_turn(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Fan-out anchor for parallel prep; trace only."""
+    """Turn entry hook; trace only."""
     with observation_parented_to_run(langfuse, config, name="graph.BeginTurn", as_type="span") as obs:
         obs.update(metadata={})
     return {}
@@ -151,11 +187,29 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
         return {"data_profile": rows}
 
 
-def describe_plots(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Stub for future plot / artifact descriptions into state."""
-    with observation_parented_to_run(langfuse, config, name="graph.DescribePlots", as_type="span") as obs:
+def merge_prep(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Noop between serial prep and planner skill selection (trace only)."""
+    with observation_parented_to_run(langfuse, config, name="graph.MergePrep", as_type="span") as obs:
         obs.update(metadata={})
     return {}
+
+
+def merge_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Noop after serial post-tool profiling (trace only)."""
+    with observation_parented_to_run(langfuse, config, name="graph.MergeTools", as_type="span") as obs:
+        obs.update(metadata={})
+    return {}
+
+
+def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Re-profile workspace after ``RunTools`` (same handler as ``ProfileSavedData``)."""
+    session_id = session_id_from_config(config)
+    with observation_parented_to_run(
+        langfuse, config, name="graph.ProfileSavedData_PostTools", as_type="span"
+    ) as obs:
+        rows: List[Any] = profile_session_workspace(session_id)
+        obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
+        return {"data_profile": rows}
 
 
 def summarise_conversational_summary(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -177,8 +231,6 @@ def summarise_conversational_summary(state: AgentState, config: RunnableConfig) 
         config,
         name="graph.SummariseConversationalSummary",
         as_type="chain",
-        capture_input=False,
-        capture_output=False,
     ):
         try:
             asyncio.get_running_loop()
@@ -192,21 +244,129 @@ def summarise_conversational_summary(state: AgentState, config: RunnableConfig) 
         return {"message_summary": summary, "messages": remove_ops}
 
 
-def identify_skills_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Route to skill folders and load reasoning text for orchestrator context."""
+def select_planner_skills_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """LLM picker + ``approach.md`` for planner skill ids."""
     with observation_parented_to_run(
         langfuse,
         config,
-        name="graph.IdentifySkills",
-        capture_input=False,
-        capture_output=False,
+        name="graph.SelectPlannerSkills",
         as_type="chain",
     ):
         messages = state["messages"]
         data_profile_rows = state.get("data_profile") or []
-        active_skills = route_skills_llm(messages, data_profile_rows)
-        skill_guidance = LoadReasoningSkills(active_skills)
-        return {"active_skills": active_skills, "skill_guidance": skill_guidance}
+        ids = invoke_planner_skill_pick(messages, data_profile_rows)
+        planner_skill_guidance = LoadPlannerSkills(ids)
+        return {"active_planner_skills": ids, "planner_skill_guidance": planner_skill_guidance}
+
+
+def select_orchestrator_skills_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """LLM picker + ``approach.md`` for orchestrator skill ids."""
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.SelectOrchestratorSkills",
+        as_type="chain",
+    ):
+        messages = state["messages"]
+        data_profile_rows = state.get("data_profile") or []
+        ids = invoke_orchestrator_skill_pick(messages, data_profile_rows)
+        skill_guidance = LoadReasoningSkills(ids)
+        return {"active_skills": ids, "skill_guidance": skill_guidance}
+
+
+def _ensure_unique_todo_ids(rows: List[dict[str, Any]]) -> List[dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        tid = str(row.get("id", "")).strip() or f"todo-{i + 1}"
+        base = tid
+        n = 2
+        while tid in seen:
+            tid = f"{base}-{n}"
+            n += 1
+        seen.add(tid)
+        out.append(
+            {
+                "id": tid,
+                "content": row["content"],
+                "status": row["status"],
+            }
+        )
+    return out
+
+
+def planner_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Structured plan or clarification interrupt; replaces ``todos`` on ``PlanReady``."""
+    messages = state["messages"]
+    summary = state.get("message_summary", "")
+    data_profile_rows = state.get("data_profile", [])
+    planner_guidance = state.get("planner_skill_guidance") or ""
+
+    clarification_extra = ""
+
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.Planner",
+        as_type="chain",
+    ):
+        while True:
+            human_payload = (
+                "## Session workspace (data_profile)\n"
+                f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
+                "### Planner skill guidance\n"
+                f"{planner_guidance or '(none)'}\n\n"
+                "## Conversation summary\n"
+                f"{summary or '(none)'}\n"
+                f"{clarification_extra}\n"
+                "## Instruction\n"
+                "Produce `plan_ready` with todos **for this user turn** (new ids), or `needs_planning_clarification`."
+            )
+            planner_messages = [
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=human_payload),
+                *messages,
+            ]
+            with observation_parented_to_run(
+                langfuse,
+                config,
+                name="graph.Planner.llm",
+                as_type="generation",
+                model=PLANNER_MODEL,
+                input=serialize_messages(planner_messages),
+            ) as generation:
+                step_raw = planner_llm.invoke(planner_messages, config=config)
+                if isinstance(step_raw, PlannerStructuredResponse):
+                    step_out: PlanReady | NeedsPlanningClarification = step_raw.to_step()
+                elif isinstance(step_raw, dict):
+                    step_out = PlannerStructuredResponse.model_validate(step_raw).to_step()
+                elif isinstance(step_raw, NeedsPlanningClarification):
+                    step_out = step_raw
+                elif isinstance(step_raw, PlanReady):
+                    step_out = step_raw
+                else:
+                    raise TypeError(f"Unexpected planner output: {type(step_raw)}")
+                generation.update(
+                    output=repr(step_out),
+                    metadata={"planner_kind": getattr(step_out, "kind", type(step_out).__name__)},
+                )
+
+            if isinstance(step_out, NeedsPlanningClarification):
+                ans = interrupt({"phase": "planner", "question": step_out.question})
+                clarification_extra += (
+                    "\n## Prior clarification\n"
+                    f"Planner asked: {step_out.question}\n"
+                    f"User answered: {ans}\n"
+                )
+                continue
+
+            if isinstance(step_out, PlanReady):
+                raw_rows = [t.model_dump() for t in step_out.todos]
+                todos_out = _ensure_unique_todo_ids(raw_rows)
+                langfuse.update_current_span(metadata={"planner_todo_count": len(todos_out)})
+                return {"todos": todos_out}
+
+            raise TypeError(f"Unexpected planner output type: {type(step_out)}")
 
 
 def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -217,14 +377,11 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         langfuse,
         config,
         name="graph.Orchestrator",
-        capture_input=False,
-        capture_output=False,
         as_type="chain",
     ):
         messages = state["messages"]
         summary = state.get("message_summary", "")
         raw_todos = state.get("todos") or []
-        raw_pad = state.get("scratchpad") or []
         data_profile_rows = state.get("data_profile", [])
         skill_guidance = state.get("skill_guidance") or ""
 
@@ -238,8 +395,6 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             f"{skill_guidance or '(none)'}\n\n"
             "## Current Todo List\n"
             f"{json.dumps(raw_todos, indent=2)}\n\n"
-            "## Scratchpad\n"
-            f"{json.dumps(raw_pad, ensure_ascii=False, indent=2)}\n\n"
             "## Conversation Summary\n"
             f"{summary}\n\n"
         )
@@ -260,18 +415,9 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             )
 
         tool_calls = list(getattr(response, "tool_calls", None) or [])
-        ask_user_calls = [tool_call for tool_call in tool_calls if tool_call.get("name") == "ask_user"]
-        ask_user_batch_rejected = bool(ask_user_calls and len(tool_calls) > 1)
-        if ask_user_batch_rejected:
-            response = AIMessage(
-                content=(
-                    "Invalid tool batch: `ask_user` must be the only tool call in a step. "
-                    "Reissue either a single `ask_user` call or a tool batch that does not include `ask_user`."
-                ),
-            )
-            tool_calls = []
-        langfuse.update_current_span(metadata={"ask_user_batch_rejected": "true" if ask_user_batch_rejected else "false", "ask_user_batch_trimmed": "false"})
-        langfuse.update_current_span(metadata={"tool_calls_this_step": len(tool_calls), "had_summary_context": "true" if bool(summary) else "false"})
+        langfuse.update_current_span(
+            metadata={"tool_calls_this_step": len(tool_calls), "had_summary_context": "true" if bool(summary) else "false"}
+        )
 
         return {"messages": [response]}
 
@@ -288,12 +434,103 @@ def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _fallback_todo_gate_message(incomplete: List[dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for t in incomplete:
+        tid = t.get("id", "?")
+        content = t.get("content", "")
+        lines.append(f"- `{tid}`: {content} (status: {t.get('status', '')})")
+    body = "\n".join(lines)
+    return (
+        "## Workflow instruction\n"
+        "The session todo list is **not** fully completed. Continue with tools and **`update_todo`** "
+        "until every item is **`completed`**, unless the user goal truly cannot proceed.\n\n"
+        "**Incomplete todos:**\n"
+        f"{body}"
+    )
+
+
+def todo_completion_gate(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """If todos remain incomplete, inject a workflow AIMessage via ``models.todo_completion_gate`` (fallback on error).
+
+    Uses ``AIMessage`` so the user's last ``HumanMessage`` stays the turn boundary for API
+    helpers (e.g. plot discovery in ``api.main._collect_current_turn_tool_call_ids``).
+    """
+    todos_raw = state.get("todos") or []
+    todos: List[dict[str, Any]] = [t for t in todos_raw if isinstance(t, dict)]
+    incomplete = [t for t in todos if t.get("status") != "completed"]
+    if not incomplete:
+        with observation_parented_to_run(langfuse, config, name="graph.TodoCompletionGate", as_type="span") as obs:
+            obs.update(metadata={"action": "pass"})
+        return {}
+
+    fb = _fallback_todo_gate_message(incomplete)
+    payload = json.dumps(incomplete, indent=2, ensure_ascii=False, default=str)
+    gate_system = SystemMessage(
+        content=(
+            "You write exactly one concise workflow reminder as markdown for an autonomous forecasting agent.\n"
+            "- The todos JSON lists current items; only items whose status is not \"completed\" need finishing.\n"
+            "- Say clearly what remains and that it must continue with tools and **`update_todo`** until every item "
+            "is **completed**, unless impossible.\n"
+            "- Do not invent todos; only refer to ids and contents given.\n"
+            "- Prefer a short intro plus bullets for incomplete items (id + status)."
+        )
+    )
+    gate_human = HumanMessage(content=f"## Current todos (JSON)\n```json\n{payload}\n```")
+
+    gate_content = fb
+    with observation_parented_to_run(
+        langfuse,
+        config,
+        name="graph.TodoCompletionGate",
+        as_type="chain",
+    ):
+        gate_messages = [gate_system, gate_human]
+        try:
+            with observation_parented_to_run(
+                langfuse,
+                config,
+                name="graph.TodoCompletionGate.llm",
+                as_type="generation",
+                model=TODO_GATE_MODEL,
+                input=serialize_messages(gate_messages),
+            ) as generation:
+                step_raw = todo_gate_llm.invoke(gate_messages, config=config)
+                if isinstance(step_raw, TodoGateMessage):
+                    candidate = step_raw.content.strip()
+                elif isinstance(step_raw, dict):
+                    candidate = str(step_raw.get("content", "")).strip()
+                else:
+                    candidate = str(getattr(step_raw, "content", "") or "").strip()
+                if candidate:
+                    gate_content = candidate
+                generation.update(
+                    output=gate_content[:4000],
+                    metadata={"incomplete_todos": len(incomplete), "used_fallback": str(gate_content == fb)},
+                )
+        except Exception:
+            gate_content = fb
+        langfuse.update_current_span(metadata={"action": "block", "incomplete_todos": len(incomplete)})
+
+    return {"messages": [AIMessage(content=gate_content)]}
+
+
+def route_after_todo_gate(state: AgentState) -> str:
+    todos_raw = state.get("todos") or []
+    todos = [t for t in todos_raw if isinstance(t, dict)]
+    if not todos:
+        return "FinalAnswer"
+    if all(t.get("status") == "completed" for t in todos):
+        return "FinalAnswer"
+    return "Orchestrator"
+
+
 def route_after_orchestrator(state: AgentState) -> str:
-    """Route to ``RunTools`` when the last ``AIMessage`` has tool calls, else ``FinalAnswer``."""
+    """Route to ``RunTools`` when the last ``AIMessage`` has tool calls, else todo gate."""
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "RunTools"
-    return "FinalAnswer"
+    return "TodoCompletionGate"
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +543,9 @@ class AnalysisGraph:
     Wrapper around the compiled LangGraph ``StateGraph``.
 
     Notes
-        * **Orchestrator model** — ``models.orchestrator`` from ``config.yaml``.
-        * **Tools** — ``code_pipeline``, ask_user, ``write_scratchpad``, ``write_todos``, forecasting tools.
-        * **Prep** — ``ProfileSavedData``, ``DescribePlots``, and ``SummariseConversationalSummary`` run in parallel, then ``IdentifySkills``, then ``Orchestrator``.
+        * **Models** — ``models.orchestrator`` (tool agent), ``models.planner`` (structured plan / clarification), ``models.todo_completion_gate`` (incomplete-todo nudge); ``code_generation`` / ``code_judge`` from ``config.yaml`` apply inside ``code_pipeline``.
+        * **Tools** — ``code_pipeline``, ``sarima_tool``, ``prophet_tool``, ``update_todo``.
+        * **Prep** — serial **ProfileSavedData** → **SummariseConversationalSummary** → **MergePrep** → **SelectPlannerSkills** → **Planner** → **SelectOrchestratorSkills** → **Orchestrator**. After **RunTools**: **ProfileSavedData_PostTools** → **MergeTools** → **Orchestrator** (skills unchanged from prep).
         * **code_pipeline** — LLM codegen, Semgrep, judge, save ``pipeline_run.py`` under ``agent_filesystem/<session>/``, then sandbox runner.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield LangGraph ``stream_mode="updates"`` chunks (one dict per finished node batch). After the iterator exits, read the checkpoint snapshot and merge ``__interrupt__`` when Human-in-the-loop pauses mid-turn (same semantics as terminal ``invoke``).
     """
@@ -335,27 +572,39 @@ class AnalysisGraph:
 
         builder.add_node("BeginTurn", begin_turn)
         builder.add_node("ProfileSavedData", profile_saved_data)
-        builder.add_node("DescribePlots", describe_plots)
         builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
-        builder.add_node("IdentifySkills", identify_skills_step)
+        builder.add_node("MergePrep", merge_prep)
+        builder.add_node("MergeTools", merge_tools)
+        builder.add_node("SelectPlannerSkills", select_planner_skills_step)
+        builder.add_node("SelectOrchestratorSkills", select_orchestrator_skills_step)
+        builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
+        builder.add_node("Planner", planner_step)
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
+        builder.add_node("TodoCompletionGate", todo_completion_gate)
         builder.add_node("FinalAnswer", final_answer)
 
         builder.set_entry_point("BeginTurn")
         builder.add_edge("BeginTurn", "ProfileSavedData")
-        builder.add_edge("BeginTurn", "DescribePlots")
-        builder.add_edge("BeginTurn", "SummariseConversationalSummary")
-        builder.add_edge("ProfileSavedData", "IdentifySkills")
-        builder.add_edge("DescribePlots", "IdentifySkills")
-        builder.add_edge("SummariseConversationalSummary", "IdentifySkills")
-        builder.add_edge("IdentifySkills", "Orchestrator")
+        builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
+        builder.add_edge("SummariseConversationalSummary", "MergePrep")
+        builder.add_edge("MergePrep", "SelectPlannerSkills")
+        builder.add_edge("SelectPlannerSkills", "Planner")
+        builder.add_edge("Planner", "SelectOrchestratorSkills")
+        builder.add_edge("SelectOrchestratorSkills", "Orchestrator")
         builder.add_conditional_edges(
             "Orchestrator",
             route_after_orchestrator,
-            {"RunTools": "RunTools", "FinalAnswer": "FinalAnswer"},
+            {"RunTools": "RunTools", "TodoCompletionGate": "TodoCompletionGate"},
         )
-        builder.add_edge("RunTools", "BeginTurn")
+        builder.add_conditional_edges(
+            "TodoCompletionGate",
+            route_after_todo_gate,
+            {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
+        )
+        builder.add_edge("RunTools", "ProfileSavedData_PostTools")
+        builder.add_edge("ProfileSavedData_PostTools", "MergeTools")
+        builder.add_edge("MergeTools", "Orchestrator")
         builder.add_edge("FinalAnswer", END)
 
         return builder.compile(checkpointer=self.checkpointer)
@@ -390,15 +639,20 @@ class AnalysisGraph:
         self,
         session_id: str,
         user_query: str,
+        *,
+        langfuse_pin: dict[str, str] | None = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         Yield graph progress as ``updates`` payloads (typically ``{node_name: delta}``).
 
-        Parallel prep nodes (``ProfileSavedData``, …) may arrive in nondeterministic order.
+        Prep runs serially (see ``build_graph``); stream frames follow that node order.
         Combine with checkpoint ``get_state`` after exhaustion to reconstruct an invoke-shaped
         dict including ``__interrupt__`` when Human-in-the-loop pauses mid-turn.
+
+        For ``/run/stream``, pass *langfuse_pin* from :func:`sse_stream_runnable_langfuse_pin`
+        so Langfuse has a trace id without an HTTP iterator context manager.
         """
-        pins = self._langfuse_invoke_metadata_pins()
+        pins = langfuse_pin if langfuse_pin is not None else self._langfuse_invoke_metadata_pins()
         config = self._thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(
             {"messages": [HumanMessage(content=user_query)]},
@@ -410,13 +664,15 @@ class AnalysisGraph:
         self,
         session_id: str,
         value: Any,
+        *,
+        langfuse_pin: dict[str, str] | None = None,
     ) -> Iterator[Dict[str, Any]]:
         """Same as :meth:`stream_graph` after an ``interrupt``, using ``Command(resume=…)``."""
-        pins = self._langfuse_invoke_metadata_pins()
+        pins = langfuse_pin if langfuse_pin is not None else self._langfuse_invoke_metadata_pins()
         config = self._thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
 
-    @observe(name="graph.run_graph", as_type="chain", capture_input=False, capture_output=False)
+    @observe(name="graph.run_graph", as_type="chain")
     def run_graph(
         self,
         session_id: str,
@@ -428,7 +684,7 @@ class AnalysisGraph:
         langfuse.update_current_span(input={"session_id": session_id, "user_query": user_query}, output={"message_count": len(result.get("messages", []))}, metadata={"session_id": session_id})
         return result
 
-    @observe(name="graph.resume", as_type="chain", capture_input=False, capture_output=False)
+    @observe(name="graph.resume", as_type="chain")
     def resume(
         self,
         session_id: str,

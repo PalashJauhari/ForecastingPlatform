@@ -46,23 +46,20 @@ function gbAppendProgressSub(progressEl, boldText, restText) {
   progressEl.scrollTop = progressEl.scrollHeight;
 }
 
+/** Node ids not shown in the progress panel (bookkeeping; server may already omit them). */
+var GB_PROGRESS_SKIP_NODES = {
+  MergePrep: true,
+  MergeTools: true,
+  ProfileSavedData_PostTools: true,
+};
+
 function gbAppendOrchestratorProgress(progressEl, ev) {
   var tc = Array.isArray(ev.tool_calls) ? ev.tool_calls : [];
   gbAppendProgressLine(progressEl, "Orchestrator", tc.length ? " — planned tools:" : "");
   for (var j = 0; j < tc.length; j++) {
     var t = tc[j] || {};
     var n = t.name || "?";
-    var ap = truncate(t.args_preview || "", 800);
-    var row = document.createElement("div");
-    row.className = "gb-progress-line gb-progress-sub";
-    var sn = document.createElement("strong");
-    sn.textContent = n;
-    row.appendChild(sn);
-    var codeEl = document.createElement("code");
-    codeEl.className = "gb-mono";
-    codeEl.textContent = ap ? " " + ap : "";
-    row.appendChild(codeEl);
-    progressEl.appendChild(row);
+    gbAppendProgressSub(progressEl, n, "");
   }
   if (!tc.length && ev.had_tool_calls === false) {
     gbAppendProgressSub(progressEl, "", "(no tools)");
@@ -70,40 +67,31 @@ function gbAppendOrchestratorProgress(progressEl, ev) {
   progressEl.scrollTop = progressEl.scrollHeight;
 }
 
+function gbAppendTodosUnderNode(progressEl, ev) {
+  var todos = Array.isArray(ev.todos) ? ev.todos : [];
+  if (!todos.length) return;
+  var ul = document.createElement("ul");
+  ul.className = "gb-progress-todos";
+  for (var i = 0; i < todos.length; i++) {
+    var td = todos[i];
+    var li = document.createElement("li");
+    var st = (td && td.status) || "";
+    var idp = td && td.id ? String(td.id) + " — " : "";
+    var ct = truncate(idp + ((td && td.content) || ""), 500);
+    li.textContent = (st ? "[" + String(st) + "] " : "") + ct;
+    ul.appendChild(li);
+  }
+  progressEl.appendChild(ul);
+}
+
 function gbAppendRunToolsProgress(progressEl, ev) {
   gbAppendProgressLine(progressEl, "RunTools", "");
-  var todos = Array.isArray(ev.todos) ? ev.todos : [];
-  if (todos.length) {
-    var ul = document.createElement("ul");
-    ul.className = "gb-progress-todos";
-    for (var i = 0; i < todos.length; i++) {
-      var td = todos[i];
-      var li = document.createElement("li");
-      var st = (td && td.status) || "";
-      var ct = truncate((td && td.content) || "", 500);
-      li.textContent = (st ? "[" + String(st) + "] " : "") + ct;
-      ul.appendChild(li);
-    }
-    progressEl.appendChild(ul);
-  }
+  gbAppendTodosUnderNode(progressEl, ev);
   var tr = Array.isArray(ev.tool_results) ? ev.tool_results : [];
   for (var k = 0; k < tr.length; k++) {
     var x = tr[k];
     var name = (x && x.name) || "tool";
-    var cp = x && x.content_preview ? truncate(String(x.content_preview), 280) : "";
-    var crow = document.createElement("div");
-    crow.className = "gb-progress-line gb-progress-sub";
-    var b = document.createElement("strong");
-    b.textContent = name;
-    crow.appendChild(b);
-    if (cp) {
-      crow.appendChild(document.createTextNode(" "));
-      var ce = document.createElement("code");
-      ce.className = "gb-mono";
-      ce.textContent = cp;
-      crow.appendChild(ce);
-    }
-    progressEl.appendChild(crow);
+    gbAppendProgressSub(progressEl, name, "");
   }
   progressEl.scrollTop = progressEl.scrollHeight;
 }
@@ -128,11 +116,20 @@ function gbProgressBoldRest(ev) {
     var ip = ev.interrupt_preview || "";
     return { bold: "__interrupt__", rest: ip ? " — " + truncate(ip, 200) : " — clarification" };
   }
-  if (node === "IdentifySkills") {
+  if (node === "SelectOrchestratorSkills") {
     var cnt = ev.active_skill_count != null ? " (" + ev.active_skill_count + ")" : "";
     var sk =
       Array.isArray(ev.active_skills) && ev.active_skills.length ? " — " + ev.active_skills.join(", ") : "";
     return { bold: boldName, rest: cnt + truncate(sk, 200) };
+  }
+  if (node === "SelectPlannerSkills") {
+    var pc =
+      ev.active_planner_skill_count != null ? " (" + ev.active_planner_skill_count + ")" : "";
+    var psk =
+      Array.isArray(ev.active_planner_skills) && ev.active_planner_skills.length
+        ? " — " + ev.active_planner_skills.join(", ")
+        : "";
+    return { bold: boldName, rest: pc + truncate(psk, 200) };
   }
   if (node === "ProfileSavedData") {
     var pe = ev.profile_entries != null ? " · " + ev.profile_entries + " files profiled" : "";
@@ -146,11 +143,18 @@ function gbProgressBoldRest(ev) {
   return { bold: boldName, rest: label ? " — " + truncate(label, 120) : "" };
 }
 
+function gbAppendPlannerProgress(progressEl, ev) {
+  gbAppendProgressLine(progressEl, "Planner", "");
+  gbAppendTodosUnderNode(progressEl, ev);
+}
+
 function gbAppendStreamNode(progressEl, payload) {
   if (!payload || payload.type !== "node") return;
   var node = payload.node || "";
+  if (GB_PROGRESS_SKIP_NODES[node]) return;
   if (node === "Orchestrator") return gbAppendOrchestratorProgress(progressEl, payload);
   if (node === "RunTools") return gbAppendRunToolsProgress(progressEl, payload);
+  if (node === "Planner") return gbAppendPlannerProgress(progressEl, payload);
   var pr = gbProgressBoldRest(payload);
   gbAppendProgressLine(progressEl, pr.bold, pr.rest);
 }

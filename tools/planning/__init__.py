@@ -1,6 +1,6 @@
-"""Planning-oriented tools (session todos, scratchpad notes)."""
+"""Planning-oriented tools (session todos)."""
 
-from .write_scratchpad import write_scratchpad
+from .update_todo import update_todo
 from .write_todos import write_todos
 
-__all__ = ["write_scratchpad", "write_todos"]
+__all__ = ["write_todos", "update_todo"]

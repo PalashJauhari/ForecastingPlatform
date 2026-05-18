@@ -21,7 +21,7 @@ def trace_context_from_run_config(runnable_config: Any) -> TraceContext | None:
     """
     Recover ``TraceContext`` from ``RunnableConfig`` metadata set at graph invoke/stream entry.
 
-    Used so parallel LangGraph node threads nest under the parent trace pinned on the caller thread.
+    Used so LangGraph node workers nest observations under the trace pinned in RunnableConfig.
     """
     if not isinstance(runnable_config, Mapping):
         return None
@@ -59,6 +59,18 @@ def get_langfuse_client():
     if base and not (os.getenv("LANGFUSE_HOST") or "").strip():
         os.environ["LANGFUSE_HOST"] = base
     return get_client()
+
+
+def sse_stream_runnable_langfuse_pin() -> dict[str, str]:
+    """
+    RunnableConfig metadata for one Langfuse trace when ``/run/stream`` runs without a parent span.
+
+    ``StreamingResponse`` advances sync iterators via Starlette's thread pool; do not wrap that
+    iterator in ``start_as_current_observation``. Passing ``langfuse_trace_id`` into config lets
+    ``observation_parented_to_run`` attach node spans to a shared trace.
+    """
+    trace_id = str(get_langfuse_client().create_trace_id())
+    return {LANGFUSE_TRACE_ID_METADATA_KEY: trace_id}
 
 
 def short_text(value: Any, max_len: int = MAX_METADATA_VALUE_LEN) -> str:

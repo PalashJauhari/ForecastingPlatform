@@ -1,9 +1,10 @@
 """
-Structured validation for the ``write_todos`` tool (task list in graph state).
+Structured validation for session todos (legacy ``write_todos`` tool and shared fields).
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -15,6 +16,12 @@ TodoStatus = Literal["pending", "in_progress", "completed"]
 class TodoItem(BaseModel):
     """One row in the session todo list."""
 
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        min_length=1,
+        max_length=128,
+        description="Stable id; required for orchestrator update_todo after Planner runs.",
+    )
     content: str = Field(
         min_length=1,
         max_length=2000,
