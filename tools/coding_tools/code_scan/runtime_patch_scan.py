@@ -43,6 +43,7 @@ arbitrary ``open()`` to other system files.
 from __future__ import annotations
 
 import builtins
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -56,6 +57,46 @@ _MISSING = object()
 # Session workspace root (``agent_filesystem/<session>/``), set by ``apply_patches``.
 # Holds uploaded data + tabular outputs that may be reused across questions.
 SANDBOX: Path | None = None
+
+# When set by ``apply_patches`` (non-empty lists from tool task), pandas/plot basenames must be in these sets.
+IO_ALLOWLIST_INPUT: frozenset[str] | None = None
+IO_ALLOWLIST_OUTPUT: frozenset[str] | None = None
+
+
+def enforce_io_allowlist(raw: str, operation: str) -> None:
+    """
+    If allowlists were configured, reject basenames outside the declared Task ``input`` / ``output`` lists.
+
+    Reads (pandas) → ``input`` list when set. Tabular writes and plot saves → ``output`` list when set.
+    """
+    if IO_ALLOWLIST_INPUT is None and IO_ALLOWLIST_OUTPUT is None:
+        return
+    o = operation.lower()
+    is_read = o.startswith("pd.read") or "read_csv" in o or "read_excel" in o
+    is_tabular_write = "to_csv" in o or "to_excel" in o
+    is_plot_save = "savefig" in o
+
+    if is_read:
+        if IO_ALLOWLIST_INPUT is not None and raw not in IO_ALLOWLIST_INPUT:
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : {operation}\n"
+                f"  Path      : {raw}\n"
+                f"  Reason    : basename not in the Task ``input`` allowlist\n"
+                f"  Allowed   : {sorted(IO_ALLOWLIST_INPUT)}\n"
+            )
+        return
+
+    if is_tabular_write or is_plot_save:
+        if IO_ALLOWLIST_OUTPUT is not None and raw not in IO_ALLOWLIST_OUTPUT:
+            raise PermissionError(
+                f"\n[SANDBOX VIOLATION]\n"
+                f"  Operation : {operation}\n"
+                f"  Path      : {raw}\n"
+                f"  Reason    : basename not in the Task ``output`` allowlist\n"
+                f"  Allowed   : {sorted(IO_ALLOWLIST_OUTPUT)}\n"
+            )
+
 
 # Per-question plot folder (``agent_filesystem/<session>/run_<run_id>/``), set by
 # ``apply_patches``. Only ``plt.savefig`` / ``Figure.savefig`` writes are routed here so
@@ -172,6 +213,7 @@ def _resolve_run_plot_path(path: str, operation: str) -> Path:
             f"  Reason    : path escapes the per-question plot workspace\n"
             f"  Allowed   : {run_root}\n"
         ) from exc
+    enforce_io_allowlist(raw, operation)
     return target
 
 
@@ -244,6 +286,7 @@ def _resolve_session_path(
             f"  Reason    : path escapes the current session workspace\n"
             f"  Allowed   : {sandbox}\n"
         ) from exc
+    enforce_io_allowlist(raw, operation)
     return target
 
 
@@ -459,7 +502,12 @@ def safe_figure_savefig(self, fname, *args, **kwargs):
 
 # -- Public API ---------------------------------------------------------------
 
-def apply_patches(session_root: str | Path, run_root: str | Path) -> None:
+def apply_patches(
+    session_root: str | Path,
+    run_root: str | Path,
+    *,
+    io_allowlist_path: str | Path | None = None,
+) -> None:
     """
     Install sandbox wrappers for ``open``, selected pandas methods, and matplotlib savefig.
 
@@ -472,8 +520,23 @@ def apply_patches(session_root: str | Path, run_root: str | Path) -> None:
         Per-question plot folder (typically ``agent_filesystem/<session_id>/run_<run_id>/``).
         Created if missing. ``plt.savefig`` / ``Figure.savefig`` resolve here so each
         message bubble in the UI shows only the plots from its own tool call.
+    io_allowlist_path :
+        Optional path to a JSON file ``{"input": ["a.csv"], "output": ["b.png"]}``. When present and
+        non-empty, basenames outside the corresponding list are rejected at I/O time.
     """
-    global SANDBOX, SANDBOX_RUN
+    global SANDBOX, SANDBOX_RUN, IO_ALLOWLIST_INPUT, IO_ALLOWLIST_OUTPUT
+    IO_ALLOWLIST_INPUT = None
+    IO_ALLOWLIST_OUTPUT = None
+    if io_allowlist_path:
+        p = Path(io_allowlist_path)
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            ins = data.get("input") or []
+            outs = data.get("output") or []
+            if ins:
+                IO_ALLOWLIST_INPUT = frozenset(str(x).strip() for x in ins if str(x).strip())
+            if outs:
+                IO_ALLOWLIST_OUTPUT = frozenset(str(x).strip() for x in outs if str(x).strip())
     SANDBOX = Path(session_root).resolve()
     SANDBOX_RUN = Path(run_root).resolve()
     SANDBOX_RUN.mkdir(parents=True, exist_ok=True)
@@ -493,9 +556,11 @@ def remove_patches() -> None:
     Undo ``apply_patches``; always run in a ``finally`` so a failed script does not leave
     patched globals in the subprocess interpreter.
     """
-    global SANDBOX, SANDBOX_RUN
+    global SANDBOX, SANDBOX_RUN, IO_ALLOWLIST_INPUT, IO_ALLOWLIST_OUTPUT
     SANDBOX = None
     SANDBOX_RUN = None
+    IO_ALLOWLIST_INPUT = None
+    IO_ALLOWLIST_OUTPUT = None
     builtins.open = original_open  # type: ignore[assignment]
     pd.read_excel = original_read_excel  # type: ignore[assignment]
     pd.read_csv = original_read_csv  # type: ignore[assignment]

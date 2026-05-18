@@ -1,0 +1,6 @@
+id: feature-engineering
+name: Feature engineering
+description: >
+  Use when designing predictors with correct timing (no leakage), stable rolling features,
+  sparse/rare categories, and explainable transformations matched to problem structure.
+tags: [features, leakage, encodings]

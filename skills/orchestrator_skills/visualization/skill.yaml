@@ -1,0 +1,6 @@
+id: visualization
+name: Visualization
+description: >
+  Use when choosing chart types for trends, comparisons, relationships, or parts-to-whole,
+  and when titling and labeling for clarity (axes, units, uncertainty).
+tags: [charts, storytelling]

@@ -31,3 +31,74 @@ body {
 .gb-preview-overlay {
   box-sizing: border-box;
 }
+
+.gb-progress-col {
+  width: min(236px, 28vw);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #f4f4f2;
+  border-left: 1px solid #e8e8e6;
+  box-sizing: border-box;
+}
+
+.gb-progress-head {
+  flex-shrink: 0;
+  padding: 10px 11px;
+  border-bottom: 1px solid #e4e4e2;
+}
+
+.gb-progress-head h3 {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: #888883;
+}
+
+#gb-stream-progress {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.42;
+  color: #454542;
+}
+
+#gb-stream-progress::-webkit-scrollbar {
+  width: 8px;
+}
+#gb-stream-progress::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 999px;
+}
+
+.gb-progress-line {
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+.gb-progress-line strong {
+  color: #1a1a1a;
+}
+
+.gb-progress-sub {
+  padding-left: 10px;
+  margin-bottom: 4px;
+}
+.gb-progress-sub code.gb-mono,
+code.gb-mono {
+  font-size: 10px;
+  color: #333;
+}
+
+.gb-progress-todos {
+  margin: 4px 0 2px 10px;
+  padding-left: 14px;
+  list-style-type: disc;
+}
+

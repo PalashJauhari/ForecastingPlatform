@@ -33,7 +33,7 @@ def _ask_user_impl(question: str) -> str:
 
     Returns the user's response as a plain string.
     """
-    response = interrupt({"question": question})
+    response = interrupt({"phase": "orchestrator", "question": question})
     return response
 
 

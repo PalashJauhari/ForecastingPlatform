@@ -12,17 +12,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .safety_check import SafetyCheckResult
+
 SEMGREP_CONFIG = Path(__file__).resolve().parent / "codegen_scan_semgrep.yaml"
 
 
-def _semgrep_failure(
+def _synthetic_failure(
     rule: str,
     message: str,
     *,
     stdout: str = "",
     stderr: str = "",
-) -> dict:
-    """Return a fail-closed Semgrep result with short diagnostic context."""
+) -> SafetyCheckResult:
+    """Fail-closed Semgrep gate with one synthetic violation row."""
     details: list[str] = []
     if stderr.strip():
         details.append(f"stderr: {stderr.strip()[:500]}")
@@ -30,20 +32,17 @@ def _semgrep_failure(
         details.append(f"stdout: {stdout.strip()[:500]}")
     if details:
         message = f"{message} ({' | '.join(details)})"
-    return {
-        "passed": False,
-        "violations": [{
-            "rule": rule,
-            "line": 0,
-            "message": message,
-            "code": "",
-        }],
-    }
+    violations = [{"rule": rule, "line": 0, "message": message, "code": ""}]
+    return SafetyCheckResult(
+        passed=False,
+        source="semgrep",
+        detail=format_semgrep_issues(violations),
+        violations=violations,
+    )
 
 
-def run_semgrep_scan(code: str) -> dict:
-    """Run semgrep on *code*; returns ``{"passed": bool, "violations": list}``."""
-    # Semgrep expects a file path; write generated source to a temp ``.py`` and delete in ``finally``.
+def run_semgrep_scan(code: str) -> SafetyCheckResult:
+    """Run semgrep on *code*; returns :class:`SafetyCheckResult` with ``source=\"semgrep\"``."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
         tmp.write(code)
         tmp_path = tmp.name
@@ -56,14 +55,14 @@ def run_semgrep_scan(code: str) -> dict:
             timeout=30,
         )
         if result.returncode not in {0, 1}:
-            return _semgrep_failure(
+            return _synthetic_failure(
                 "semgrep-execution-failed",
                 f"semgrep exited with status {result.returncode}",
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
         if not result.stdout.strip():
-            return _semgrep_failure(
+            return _synthetic_failure(
                 "semgrep-empty-output",
                 "semgrep produced no JSON output",
                 stderr=result.stderr,
@@ -71,7 +70,7 @@ def run_semgrep_scan(code: str) -> dict:
         try:
             output = json.loads(result.stdout) if result.stdout else {}
         except json.JSONDecodeError:
-            return _semgrep_failure(
+            return _synthetic_failure(
                 "semgrep-invalid-output",
                 "semgrep returned invalid JSON output",
                 stdout=result.stdout,
@@ -82,14 +81,13 @@ def run_semgrep_scan(code: str) -> dict:
             error_summary = " | ".join(
                 str(err.get("message") or err)[:200] for err in semgrep_errors[:3]
             )
-            return _semgrep_failure(
+            return _synthetic_failure(
                 "semgrep-reported-errors",
                 f"semgrep reported scanner/configuration errors: {error_summary}",
                 stderr=result.stderr,
             )
         findings = output.get("results", [])
-        violations = []
-        # Normalize Semgrep JSON into a small dict list for ``format_semgrep_issues`` / JSON responses.
+        violations: list[dict] = []
         for f in findings:
             violations.append({
                 "rule": f.get("check_id", "unknown"),
@@ -97,17 +95,22 @@ def run_semgrep_scan(code: str) -> dict:
                 "message": f.get("extra", {}).get("message", ""),
                 "code": f.get("extra", {}).get("lines", "").strip(),
             })
-        return {"passed": len(violations) == 0, "violations": violations}
+        if violations:
+            return SafetyCheckResult(
+                passed=False,
+                source="semgrep",
+                detail=format_semgrep_issues(violations),
+                violations=violations,
+            )
+        return SafetyCheckResult(passed=True, source="semgrep")
 
     except FileNotFoundError:
-        # ``semgrep`` binary missing from PATH (e.g. venv without dev extras).
-        return _semgrep_failure(
+        return _synthetic_failure(
             "semgrep-not-found",
             "semgrep not installed — run: pip install semgrep",
         )
     except subprocess.TimeoutExpired:
-        # Scan hung or pathological rule/file; fail closed so unsafe code is not saved.
-        return _semgrep_failure(
+        return _synthetic_failure(
             "semgrep-timeout",
             "semgrep scan timed out after 30 seconds",
         )
@@ -116,7 +119,7 @@ def run_semgrep_scan(code: str) -> dict:
 
 
 def format_semgrep_issues(violations: list[dict]) -> str:
-    """Human-readable block for ``code_safety_evaluation.detail`` and retry context."""
+    """Human-readable block for tool payloads and retry context."""
     lines = ["Semgrep rejected the generated code.", "Violations:", ""]
     for v in violations:
         lines.append(f"  Line {v['line']:<4} | {v['rule']}")

@@ -64,20 +64,19 @@ def main() -> None:
     if len(sys.argv) < 4:
         print(
             "Usage: run_pipeline_sandboxed.py "
-            "<path_to_pipeline_run.py> <session_workspace> <run_workspace>",
+            "<path_to_pipeline_run.py> <session_workspace> <run_workspace> [io_allowlist.json]",
             file=sys.stderr,
         )
         sys.exit(2)
     target = Path(sys.argv[1]).resolve()
     session_workspace = Path(sys.argv[2]).resolve()
-    # ``run_workspace`` is created by ``apply_patches`` if missing — no precondition here so
-    # the parent does not have to mkdir it before launching the subprocess.
     run_workspace = Path(sys.argv[3]).resolve()
+    io_path = Path(sys.argv[4]).resolve() if len(sys.argv) > 4 else None
     if not target.is_file():
         print(f"Not a file: {target}", file=sys.stderr)
         sys.exit(2)
 
-    apply_patches(session_workspace, run_workspace)
+    apply_patches(session_workspace, run_workspace, io_allowlist_path=io_path)
     try:
         # Mirrors ``python pipeline_run.py`` (``__name__ == "__main__"``, etc.).
         runpy.run_path(str(target), run_name="__main__")

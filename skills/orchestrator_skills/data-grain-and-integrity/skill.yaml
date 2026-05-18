@@ -1,0 +1,10 @@
+id: data-grain-and-integrity
+name: Data grain & integrity
+description: >
+  Use when defining what one row means, choosing aggregation level, aligning joins to grain,
+  checking row counts after merges, finding duplicate keys, handling nulls and outliers,
+  or validating anomalies in tabular or time-series inputs.
+tags: [data-quality, joins, grain, aggregation]
+aliases:
+  - data_integrity
+  - grain-and-aggregation

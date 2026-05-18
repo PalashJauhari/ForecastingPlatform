@@ -1,7 +1,11 @@
-# GaussianBlurr — models, middleware tuning, and workspace paths
+# Agentic Forecasting Platform — models, middleware tuning, and workspace paths
 
 models:
   orchestrator: "gpt-5.4-mini"
+  planner: "gpt-5.4-mini"
+  todo_completion_gate: "gpt-5.4-mini"
+  identify_planner_skills: "gpt-5.4-mini"
+  identify_orchestrator_skills: "gpt-5.4-mini"
   code_generation: "gpt-5.4-mini"
   code_judge: "gpt-5.4-mini"
   message_summarisation: "gpt-5.4-mini"
@@ -17,8 +21,13 @@ graph:
   recursion_limit: 100   # max super-steps per single run (stops runaway loops)
   max_concurrency: 2      # max parallel runnable work where the engine applies it
 
+# Skill router: cap how many playbooks load into orchestrator / codegen context per turn.
+skills:
+  max_orchestrator_selected: 8
+  max_planner_selected: 3
+
 # Optional OpenAI throttling on every ``ChatOpenAI`` (``langchain_core.rate_limiters.InMemoryRateLimiter``).
-# Set ``enabled: false`` to turn off. Shared across orchestrator, codegen, judge, summarisation.
+# Set ``enabled: false`` to turn off. Shared across planner, orchestrator, todo gate, codegen, judge, summarisation, etc.
 llm_rate_limit:
   enabled: true
   requests_per_second: 1.0

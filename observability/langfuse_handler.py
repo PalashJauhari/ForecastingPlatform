@@ -3,12 +3,53 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langfuse import get_client
+from langfuse.types import TraceContext
 
 MAX_METADATA_VALUE_LEN = 200
+
+# RunnableConfig.metadata keys propagated from AnalysisGraph pins (Langfuse LangChain conventions).
+LANGFUSE_TRACE_ID_METADATA_KEY = "langfuse_trace_id"
+LANGFUSE_PARENT_OBS_METADATA_KEY = "langfuse_parent_observation_id"
+
+
+def trace_context_from_run_config(runnable_config: Any) -> TraceContext | None:
+    """
+    Recover ``TraceContext`` from ``RunnableConfig`` metadata set at graph invoke/stream entry.
+
+    Used so LangGraph node workers nest observations under the trace pinned in RunnableConfig.
+    """
+    if not isinstance(runnable_config, Mapping):
+        return None
+    metadata = runnable_config.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    trace_id = metadata.get(LANGFUSE_TRACE_ID_METADATA_KEY)
+    if not trace_id:
+        return None
+    parent = metadata.get(LANGFUSE_PARENT_OBS_METADATA_KEY)
+    if parent:
+        return TraceContext(trace_id=str(trace_id), parent_span_id=str(parent))
+    return TraceContext(trace_id=str(trace_id))
+
+
+@contextmanager
+def observation_parented_to_run(langfuse_client: Any, runnable_config: Any, **kwargs: Any) -> Iterator[Any]:
+    """
+    ``start_as_current_observation(...)`` attaching to the pinned trace/parent span when metadata is present.
+    Keyword args mirror ``Langfuse.start_as_current_observation`` (e.g. ``name``, ``as_type``, ``input``).
+
+    Mutates ``kwargs`` only by setting ``trace_context`` when resolvable from *runnable_config*.
+    """
+    tc = trace_context_from_run_config(runnable_config)
+    if tc is not None:
+        kwargs = {**kwargs, "trace_context": tc}
+    with langfuse_client.start_as_current_observation(**kwargs) as observation:
+        yield observation
 
 
 def get_langfuse_client():
@@ -18,6 +59,18 @@ def get_langfuse_client():
     if base and not (os.getenv("LANGFUSE_HOST") or "").strip():
         os.environ["LANGFUSE_HOST"] = base
     return get_client()
+
+
+def sse_stream_runnable_langfuse_pin() -> dict[str, str]:
+    """
+    RunnableConfig metadata for one Langfuse trace when ``/run/stream`` runs without a parent span.
+
+    ``StreamingResponse`` advances sync iterators via Starlette's thread pool; do not wrap that
+    iterator in ``start_as_current_observation``. Passing ``langfuse_trace_id`` into config lets
+    ``observation_parented_to_run`` attach node spans to a shared trace.
+    """
+    trace_id = str(get_langfuse_client().create_trace_id())
+    return {LANGFUSE_TRACE_ID_METADATA_KEY: trace_id}
 
 
 def short_text(value: Any, max_len: int = MAX_METADATA_VALUE_LEN) -> str:

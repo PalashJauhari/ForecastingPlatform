@@ -1,0 +1,6 @@
+id: evaluation-design
+name: Evaluation design
+description: >
+  Use when choosing validation schemes (chronos vs random split), baselines, metrics, segment-level
+  evaluation, bias checks, or reporting where the model breaks—not just average accuracy.
+tags: [metrics, validation, baselines]

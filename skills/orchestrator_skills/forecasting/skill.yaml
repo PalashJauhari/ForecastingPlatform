@@ -1,0 +1,6 @@
+id: forecasting
+name: Forecasting & time series hygiene
+description: >
+  Use when working with dated observations: calendar gaps, imputation choices, seasonality,
+  stationarity, forecast horizon, covariate timing, and tool choice for forecast vs plots.
+tags: [time-series, forecasting, seasonality]
