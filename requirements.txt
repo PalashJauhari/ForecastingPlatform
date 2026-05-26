@@ -46,8 +46,11 @@ pmdarima>=2.0.4
 # seasonality decomposition fits with optional weekly/monthly/yearly seasonality.
 prophet>=1.1.0
 
-# Code safety scanning (`code_pipeline` Semgrep gate)
+# Code safety scanning (coding sub-agent Semgrep gate)
 semgrep>=1.50.0
+
+# Isolated code execution (coding sub-agent E2B sandbox)
+e2b-code-interpreter>=1.0.0
 
 # Observability — ``langfuse`` 4.x (``propagate_attributes``, etc.) needs Python 3.10+; 3.9 stays on v3
 langfuse>=4.0.0; python_version >= "3.10"

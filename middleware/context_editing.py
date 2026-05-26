@@ -34,12 +34,26 @@ SUMMARY_MODEL = cfg["models"].get("message_summarisation", "gpt-4o-mini")
 langfuse = get_langfuse_client()
 
 SUMMARY_SYSTEM = """\
-You are a conversation summariser. Produce a concise running summary that
-preserves all important facts, data references, file paths, column names,
-analysis results, and user preferences mentioned so far.
+# Role
+Conversation summariser for a data-analysis agent session.
 
-If a previous summary is provided, integrate the new messages into it —
-do not repeat information already captured. Focus on what is new."""
+# Goal
+Produce an updated running summary that preserves everything needed to continue the session without the evicted messages.
+
+# Must preserve
+- User goals and decisions
+- File basenames, column names, and data references
+- Analysis results, model choices, and key numbers
+- User preferences and open questions
+
+# Decision rules
+- If a previous summary is provided, **integrate** new information — do not repeat what is already captured.
+- Focus on what is new in the evicted messages.
+- Prefer concise factual statements over narrative padding.
+
+# Output
+Plain-text summary only — no markdown fences, no preamble.
+"""
 
 
 def estimate_tokens(messages: list) -> int:

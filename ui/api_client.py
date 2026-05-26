@@ -116,7 +116,7 @@ class GaussianBlurrApiClient:
         """
         Build a fully-qualified ``GET /artifact/...`` URL for an output file.
 
-        Accepts either a logical path produced by ``code_pipeline``
+        Accepts either a logical path produced by ``coding_tool``
         (e.g. ``"agent_filesystem/<session>/run_<run_id>/trend.png"``) or a
         bare session-relative path (e.g. ``"run_<run_id>/trend.png"``); the
         ``agent_filesystem/<session>/`` prefix is stripped if present so the

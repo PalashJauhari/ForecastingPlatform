@@ -114,21 +114,6 @@ function gbProgressBoldRest(ev) {
     var ip = ev.interrupt_preview || "";
     return { bold: "__interrupt__", rest: ip ? " — " + truncate(ip, 200) : " — clarification" };
   }
-  if (node === "SelectOrchestratorSkills") {
-    var cnt = ev.active_skill_count != null ? " (" + ev.active_skill_count + ")" : "";
-    var sk =
-      Array.isArray(ev.active_skills) && ev.active_skills.length ? " — " + ev.active_skills.join(", ") : "";
-    return { bold: boldName, rest: cnt + truncate(sk, 200) };
-  }
-  if (node === "SelectPlannerSkills") {
-    var pc =
-      ev.active_planner_skill_count != null ? " (" + ev.active_planner_skill_count + ")" : "";
-    var psk =
-      Array.isArray(ev.active_planner_skills) && ev.active_planner_skills.length
-        ? " — " + ev.active_planner_skills.join(", ")
-        : "";
-    return { bold: boldName, rest: pc + truncate(psk, 200) };
-  }
   if (node === "ProfileSavedData") {
     var pe = ev.profile_entries != null ? " · " + ev.profile_entries + " files profiled" : "";
     return { bold: boldName, rest: pe };

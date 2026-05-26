@@ -1,257 +1,128 @@
-# Agentic Forecasting Platform
+# GaussianBlurr — Agentic Forecasting Platform
 
-An AI-powered forecasting and analysis workspace for uploaded tabular data. Users can upload CSV/XLSX files, ask natural-language questions, generate forecasts with SARIMA or Prophet, run guarded analysis code, and view generated tables and plots inside a Dash chat interface.
+Upload tabular data, ask questions in plain language, and get forecasts, analysis, and charts back in a streaming chat UI.
 
-The project is built around a custom LangGraph agent rather than a single prompt wrapper. It includes planning, skill routing, session-scoped storage, dataset profiling, deterministic forecasting tools, sandboxed code execution, streaming API responses, and optional Langfuse observability.
+## Why this project
 
-## Why This Project Matters
+- **Agentic workflow** — The platform plans tasks, runs tools, and tracks progress automatically instead of relying on a single static prompt.
+- **Session workspace** — Each conversation has its own folder for uploads and generated CSV/XLSX outputs.
+- **Deterministic forecasting** — Built-in SARIMA and Prophet tools for validated model fits when you want structured forecasts without custom code.
+- **Safe custom analysis** — When code is needed, it is generated, scanned, reviewed, and executed in an isolated cloud sandbox (E2B).
+- **Streaming UI** — Dash chat with live progress and inline plot rendering.
 
-Most forecasting demos stop at fitting a model. This project focuses on the surrounding platform work needed to make forecasting usable in an agentic application:
+## Features
 
-- A custom LangGraph `StateGraph` coordinates planning, tool use, forecasting, artifact generation, and final responses.
-- Uploaded datasets are profiled automatically so the agent can reason about available files, columns, row counts, previews, and numeric statistics.
-- Forecasting is handled by deterministic SARIMA and Prophet tools, while custom exploratory analysis and plotting go through a guarded code pipeline.
-- Generated code is checked before execution with Semgrep and an LLM judge, then run in a constrained subprocess with controlled file access.
-- API responses include explicit artifact and image paths, so the UI does not scrape model text to discover generated plots.
+- Natural-language Q&A over uploaded CSV/XLSX files
+- Automatic data profiling (columns, samples, basic stats)
+- Todo planning at the start of each user turn
+- Custom Python analysis and charts via the coding tool
+- SARIMA / Prophet forecasting with interpretable JSON results
+- FastAPI backend with SSE streaming; Plotly Dash frontend
 
-## Core Features
-
-- **Natural-language forecasting workflow**: upload data, ask for forecasts, comparisons, plots, or analysis, and receive structured outputs.
-- **Custom LangGraph agent**: planner, orchestrator, tool execution, deterministic todo-completion gate (lists pending todos; no extra model call), skill selection, and final-answer flow.
-- **Forecasting tools**: SARIMA/SARIMAX via `statsmodels` and optional `pmdarima.auto_arima`; Prophet with trend, seasonality, residual, and component summaries.
-- **Sandboxed analysis code**: LLM-generated Python is statically scanned, reviewed, saved as `pipeline_run.py`, and executed in a restricted subprocess.
-- **Session workspace**: each chat session stores uploads, generated tables, scripts, and plot artifacts under `agent_filesystem/<session>/`.
-- **Streaming API**: FastAPI exposes normal and SSE endpoints for run/resume flows.
-- **Dash UI**: browser-based chat interface with file upload, interrupt/resume support, table previews, and inline image artifacts.
-- **Observability**: optional Langfuse traces for graph nodes, tool calls, API requests, and model generations.
-- **Config-driven models and limits**: model names, rate limits, graph recursion limit, sandbox timeout, paths, and checkpointing live in `config.yaml`.
-
-## Tech Stack
-
-| Area | Tools |
-|------|-------|
-| Agent orchestration | LangGraph, LangChain |
-| LLM provider | OpenAI via `langchain-openai` |
-| API | FastAPI, Uvicorn, SSE streaming |
-| UI | Plotly Dash |
-| Forecasting | Prophet, statsmodels, pmdarima |
-| Data processing | pandas, NumPy, SciPy, scikit-learn |
-| Code safety | Semgrep, subprocess sandbox, runtime file patches |
-| Persistence | Session filesystem, optional Postgres/Neon checkpoints |
-| Observability | Langfuse |
-
-## Architecture
+## How it works
 
 ```text
-User / Dash UI
-    |
-    v
-FastAPI
-    |
-    v
-LangGraph StateGraph
-    |
-    +--> Profile uploaded data
-    +--> Select planner skills
-    +--> Build/refresh todo plan
-    +--> Select orchestration skills
-    +--> Orchestrate tools
-            |
-            +--> SARIMA tool
-            +--> Prophet tool
-            +--> Sandboxed code pipeline
-            +--> Todo updater
-    |
-    v
-Final answer + generated artifacts
+Dash UI  →  FastAPI  →  LangGraph agent  →  tools (forecast / code / todos)
+                              ↓
+                    artifacts in session workspace  →  plots inline in chat
 ```
 
-Graph flow:
-
-```text
-START -> BeginTurn -> ProfileSavedData -> SummariseConversationalSummary
-      -> SelectPlannerSkills -> Planner -> SelectOrchestratorSkills -> Orchestrator
-      -> RunTools -> ProfileSavedData_PostTools -> Orchestrator
-      -> TodoCompletionGate -> FinalAnswer -> END
-```
-
-## Repository Layout
-
-```text
-api/                         FastAPI app, run/resume/upload/artifact endpoints
-graph/                       LangGraph state machine and agent execution
-middleware/                  LLM factory, rate limiting; token-aware truncation + running summarisation
-tools/
-  forecasting/               SARIMA and Prophet forecasting tools
-  coding_tools/              Code generation, safety checks, sandbox runner
-  file_management_tools/     Session data profiling
-  planning/                  Todo update tool
-skills/                      Planner and orchestrator skill playbooks
-prompts/                     System prompts for graph, planner, codegen, judging
-output_validation/           Pydantic schemas for structured model/tool outputs
-ui/                          Dash app and API client
-observability/               Langfuse helper utilities
-config.yaml                  Models, graph limits, paths, checkpoint settings
-requirements.txt             Python dependencies
-```
+On each new message the agent profiles your files, summarizes long context, builds a todo list, then orchestrates tools until the task is done.
 
 ## Quickstart
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-```
+1. **Clone and install**
 
-Add your OpenAI key to `.env`:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-```bash
-OPENAI_API_KEY=your_key_here
-```
+2. **Configure environment**
 
-Start the app:
+   - Copy `.env.example` to `.env` at the repo root (OpenAI key, optional Postgres checkpoint URL).
+   - Copy sub-agent templates:
+     - `sub_agents/planner_sub_agent/.env.example` → `.env`
+     - `sub_agents/coding_sub_agent/.env.example` → `.env`
+   - Set `OPENAI_API_KEY` in all three; set `E2B_API_KEY` for cloud code execution.
 
-```bash
-./launch.sh
-```
+3. **Run**
 
-Default local URLs:
+   ```bash
+   ./launch.sh
+   ```
 
-- API: `http://127.0.0.1:8000`
-- UI: `http://127.0.0.1:8501`
+   - API: http://127.0.0.1:8000  
+   - UI: http://127.0.0.1:8501  
 
-Manual startup:
+4. Upload a CSV in the sidebar, ask a forecasting or analysis question, and watch progress stream in the chat.
 
-```bash
-export PYTHONPATH="$(pwd)"
-uvicorn api.main:app --host 127.0.0.1 --port 8000
-python ui/dash_app.py
-```
+## Example workflow
 
-## Example Workflow
+1. Upload `sales.csv`.
+2. Ask: *“Forecast the next 12 months of revenue and show a trend chart.”*
+3. The agent profiles the file, plans steps, may run Prophet or SARIMA for the table, and uses the coding tool for charts.
+4. Tables stay in your session workspace; plots appear inline in the assistant message.
 
-1. Open the Dash UI.
-2. Upload a `.csv` or `.xlsx` file with a date column and numeric target column.
-3. Ask a question such as:
+## API overview
 
-```text
-Forecast monthly revenue for the next 6 months, explain the trend, and generate a chart.
-```
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/upload-data` | Upload CSV/XLSX into a session |
+| POST | `/run` | Run agent (blocking JSON) |
+| POST | `/run/stream` | Run agent (SSE progress + done payload) |
+| POST | `/resume` | Resume after interrupt |
+| POST | `/resume/stream` | Resume with SSE |
+| GET | `/artifact/{session_id}/{path}` | Serve session files and plot images |
 
-4. The agent profiles the uploaded data, plans the task, chooses forecasting or analysis tools, saves output tables, and returns any generated plots in the chat.
+## Code execution and safety
 
-## API Summary
+Custom analysis runs through a dedicated coding pipeline:
 
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /run` | Run a natural-language agent request for a session |
-| `POST /run/stream` | Stream graph progress and final response with SSE |
-| `POST /resume` | Continue after a planner clarification interrupt |
-| `POST /resume/stream` | Stream resume progress with SSE |
-| `POST /upload-data` | Upload one or more `.csv` / `.xlsx` files |
-| `GET /artifact/{session_id}/{path}` | Serve generated tables and plot artifacts |
+1. Code is generated for your requirements and declared input/output filenames.
+2. Static rules (Semgrep) and LLM judges check safety and file allowlists.
+3. Approved scripts run in a fresh E2B cloud sandbox per attempt.
+4. CSV/XLSX outputs land at the session root; PNG/SVG plots under `run_<tool_call_id>/` for inline display.
 
-Allowed upload types: `.csv`, `.xlsx`.
+Guardrails include basename-only paths, allowed extensions, and blocked OS/network/subprocess patterns.
 
-Allowed artifact types: `.csv`, `.xlsx`, `.png`, `.svg`.
+## Forecasting tools
 
-## Code Execution Safety
-
-The `code_pipeline` tool is designed for controlled analysis and plotting, not arbitrary execution.
-
-Pipeline:
-
-1. Generate structured Python code from the requested analysis task.
-2. Run Semgrep rules against the generated source.
-3. Run an LLM judge for an additional safety and task-fit review.
-4. Save approved code to the session workspace as `pipeline_run.py`.
-5. Execute it through `run_pipeline_sandboxed.py` with:
-   - restricted file reads/writes,
-   - controlled plot output directories,
-   - credential-stripped environment variables,
-   - wall-clock timeout,
-   - memory limit where supported,
-   - BLAS/OpenMP thread caps.
-
-Plots are written only into the current tool-call folder:
-
-```text
-agent_filesystem/<session>/run_<tool_call_id>/<plot>.png
-agent_filesystem/<session>/run_<tool_call_id>/<plot>.svg
-```
-
-The API discovers images by listing the current turn's tool-call folders and returns an explicit `images` list to the UI.
-
-## Forecasting Tools
-
-### SARIMA
-
-The SARIMA tool validates a session CSV/XLSX file, checks the date and target columns, fits a SARIMAX model, produces forecasts with prediction intervals, and returns residual diagnostics and model interpretation.
-
-It supports manual order selection or `pmdarima.auto_arima`-based order selection.
-
-### Prophet
-
-The Prophet tool validates a session CSV/XLSX file, infers regular frequency, fits a univariate Prophet model, and saves:
-
-- future forecast table,
-- fitted values and residuals,
-- decomposition/component table.
-
-It also returns fit-quality metrics, residual warnings, changepoint summaries, and structured interpretation.
+- **SARIMA tool** — Auto-ARIMA order search, diagnostics, forecast table at session root. Use **coding_tool** for charts.
+- **Prophet tool** — Trend/seasonality decomposition with optional weekly/monthly/yearly seasonality. Use **coding_tool** for charts.
 
 ## Configuration
 
-Most runtime behavior is controlled from `config.yaml`:
+**Main app** (`config.yaml` + root `.env`): orchestrator model, context limits, optional Postgres checkpoints.
 
-```yaml
-models:
-  orchestrator: "gpt-5.4-mini"
-  code_generation: "gpt-5.4-mini"
-  code_judge: "gpt-5.4-mini"
-  message_summarisation: "gpt-5.4-mini"
+**Sub-agents** (separate `.env` files): planner model and limits; coding/judge models, E2B keys, retry limits. See each folder’s `.env.example`.
 
-graph:
-  recursion_limit: 100
-  max_concurrency: 2
+Runtime session data lives in `agent_filesystem/` (gitignored). Secrets belong in `.env` files only.
 
-llm_rate_limit:
-  enabled: true
-  requests_per_second: 1.0
-  check_every_n_seconds: 0.1
-  max_bucket_size: 5.0
+## Project structure
 
-code_pipeline:
-  timeout_seconds: 120
-
-checkpointer:
-  use_neon: false
+```text
+api/                 FastAPI service and SSE streaming
+graph/               Main LangGraph agent
+sub_agents/          Planner and coding sub-graphs (prompts, config, validation)
+  planner_sub_agent/tools/write_todo.py   Planner-only ToolNode tool
+  coding_sub_agent/graph.py               Coding pipeline (judge + E2B inlined)
+tools/               Main-graph @tool wrappers only
+  coding_tools/coding_tool.py             Invokes coding sub-agent pipeline
+  planning/update_todo.py                   Orchestrator todo status patches
+  forecasting/                            SARIMA, Prophet tools
+ui/                  Dash chat application
+prompts/             Orchestrator system prompt
+middleware/          LLM clients, context editing
+session_paths.py     Session filesystem layout
+config.yaml          Main platform settings
 ```
 
-Set `checkpointer.use_neon: true` and provide `DATABASE_URL` in `.env` to use Postgres checkpoints instead of the default in-memory checkpointer.
+**Tool placement:** main-graph tools live under `tools/` and register on `graph/graph.py`. Sub-agent internal tools (e.g. planner `write_todo`) live under `sub_agents/<name>/tools/` only.
 
-## Environment Variables
+## For contributors
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | Backend LLM calls |
-| `LANGFUSE_PUBLIC_KEY` | No | Langfuse tracing |
-| `LANGFUSE_SECRET_KEY` | No | Langfuse tracing |
-| `LANGFUSE_HOST` | No | Langfuse host |
-| `LANGFUSE_BASE_URL` | No | Alternate Langfuse host variable |
-| `DATABASE_URL` | Only for Postgres checkpoints | LangGraph checkpoint database |
-| `GAUSSIANBLURR_API_URL` | No | Dash API base URL override |
-
-The browser UI does not receive the OpenAI key. It only talks to the FastAPI backend.
-
-## Notes for Reviewers
-
-- Runtime session files are stored under `agent_filesystem/` and should remain gitignored.
-- The app uses a session id as the LangGraph `thread_id`.
-- Forecasting tools intentionally do not generate images directly; plotting is routed through the guarded `code_pipeline`.
-- `data_profile` is held in graph state and refreshed before orchestration and after tool execution.
-- **Context trimming**: old messages beyond a token estimate are summarized into `message_summary` and dropped via `RemoveMessage`, with cuts aligned at `HumanMessage` boundaries (`middleware/context_editing.py`). `/run` and `/run/stream` append each user utterance as a `HumanMessage` with id `user_input-{uuid}` (unique per LangGraph merge rules; truncation prefers these ids when trimming).
-- Langfuse tracing is optional; the app still runs without Langfuse credentials.
-
-## Resume Summary
-
-Built an agentic forecasting platform with LangGraph, FastAPI, Dash, OpenAI APIs, Prophet, and SARIMA. The system supports natural-language dataset analysis, session-scoped file handling, automated data profiling, deterministic forecasting tools, sandboxed LLM-generated code execution, artifact serving, streaming responses, and optional observability through Langfuse.
+- Main graph: `graph/graph.py`
+- Sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`
+- Regenerate topology diagrams: `python scripts/generate_artifact_plot.py` → `artifact/*.png`

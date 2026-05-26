@@ -13,6 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
+from session_paths import ensure_session_dirs, session_root
+
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 _HEAD_ROWS = 5

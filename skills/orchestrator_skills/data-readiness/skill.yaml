@@ -1,6 +1,0 @@
-id: data-readiness
-name: Data readiness
-description: >
-  Use when deciding if uploaded data can support the task—required columns, keys, history length,
-  time column viability—or whether to explore cautiously or ask the user for missing inputs.
-tags: [gating, schema, feasibility]

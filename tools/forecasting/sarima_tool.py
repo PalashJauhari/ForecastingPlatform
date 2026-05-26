@@ -8,7 +8,7 @@ with 95% prediction intervals, and produces an LLM-written interpretation of
 residuals, fit quality, and the forecast.
 
 This tool deliberately does **not** create images. If the user wants a plot,
-the orchestrator should follow up with ``code_pipeline``: that tool already
+the orchestrator should follow up with ``coding_tool``: that tool already
 patches ``plt.savefig`` / ``Figure.savefig`` to land under
 ``agent_filesystem/<session>/run_<tool_call_id>/`` so the UI can show only
 the plots produced by that turn.
@@ -566,7 +566,7 @@ def generate_forecast(
 
 # Brief: Save the forecast table in the session workspace.
 def save_forecast(rows: list[dict], *, session_id: str, output_file: str) -> str:
-    """Write the forecast table as CSV/XLSX at the session root only — never PNG/SVG (use ``code_pipeline`` for charts)."""
+    """Write the forecast table as CSV/XLSX at the session root only — never PNG/SVG (use ``coding_tool`` for charts)."""
     name = Path(output_file).name
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED_TABLE_EXTS:
@@ -782,7 +782,7 @@ def run_sarima_pipeline(
 
     Any pipeline-level error short-circuits to a clean error JSON so the
     orchestrator can decide what to do next (e.g. ask the user for a missing
-    column, request a different frequency, fall back to ``code_pipeline``).
+    column, request a different frequency, fall back to ``coding_tool``).
     """
     session_id = session_id_from_config(runtime.config)
 
@@ -810,7 +810,7 @@ def run_sarima_pipeline(
         forecast_rows = generate_forecast(fit, horizon=int(horizon), freq=freq, last_date=series.index[-1])
 
         # 5. Persist the forecast table for the UI/download. Charts are intentionally
-        #    not produced here; ``code_pipeline`` is the single source of plot artifacts.
+        #    not produced here; ``coding_tool`` is the single source of plot artifacts.
         forecast_path = save_forecast(forecast_rows, session_id=session_id, output_file=forecast_output_file)
 
         # 6. Ask the LLM to summarize residuals, fit quality, forecast, and improvement guidance.
@@ -889,17 +889,17 @@ def sarima_tool(
 
     ## When to use
     The user wants a time-series forecast from a clean tabular file with one
-    date column and one numeric target column. Prefer this over ``code_pipeline``
+    date column and one numeric target column. Prefer this over ``coding_tool``
     for ARIMA/SARIMA: it runs a deterministic statistical pipeline (validate →
     time index → order selection → fit → diagnostics → forecast → interpret)
     and returns structured JSON the orchestrator can present directly.
 
     ## When NOT to use
-    - User wants Prophet, ETS, neural nets, or any non-ARIMA model — write code via ``code_pipeline``.
-    - Data still needs cleaning, joining, or resampling before fitting — handle that in ``code_pipeline`` first, then call this tool on the cleaned file.
+    - User wants Prophet, ETS, neural nets, or any non-ARIMA model — write code via ``coding_tool``.
+    - Data still needs cleaning, joining, or resampling before fitting — handle that in ``coding_tool`` first, then call this tool on the cleaned file.
     - Multiple targets or panel structure — out of scope for this tool.
     - User wants a chart of the forecast — this tool does not generate images;
-      follow up with ``code_pipeline`` (it is the only image-producing tool).
+      follow up with ``coding_tool`` (it is the only image-producing tool).
 
     ## Required inputs
     - ``file_name`` — bare CSV/XLSX filename in the session workspace.

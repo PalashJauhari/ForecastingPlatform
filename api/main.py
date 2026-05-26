@@ -12,7 +12,7 @@ Endpoints
 
 SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
 ``{"type":"node",...}`` — one LangGraph ``updates`` step per finished node (serial prep:
-``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``SelectPlannerSkills``, …).
+``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``Planner``, …).
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
@@ -64,7 +64,7 @@ ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
 ARTIFACT_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".png", ".svg"}
 
 # Image extensions the API discovers under each ``run_<tool_call_id>`` folder.
-# Kept tight: only the formats ``code_pipeline``'s plot patches actually emit.
+# Kept tight: only the formats the coding tool's plot output actually emits.
 IMAGE_EXTENSIONS = {".png", ".svg"}
 
 _SSE_HEADERS = {
@@ -86,6 +86,10 @@ langfuse = get_langfuse_client()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://127.0.0.1:8501",
+        "http://localhost:8501",
+        "http://0.0.0.0:8501",
+        "http://[::1]:8501",
         "http://127.0.0.1:8050",
         "http://localhost:8050",
         "http://0.0.0.0:8050",
@@ -117,7 +121,7 @@ class StreamResumeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_run_id(raw: str) -> str:
+def sanitize_run_id(raw: str) -> str:
     """
     Convert a LangChain ``tool_call_id`` into the same filesystem-safe folder id the
     forecasting / coding tools use when they create ``run_<id>/`` subfolders.
@@ -165,9 +169,8 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     Walk every ``run_<sanitized_tool_call_id>/`` folder for the supplied tool calls and
     return the logical paths of any image artifacts (``.png`` / ``.svg``) inside.
 
-    Only ``code_pipeline`` writes into these folders today (its plot patches redirect
-    ``plt.savefig`` / ``Figure.savefig`` outputs there). Tools that do not emit images
-    simply contribute an empty folder (or none at all) and are skipped silently.
+    Only ``coding_tool`` writes into these folders today (PNG/SVG under run_<tool_call_id>/).
+    Tools that do not emit images simply contribute an empty folder (or none at all) and are skipped silently.
 
     Returned paths use the logical ``agent_filesystem/<session>/run_<id>/<file>`` shape
     so the Dash UI can pass them straight to the ``/artifact/{session_id}/{path:path}``
@@ -181,7 +184,7 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
 
     images: list[str] = []
     for tool_call_id in tool_call_ids:
-        run_id = _sanitize_run_id(tool_call_id)
+        run_id = sanitize_run_id(tool_call_id)
         run_dir = workspace / f"run_{run_id}"
         if not run_dir.is_dir():
             continue
@@ -427,17 +430,8 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
             event["todos"] = norm
             event["todo_count"] = n
 
-    elif node_name == "SelectPlannerSkills":
-        planner_skills = payload.get("active_planner_skills") or []
-        event["label"] = "Planner skills selected"
-        event["active_planner_skills"] = planner_skills
-        event["active_planner_skill_count"] = len(planner_skills)
-
-    elif node_name == "SelectOrchestratorSkills":
-        skills = payload.get("active_skills") or []
-        event["label"] = "Orchestrator skills selected"
-        event["active_skills"] = skills
-        event["active_skill_count"] = len(skills)
+    elif node_name == "TodoCompletionCheck":
+        event["label"] = "Checking todo completion"
 
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []
@@ -457,9 +451,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         event["label"] = "Rolling context compaction"
         if preview:
             event["summary_preview"] = preview + ("…" if len(summary.strip()) > 120 else "")
-
-    elif node_name == "BeginTurn":
-        event["label"] = "Turn boundary"
 
     elif node_name == "FinalAnswer":
         event["label"] = "Assistant reply finalized"
@@ -669,7 +660,7 @@ async def artifact(session_id: str, path: str):
     """
     Stream a single artifact file from the session workspace.
 
-    The Dash UI calls this for every plot path returned by ``code_pipeline`` (e.g.
+    The Dash UI calls this for every plot path returned by ``coding_tool`` (e.g.
     ``run_<run_id>/trend.png``) and for any other CSV / XLSX outputs the user wants to
     download. The endpoint is intentionally narrow: read-only, allowlisted extensions,
     and a hard symlink-resistant containment check against the session root.

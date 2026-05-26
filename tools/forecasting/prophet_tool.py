@@ -15,7 +15,7 @@ monthly / yearly seasonality flags. It then produces:
   forecast summary, component analysis, and improvement guidance.
 
 This tool deliberately does **not** create images. If the user wants a plot,
-the orchestrator should follow up with ``code_pipeline``: that tool already
+the orchestrator should follow up with ``coding_tool``: that tool already
 patches ``plt.savefig`` / ``Figure.savefig`` to land under
 ``agent_filesystem/<session>/run_<tool_call_id>/`` so the UI can show only
 the plots produced by that turn.
@@ -460,7 +460,7 @@ def generate_forecast(model: Any, *, df: pd.DataFrame, horizon: int, freq: str) 
 
 # Brief: Save a tabular DataFrame at the session root and return its logical path.
 def save_table(table: pd.DataFrame, *, session_id: str, output_file: str, stage: str) -> str:
-    """Write ``table`` as CSV/XLSX at the session root only — never PNG/SVG (use ``code_pipeline`` for charts)."""
+    """Write ``table`` as CSV/XLSX at the session root only — never PNG/SVG (use ``coding_tool`` for charts)."""
     name = Path(output_file).name
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED_TABLE_EXTS:
@@ -692,7 +692,7 @@ def run_prophet_pipeline(
 
     Any pipeline-level error short-circuits to a clean error JSON so the
     orchestrator can decide what to do next (e.g. ask the user for a missing
-    column, request a different frequency, fall back to ``code_pipeline``).
+    column, request a different frequency, fall back to ``coding_tool``).
     """
     session_id = session_id_from_config(runtime.config)
     warnings_out: list[dict] = []
@@ -770,7 +770,7 @@ def run_prophet_pipeline(
         decomposition_table["calendar_date"] = pd.to_datetime(decomposition_table["calendar_date"]).dt.date.astype(str)
 
         # 6. Persist the three tables for downstream display/download. Charts are
-        #    intentionally not produced here; ``code_pipeline`` is the single source of
+        #    intentionally not produced here; ``coding_tool`` is the single source of
         #    plot artifacts (it routes plt.savefig into a per-tool-call run folder).
         forecast_path = save_table(forecast_table, session_id=session_id, output_file=forecast_output_file, stage="save_forecast")
         fitted_path = save_table(fitted_table, session_id=session_id, output_file=fitted_output_file, stage="save_fitted")
@@ -876,16 +876,16 @@ def prophet_tool(
     The user wants a univariate time-series forecast from a clean tabular file
     with one date column and one numeric target column, and Prophet's
     trend + seasonality decomposition (weekly / monthly / yearly) is a good
-    fit. Prefer this over ``code_pipeline`` when the analysis is "Prophet
+    fit. Prefer this over ``coding_tool`` when the analysis is "Prophet
     forecast + decomposition" rather than custom modelling.
 
     ## When NOT to use
     - User wants ARIMA/SARIMA — use ``sarima_tool``.
-    - User wants ETS, neural nets, or any non-Prophet model — write code via ``code_pipeline``.
-    - Data still needs cleaning, joining, or resampling before fitting — handle that in ``code_pipeline`` first, then call this tool on the cleaned file.
+    - User wants ETS, neural nets, or any non-Prophet model — write code via ``coding_tool``.
+    - Data still needs cleaning, joining, or resampling before fitting — handle that in ``coding_tool`` first, then call this tool on the cleaned file.
     - Multiple targets or panel structure — out of scope for this tool.
     - User wants a chart of the forecast — this tool does not generate images;
-      follow up with ``code_pipeline`` (it is the only image-producing tool).
+      follow up with ``coding_tool`` (it is the only image-producing tool).
 
     ## Required inputs
     - ``file_name`` — bare CSV/XLSX filename in the session workspace.
