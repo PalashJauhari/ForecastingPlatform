@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph, add_messages
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
@@ -23,7 +24,6 @@ from sub_agents.coding_sub_agent.config import (
     E2B_EXECUTION_TIMEOUT_SECONDS,
     E2B_SANDBOX_TIMEOUT_SECONDS,
     IO_JUDGE_MODEL,
-    MAX_CODEGEN_ATTEMPTS,
     PLOT_FILE_EXTENSIONS,
     TABULAR_OUTPUT_EXTENSIONS,
 )
@@ -61,7 +61,6 @@ class CodingAgentState(TypedDict):
     session_id: str
     tool_call_id: str
     messages: Annotated[list, add_messages]
-    attempt: int
     code: str
     explanation: NotRequired[str]
     semgrep_feedback: str
@@ -69,7 +68,7 @@ class CodingAgentState(TypedDict):
     io_feedback: str
     execution_feedback: str
     code_execution_result: NotRequired[CodeExecutionResult]
-    status: NotRequired[Literal["success", "failed", "max_attempts"]]
+    status: NotRequired[Literal["success", "failed"]]
 
 
 checkpointer = InMemorySaver()
@@ -356,51 +355,28 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     }
 
 
-def increment_attempt(state: CodingAgentState) -> Dict[str, Any]:
-    """Bump attempt counter before retrying CodeGen."""
-    return {"attempt": int(state.get("attempt") or 1) + 1}
-
-
 def route_after_semgrep(state: CodingAgentState) -> str:
     if (state.get("semgrep_feedback") or "").strip():
-        attempt = int(state.get("attempt") or 1)
-        if attempt >= MAX_CODEGEN_ATTEMPTS:
-            return "fail_max"
-        return "retry"
+        return "CodeGen"
     return "SafetyJudge"
 
 
 def route_after_safety_judge(state: CodingAgentState) -> str:
     if (state.get("judge_feedback") or "").strip():
-        attempt = int(state.get("attempt") or 1)
-        if attempt >= MAX_CODEGEN_ATTEMPTS:
-            return "fail_max"
-        return "retry"
+        return "CodeGen"
     return "IOAllowlistJudge"
 
 
 def route_after_io_judge(state: CodingAgentState) -> str:
     if (state.get("io_feedback") or "").strip():
-        attempt = int(state.get("attempt") or 1)
-        if attempt >= MAX_CODEGEN_ATTEMPTS:
-            return "fail_max"
-        return "retry"
+        return "CodeGen"
     return "E2BExecute"
 
 
 def route_after_e2b(state: CodingAgentState) -> str:
     if state.get("status") == "success":
         return END
-    attempt = int(state.get("attempt") or 1)
-    if attempt >= MAX_CODEGEN_ATTEMPTS:
-        return "fail_max"
-    return "retry"
-
-
-def fail_max_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Terminal node when retries are exhausted."""
-    del config
-    return {"status": "max_attempts"}
+    return "CodeGen"
 
 
 def build_graph():
@@ -412,33 +388,29 @@ def build_graph():
     builder.add_node("SafetyJudge", safety_judge_node)
     builder.add_node("IOAllowlistJudge", io_allowlist_judge_node)
     builder.add_node("E2BExecute", e2b_execute_node)
-    builder.add_node("IncrementAttempt", increment_attempt)
-    builder.add_node("FailMax", fail_max_node)
 
     builder.set_entry_point("CodeGen")
     builder.add_edge("CodeGen", "SemgrepScan")
     builder.add_conditional_edges(
         "SemgrepScan",
         route_after_semgrep,
-        {"SafetyJudge": "SafetyJudge", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "SafetyJudge",
         route_after_safety_judge,
-        {"IOAllowlistJudge": "IOAllowlistJudge", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "IOAllowlistJudge",
         route_after_io_judge,
-        {"E2BExecute": "E2BExecute", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "E2BExecute",
         route_after_e2b,
-        {END: END, "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {END: END, "CodeGen": "CodeGen"},
     )
-    builder.add_edge("IncrementAttempt", "CodeGen")
-    builder.add_edge("FailMax", END)
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -453,6 +425,40 @@ def get_graph():
 def coding_thread_id(session_id: str) -> str:
     """Checkpoint thread id for the coding sub-agent."""
     return f"coding_sub_agent_{session_id}"
+
+
+def build_coding_tool_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Map sub-graph state to the JSON body returned by ``coding_tool``."""
+    status = result.get("status") or "failed"
+    exec_result = result.get("code_execution_result") or {}
+    code_violation: dict[str, str] | None = None
+    if status != "success":
+        viol: dict[str, str] = {}
+        if (result.get("semgrep_feedback") or "").strip():
+            viol["semgrep"] = result["semgrep_feedback"]
+        if (result.get("judge_feedback") or "").strip():
+            viol["judge"] = result["judge_feedback"]
+        if (result.get("io_feedback") or "").strip():
+            viol["io"] = result["io_feedback"]
+        if (result.get("execution_feedback") or "").strip():
+            viol["execution"] = result["execution_feedback"]
+        if not viol and not (result.get("code") or "").strip():
+            viol["codegen"] = "No code produced."
+        code_violation = viol or {"pipeline": "Coding pipeline failed."}
+
+    body: dict[str, Any] = {
+        "status": "success" if status == "success" else "failed",
+        "stdout": exec_result.get("stdout") or "",
+        "stderr": exec_result.get("stderr") or "",
+        "code_violation": code_violation if status != "success" else None,
+        "outputs": list(exec_result.get("copied_outputs") or []),
+        "plots": list(exec_result.get("plots") or []),
+    }
+    if status != "success" and (result.get("code") or "").strip():
+        body["code"] = result["code"]
+    if status != "success" and exec_result:
+        body["code_execution_result"] = exec_result
+    return body
 
 
 def invoke_coding_pipeline(
@@ -477,7 +483,6 @@ def invoke_coding_pipeline(
         "session_id": session_id,
         "tool_call_id": tool_call_id,
         "messages": [HumanMessage(content=profile_block)],
-        "attempt": 1,
         "code": "",
         "semgrep_feedback": "",
         "judge_feedback": "",
@@ -488,37 +493,16 @@ def invoke_coding_pipeline(
         "configurable": {"thread_id": coding_thread_id(session_id)},
         "recursion_limit": CODING_RECURSION_LIMIT,
     }
-    result = graph.invoke(initial, config=config)
+    try:
+        result = graph.invoke(initial, config=config)
+    except GraphRecursionError:
+        snap = graph.get_state(config)
+        result = dict(snap.values) if snap and snap.values else dict(initial)
+        if result.get("status") != "success":
+            result.setdefault("execution_feedback", "")
+            if not (result.get("execution_feedback") or "").strip():
+                result["execution_feedback"] = (
+                    f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
+                )
 
-    status = result.get("status") or "failed"
-    exec_result = result.get("code_execution_result") or {}
-    code_violation: dict[str, str] | None = None
-    if status != "success":
-        viol: dict[str, str] = {}
-        if (result.get("semgrep_feedback") or "").strip():
-            viol["semgrep"] = result["semgrep_feedback"]
-        if (result.get("judge_feedback") or "").strip():
-            viol["judge"] = result["judge_feedback"]
-        if (result.get("io_feedback") or "").strip():
-            viol["io"] = result["io_feedback"]
-        if (result.get("execution_feedback") or "").strip():
-            viol["execution"] = result["execution_feedback"]
-        if not viol and not (result.get("code") or "").strip():
-            viol["codegen"] = "No code produced."
-        code_violation = viol or {"pipeline": "Coding pipeline failed."}
-        if status == "max_attempts":
-            status = "failed"
-
-    body: dict[str, Any] = {
-        "status": "success" if status == "success" else "failed",
-        "stdout": exec_result.get("stdout") or "",
-        "stderr": exec_result.get("stderr") or "",
-        "code_violation": code_violation if status != "success" else None,
-        "outputs": list(exec_result.get("copied_outputs") or []),
-        "plots": list(exec_result.get("plots") or []),
-    }
-    if status != "success" and (result.get("code") or "").strip():
-        body["code"] = result["code"]
-    if status != "success" and exec_result:
-        body["code_execution_result"] = exec_result
-    return body
+    return build_coding_tool_response(result)

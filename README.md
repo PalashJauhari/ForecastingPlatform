@@ -82,7 +82,7 @@ Custom analysis runs through a dedicated coding pipeline:
 
 1. Code is generated for your requirements and declared input/output filenames.
 2. Static rules (Semgrep) and LLM judges check safety and file allowlists.
-3. Approved scripts run in a fresh E2B cloud sandbox per attempt.
+3. Approved scripts run in a fresh E2B cloud sandbox per run; gate failures retry CodeGen until `CODING_RECURSION_LIMIT` (see coding sub-agent `.env`) is reached.
 4. CSV/XLSX outputs land at the session root; PNG/SVG plots under `run_<tool_call_id>/` for inline display.
 
 Guardrails include basename-only paths, allowed extensions, and blocked OS/network/subprocess patterns.

@@ -19,8 +19,8 @@ E2B_API_KEY = os.environ.get("E2B_API_KEY", "").strip()
 CODING_MODEL = os.environ.get("CODING_MODEL", "gpt-4o-mini").strip()
 CODE_JUDGE_MODEL = os.environ.get("CODE_JUDGE_MODEL", CODING_MODEL).strip()
 IO_JUDGE_MODEL = os.environ.get("IO_JUDGE_MODEL", CODE_JUDGE_MODEL).strip()
-CODING_RECURSION_LIMIT = int(os.environ.get("CODING_RECURSION_LIMIT", "50"))
-MAX_CODEGEN_ATTEMPTS = int(os.environ.get("MAX_CODEGEN_ATTEMPTS", "3"))
+# ~6 graph steps per full pass (CodeGen through E2B retry); 24 ≈ 4 full cycles.
+CODING_RECURSION_LIMIT = int(os.environ.get("CODING_RECURSION_LIMIT", "24"))
 E2B_SANDBOX_TIMEOUT_SECONDS = int(os.environ.get("E2B_SANDBOX_TIMEOUT_SECONDS", "300"))
 E2B_EXECUTION_TIMEOUT_SECONDS = int(os.environ.get("E2B_EXECUTION_TIMEOUT_SECONDS", "120"))
 

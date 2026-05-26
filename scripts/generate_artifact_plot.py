@@ -122,7 +122,6 @@ def build_planner_graph():
 
 
 class CodingStubState(TypedDict):
-    attempt: int
     code: str
     semgrep_feedback: NotRequired[str]
     judge_feedback: NotRequired[str]
@@ -131,41 +130,26 @@ class CodingStubState(TypedDict):
     status: NotRequired[str]
 
 
-MAX_CODEGEN_ATTEMPTS = 3
-
-
 def build_coding_graph():
     def route_after_semgrep(state: CodingStubState) -> str:
         if (state.get("semgrep_feedback") or "").strip():
-            attempt = int(state.get("attempt") or 1)
-            if attempt >= MAX_CODEGEN_ATTEMPTS:
-                return "fail_max"
-            return "retry"
+            return "CodeGen"
         return "SafetyJudge"
 
     def route_after_safety_judge(state: CodingStubState) -> str:
         if (state.get("judge_feedback") or "").strip():
-            attempt = int(state.get("attempt") or 1)
-            if attempt >= MAX_CODEGEN_ATTEMPTS:
-                return "fail_max"
-            return "retry"
+            return "CodeGen"
         return "IOAllowlistJudge"
 
     def route_after_io_judge(state: CodingStubState) -> str:
         if (state.get("io_feedback") or "").strip():
-            attempt = int(state.get("attempt") or 1)
-            if attempt >= MAX_CODEGEN_ATTEMPTS:
-                return "fail_max"
-            return "retry"
+            return "CodeGen"
         return "E2BExecute"
 
     def route_after_e2b(state: CodingStubState) -> str:
         if state.get("status") == "success":
             return END
-        attempt = int(state.get("attempt") or 1)
-        if attempt >= MAX_CODEGEN_ATTEMPTS:
-            return "fail_max"
-        return "retry"
+        return "CodeGen"
 
     builder = StateGraph(CodingStubState)
     for name in (
@@ -174,8 +158,6 @@ def build_coding_graph():
         "SafetyJudge",
         "IOAllowlistJudge",
         "E2BExecute",
-        "IncrementAttempt",
-        "FailMax",
     ):
         builder.add_node(name, noop)
 
@@ -184,25 +166,23 @@ def build_coding_graph():
     builder.add_conditional_edges(
         "SemgrepScan",
         route_after_semgrep,
-        {"SafetyJudge": "SafetyJudge", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "SafetyJudge",
         route_after_safety_judge,
-        {"IOAllowlistJudge": "IOAllowlistJudge", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "IOAllowlistJudge",
         route_after_io_judge,
-        {"E2BExecute": "E2BExecute", "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(
         "E2BExecute",
         route_after_e2b,
-        {END: END, "retry": "IncrementAttempt", "fail_max": "FailMax"},
+        {END: END, "CodeGen": "CodeGen"},
     )
-    builder.add_edge("IncrementAttempt", "CodeGen")
-    builder.add_edge("FailMax", END)
     return builder.compile()
 
 
