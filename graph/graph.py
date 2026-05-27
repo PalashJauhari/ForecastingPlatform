@@ -2,14 +2,14 @@
 LangGraph entrypoint for the data-analysis agent: prep, Planner sub-agent,
 Orchestrator, tools, todo check, checkpointing.
 
-Prep path: **ProfileSavedData** → **SummariseConversationalSummary** → **Planner**
-→ **Orchestrator** → (**RunTools** | **TodoCompletionCheck** → … | **FinalAnswer** → END).
+Prep path: **ProfileSavedData** → **Planner** → **Orchestrator** → …
+(SummariseConversationalSummary disabled for now — was ProfileSavedData → Summarise → Planner.)
 
 After **RunTools**: **ProfileSavedData_PostTools** → **Orchestrator**.
 """
 
 from __future__ import annotations
-import asyncio
+# import asyncio  # used by SummariseConversationalSummary (disabled)
 import json
 import os
 import uuid
@@ -33,7 +33,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from typing_extensions import NotRequired, TypedDict
 
-from middleware.context_editing import truncate_and_summarize
+# from middleware.context_editing import truncate_and_summarize  # disabled with Summarise node
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
     LANGFUSE_PARENT_OBS_METADATA_KEY,
@@ -60,8 +60,8 @@ from tools.planning.update_todo import update_todo
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
-TOKEN_THRESHOLD = int(cfg["middleware"]["message_summarisation"]["token_threshold"])
+# KEEP_RECENT = int(cfg["middleware"]["context_editing"]["keep_recent_messages"])
+# TOKEN_THRESHOLD = int(cfg["middleware"]["message_summarisation"]["token_threshold"])
 _USE_NEON = bool((cfg.get("checkpointer") or {}).get("use_neon"))
 GRAPH_RECURSION_LIMIT = int((cfg.get("graph") or {}).get("recursion_limit", 100))
 GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
@@ -142,37 +142,39 @@ def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> 
 
 
 def summarise_conversational_summary(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Evict old turns into ``message_summary`` when over token threshold."""
+    """Evict old turns into ``message_summary`` when over token threshold. (DISABLED)"""
+    del state, config
+    return {}
 
-    def run_truncation() -> tuple[str, list, list]:
-        return asyncio.run(
-            truncate_and_summarize(
-                state["messages"],
-                state.get("message_summary", ""),
-                KEEP_RECENT,
-                TOKEN_THRESHOLD,
-                runnable_config=config,
-            )
-        )
-
-    with observation_parented_to_run(
-        langfuse,
-        config,
-        name="graph.SummariseConversationalSummary",
-        as_type="chain",
-    ):
-        # API/Dash invoke synchronously; truncate uses async LLM via asyncio.run.
-        # Fail fast if already inside a running loop (would need ainvoke path).
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            summary, kept, remove_ops = run_truncation()
-        else:
-            raise RuntimeError(
-                "SummariseConversationalSummary invoked under a running event loop; "
-                "use asynchronous graph execution (ainvoke) for this stack."
-            )
-        return {"message_summary": summary, "messages": remove_ops}
+    # def run_truncation() -> tuple[str, list, list]:
+    #     return asyncio.run(
+    #         truncate_and_summarize(
+    #             state["messages"],
+    #             state.get("message_summary", ""),
+    #             KEEP_RECENT,
+    #             TOKEN_THRESHOLD,
+    #             runnable_config=config,
+    #         )
+    #     )
+    #
+    # with observation_parented_to_run(
+    #     langfuse,
+    #     config,
+    #     name="graph.SummariseConversationalSummary",
+    #     as_type="chain",
+    # ):
+    #     # API/Dash invoke synchronously; truncate uses async LLM via asyncio.run.
+    #     # Fail fast if already inside a running loop (would need ainvoke path).
+    #     try:
+    #         asyncio.get_running_loop()
+    #     except RuntimeError:
+    #         summary, kept, remove_ops = run_truncation()
+    #     else:
+    #         raise RuntimeError(
+    #             "SummariseConversationalSummary invoked under a running event loop; "
+    #             "use asynchronous graph execution (ainvoke) for this stack."
+    #         )
+    #     return {"message_summary": summary, "messages": remove_ops}
 
 
 def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -305,7 +307,7 @@ class AnalysisGraph:
 
     Notes
         * **Tools** — ``coding_tool``, ``sarima_tool``, ``prophet_tool``, ``update_todo``.
-        * **Prep** — **ProfileSavedData** → **SummariseConversationalSummary** → **Planner** → **Orchestrator**.
+        * **Prep** — **ProfileSavedData** → **Planner** → **Orchestrator** (summarise disabled).
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield ``stream_mode="updates"`` chunks.
     """
 
@@ -330,7 +332,7 @@ class AnalysisGraph:
         tool_node = ToolNode(TOOLS)
 
         builder.add_node("ProfileSavedData", profile_saved_data)
-        builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
+        # builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
         # Mounted subgraph: no planner checkpointer; inherits parent for ask_user interrupts.
         builder.add_node("Planner", get_planner_graph())
@@ -340,8 +342,9 @@ class AnalysisGraph:
         builder.add_node("FinalAnswer", final_answer)
 
         builder.set_entry_point("ProfileSavedData")
-        builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-        builder.add_edge("SummariseConversationalSummary", "Planner")
+        # builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
+        # builder.add_edge("SummariseConversationalSummary", "Planner")
+        builder.add_edge("ProfileSavedData", "Planner")  # bypass summarise (disabled for now)
         builder.add_edge("Planner", "Orchestrator")
         builder.add_conditional_edges(
             "Orchestrator",
