@@ -1,5 +1,8 @@
 """
 Load planner sub-agent settings from ``sub_agents/planner_sub_agent/.env``.
+
+``PLANNER_RECURSION_LIMIT`` / ``PLANNER_MAX_CONCURRENCY`` are unused today: the
+mounted subgraph inherits the parent ``AnalysisGraph`` thread config.
 """
 
 from __future__ import annotations

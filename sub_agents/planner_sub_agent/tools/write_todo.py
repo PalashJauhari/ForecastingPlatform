@@ -1,5 +1,8 @@
 """
 Replace the planner sub-graph todo list with a renumbered, all-pending checklist.
+
+Full list replace each planner turn; server assigns ids ``"1"``, ``"2"``, …
+Writes through shared ``todos`` channel visible to parent Orchestrator.
 """
 
 from langchain.tools import ToolRuntime

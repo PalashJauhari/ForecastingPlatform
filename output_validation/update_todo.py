@@ -1,4 +1,7 @@
-"""Validate ``update_todo`` tool arguments."""
+"""Validate ``update_todo`` tool arguments.
+
+``tool_description()`` is consumed by graph prompt / tool doc generation — keep in sync with Field text.
+"""
 
 from __future__ import annotations
 

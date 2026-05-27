@@ -126,6 +126,7 @@ config.yaml          Main platform settings
 
 ## For contributors
 
+- **Prompts** (`prompts/`, `sub_agents/*/prompts.py`) hold LLM instructions; **code comments** explain graph/tool wiring and invariants — do not duplicate prompt text in comments.
 - Main graph: `graph/graph.py`
 - Sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`
 - Regenerate topology diagrams: `python scripts/generate_artifact_plot.py` → `artifact/*.png`

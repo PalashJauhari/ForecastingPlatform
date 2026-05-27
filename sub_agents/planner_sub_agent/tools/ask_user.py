@@ -1,5 +1,8 @@
 """
 Planner sub-graph tool: pause for user clarification via LangGraph ``interrupt``.
+
+Interrupt pauses the **main** graph thread; resume via ``AnalysisGraph.resume``.
+Multiple calls per planning turn are allowed.
 """
 
 from __future__ import annotations

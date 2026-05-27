@@ -2,7 +2,8 @@
 Patch one todo's status in graph state (orchestrator bookkeeping).
 
 Planner assigns sequential string ids (``"1"``, ``"2"``, …). This tool updates
-``status`` only — it does not replace the full todo list.
+``status`` only via ``Command`` patch — it does not replace the full todo list
+(see planner ``write_todo`` for full replace).
 """
 
 from langchain.tools import ToolRuntime
@@ -41,6 +42,7 @@ def update_todo_impl(todo_id: str, status: str, runtime: ToolRuntime) -> Command
         norm = normalize_todo_row(item)
         if norm is not None:
             rows.append(norm)
+        # Rows missing id/content/status are skipped (not echoed back).
 
     # Match exact planner id string (e.g. "1", not integer 1).
     target = validated.todo_id.strip()

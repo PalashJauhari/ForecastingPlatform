@@ -1,5 +1,8 @@
 """
 Pydantic schemas for the coding sub-agent: tool input, codegen output, and judge responses.
+
+Tool-input group: ``CodingToolInput`` and basename validators for E2B I/O.
+Judge-output group: structured schemas for safety / IO allowlist LLM gates.
 """
 
 from __future__ import annotations

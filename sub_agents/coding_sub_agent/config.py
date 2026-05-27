@@ -1,5 +1,7 @@
 """
 Load coding sub-agent settings from ``sub_agents/coding_sub_agent/.env``.
+
+Env matrix: ``CODING_MODEL``, judge models, E2B keys/timeouts, ``CODING_RECURSION_LIMIT``.
 """
 
 from __future__ import annotations

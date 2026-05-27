@@ -1,5 +1,7 @@
 """
 Semgrep static analysis for generated Python in the coding sub-agent.
+
+Fail-closed when semgrep is missing or errors; rules live in ``codegen_scan_semgrep.yaml``.
 """
 
 from __future__ import annotations

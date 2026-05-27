@@ -1,11 +1,10 @@
 """
 Session tabular profiling for the flat per-session workspace.
 
-Used by the ``data_profile`` graph node in ``graph/graph.py``. Profiling reads every
-top-level ``.csv`` / ``.xlsx`` file in ``agent_filesystem/<session>/`` and
-returns a list of per-file summaries stored only in graph state
-(``data_profile``). Numeric columns include a ``stats`` field (``describe()``)
-inside each matching ``column_profiles`` entry.
+Called from ``ProfileSavedData`` (start of turn) and ``ProfileSavedData_PostTools``
+(after RunTools) so ``data_profile`` reflects uploads and tool-written files.
+
+Each row: ``{file, row_count, head, column_profiles}`` (or ``{file, error}``).
 """
 
 from __future__ import annotations

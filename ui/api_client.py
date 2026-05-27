@@ -6,6 +6,9 @@ The Dash app imports this module so UI code stays free of transport details.
 
 Endpoints (must match FastAPI ``Form`` / ``File`` field names):
 
+Python client (this module): ``/upload-data``, ``/run``, ``/resume``, stream helpers.
+Browser (``assets/gb_stream_ui.js``): ``/run/stream``, ``/resume/stream`` via fetch + SSE.
+
 - ``POST /upload-data`` — ``multipart/form-data``: form field ``session_id``,
   file field ``files`` (same name the server expects for ``UploadFile``).
 - ``POST /run`` — ``application/x-www-form-urlencoded``-style body via

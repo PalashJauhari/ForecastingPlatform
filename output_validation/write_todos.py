@@ -1,5 +1,7 @@
 """
 Shared todo typing for Planner output and ``update_todo``.
+
+``TodoRow`` is the canonical shape in graph ``todos`` after ``write_todo``.
 """
 
 from typing import Literal

@@ -62,7 +62,11 @@ def estimate_tokens(messages: list) -> int:
 
 
 def find_human_truncation_cut(messages: list, keep: int) -> int | None:
-    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut."""
+    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut.
+
+    ``AnalysisGraph`` tags each user turn with ``user_input-{uuid}`` ids so eviction
+    never splits mid-turn tool chains.
+    """
     candidate = max(0, len(messages) - keep)
     idx = candidate
     while idx < len(messages):
@@ -153,6 +157,7 @@ async def truncate_and_summarize(
             return previous_summary, messages, []
 
         to_evict = messages[:cut]
+        # RemoveMessage ids pair with add_messages reducer (evict without rewriting full list).
         remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
         updated_summary = await summarize_evicted(
             previous_summary,

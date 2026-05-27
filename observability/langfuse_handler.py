@@ -1,4 +1,8 @@
-"""Shared Langfuse tracing helpers for the Forecasting Platform."""
+"""Shared Langfuse tracing helpers for the Forecasting Platform.
+
+``observation_parented_to_run`` nests spans under RunnableConfig metadata pins.
+``sse_stream_runnable_langfuse_pin`` creates a trace id for SSE (no parent span in stream thread).
+"""
 
 from __future__ import annotations
 

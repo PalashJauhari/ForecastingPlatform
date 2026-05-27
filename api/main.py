@@ -214,6 +214,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     interrupts = result.get("__interrupt__") or []
     if interrupts:
+        # invoke() surfaces interrupt payload on __interrupt__; no extra get_state() needed.
         val = getattr(interrupts[0], "value", interrupts[0])
         if isinstance(val, dict):
             question = val.get("question", str(val))
@@ -344,6 +345,7 @@ def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
 
 
 # Omitted from SSE / UI progress (noisy join / bookkeeping nodes).
+# ProfileSavedData_PostTools re-profiles silently; images come from done.images.
 _SSE_SKIP_PROGRESS_NODES = frozenset({
     "ProfileSavedData_PostTools",
 })

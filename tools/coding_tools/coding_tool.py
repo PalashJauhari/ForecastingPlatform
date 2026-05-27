@@ -1,5 +1,8 @@
 """
 Main-graph LangChain tool: validate args, invoke coding sub-agent, return JSON.
+
+``ToolRuntime`` supplies ``session_id``, ``tool_call_id``, and ``data_profile``
+from the parent graph; return value is JSON string for the orchestrator ToolMessage.
 """
 
 import json
@@ -26,7 +29,7 @@ def coding_tool(
         output_files=output_files,
     )
     session_id = session_id_from_config(runtime.config)
-    tool_call_id = getattr(runtime, "tool_call_id", "") or ""
+    tool_call_id = getattr(runtime, "tool_call_id", "") or ""  # drives run_<id>/ plot paths
     state = runtime.state or {}
     data_profile = state.get("data_profile") or []
 

@@ -350,6 +350,12 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     }
 
 
+# ---------------------------------------------------------------------------
+# Gate routing — any failure retries CodeGen until CODING_RECURSION_LIMIT
+# (~6 graph steps per full pass: CodeGen → … → E2B → retry)
+# ---------------------------------------------------------------------------
+
+
 def route_after_semgrep(state: CodingAgentState) -> str:
     if (state.get("semgrep_feedback") or "").strip():
         return "CodeGen"
@@ -468,7 +474,10 @@ class CodingGraph:
         output_files: list[str],
         data_profile: list,
     ) -> dict[str, Any]:
-        """Run the coding sub-graph and return a tool JSON-shaped dict."""
+        """Run the coding sub-graph and return a tool JSON-shaped dict.
+
+        Separate ``thread_id`` prefix from main graph; one invoke per ``coding_tool`` call.
+        """
         profile_block = (
             "## Session workspace (data_profile)\n"
             f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}"
@@ -490,6 +499,7 @@ class CodingGraph:
         try:
             result = self.graph.invoke(initial, config=config)
         except GraphRecursionError:
+            # Return structured failed JSON instead of bubbling to orchestrator.
             snap = self.graph.get_state(config)
             result = dict(snap.values) if snap and snap.values else dict(initial)
             if result.get("status") != "success":

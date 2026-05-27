@@ -1,5 +1,7 @@
 """
 Pydantic schemas for the planner sub-agent ``write_todo`` tool.
+
+Tool-input validation only (planner LLM output shapes live in prompts, not here).
 """
 
 from pydantic import BaseModel, Field

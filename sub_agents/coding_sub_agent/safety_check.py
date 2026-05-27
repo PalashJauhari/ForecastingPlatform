@@ -16,6 +16,7 @@ class SafetyCheckResult:
     violations: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
+        # Normalize: passed gates clear violations; failed semgrep always has a list.
         if self.passed:
             object.__setattr__(self, "detail", self.detail or "")
             object.__setattr__(self, "violations", None)

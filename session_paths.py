@@ -3,8 +3,13 @@ Session-aware path resolution.
 
 Everything for a session lives in one folder — no ``input/``, ``output/``, or ``code/`` subfolders::
 
-    agent_filesystem/<session-folder>/<filename>   # uploads, data, plots, script outputs
-    agent_filesystem/<session-folder>/pipeline_run.py  # generated runner (tool-managed; not tabular data)
+    agent_filesystem/<session-folder>/<filename>   # uploads (POST /upload-data)
+    agent_filesystem/<session-folder>/run_<tool_call_id>/plot.png  # coding plots
+
+Example logical paths::
+
+    agent_filesystem/default/sales.csv
+    agent_filesystem/default/run_call_abc123/trend.png
 
 On disk (under the repo)::
 
@@ -86,6 +91,7 @@ def resolve_agent_path(session_id: str, logical_path: str) -> Path:
     parts = rel.split("/", 1)
     session_key = parts[0]
     expected = session_dir_for_paths(session_id)
+    # Cross-session guard: logical path must name the current session folder.
     if session_key != expected:
         raise ValueError(
             f"Path session folder {session_key!r} must match current session {expected!r}.",

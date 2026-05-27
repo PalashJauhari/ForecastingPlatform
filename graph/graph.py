@@ -89,6 +89,9 @@ class AgentState(TypedDict):
         message_summary — running summary of evicted messages.
         data_profile    — per-file profiling dicts from ``ProfileSavedData``.
         todos           — session task list; Planner replaces on each new user turn.
+
+    Shared with ``PlannerAgentState`` for mounted subgraph: ``messages``,
+    ``data_profile``, ``todos`` (LangGraph merges channels on the parent thread).
     """
 
     messages: Annotated[list, add_messages]
@@ -106,7 +109,7 @@ TOOLS = [
     sarima_tool,
     prophet_tool,
     update_todo,
-]
+]  # Main-graph tier only; planner tools live under sub_agents/planner_sub_agent/tools/
 
 llm = make_llm(model=cfg["models"]["orchestrator"], temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
@@ -128,7 +131,7 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
 
 
 def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Re-profile workspace after ``RunTools``."""
+    """Re-profile workspace after ``RunTools`` so new CSV/XLSX from tools appear in ``data_profile``."""
     session_id = session_id_from_config(config)
     with observation_parented_to_run(
         langfuse, config, name="graph.ProfileSavedData_PostTools", as_type="span"
@@ -158,6 +161,8 @@ def summarise_conversational_summary(state: AgentState, config: RunnableConfig) 
         name="graph.SummariseConversationalSummary",
         as_type="chain",
     ):
+        # API/Dash invoke synchronously; truncate uses async LLM via asyncio.run.
+        # Fail fast if already inside a running loop (would need ainvoke path).
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -194,6 +199,7 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             "## Conversation Summary\n"
             f"{summary}\n\n"
         )
+        # Context HumanMessage is orchestrator-only (prepended per call, not a separate state key).
         orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
         with observation_parented_to_run(
             langfuse,
@@ -248,7 +254,11 @@ def pending_todos_message(incomplete: List[dict[str, Any]]) -> str:
 
 
 def todo_completion_check(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items."""
+    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items.
+
+    Blocks a non-tool assistant reply until the orchestrator calls ``update_todo``
+    for each item (routes back to Orchestrator via ``route_after_todo_check``).
+    """
     todos_raw = state.get("todos") or []
     todos: List[dict[str, Any]] = [t for t in todos_raw if isinstance(t, dict)]
     incomplete = [t for t in todos if t.get("status") != "completed"]
@@ -322,6 +332,7 @@ class AnalysisGraph:
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
+        # Mounted subgraph: no planner checkpointer; inherits parent for ask_user interrupts.
         builder.add_node("Planner", get_planner_graph())
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
@@ -397,7 +408,10 @@ class AnalysisGraph:
         *,
         langfuse_pin: dict[str, str] | None = None,
     ) -> Iterator[Dict[str, Any]]:
-        """Stream after an ``interrupt``, using ``Command(resume=…)``."""
+        """Stream after an ``interrupt``, using ``Command(resume=…)``.
+
+        Resumes planner ``ask_user`` mid-subgraph when planning paused the main thread.
+        """
         pins = langfuse_pin if langfuse_pin is not None else self.langfuse_invoke_metadata_pins()
         config = self.thread_config(session_id, langfuse_pin=pins)
         yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
@@ -427,6 +441,7 @@ class AnalysisGraph:
         session_id: str,
         value: Any,
     ) -> Dict[str, Any]:
+        """Resume after planner ``ask_user`` interrupt; same ``thread_id`` as ``run_graph``."""
         pins = self.langfuse_invoke_metadata_pins()
         config = self.thread_config(session_id, langfuse_pin=pins)
         result = self.graph.invoke(Command(resume=value), config=config)

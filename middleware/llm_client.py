@@ -20,7 +20,11 @@ def make_llm(
     temperature: float = 0,
     output_schema: Any | None = None,
 ) -> Any:
-    """Build a ``ChatOpenAI`` client with shared rate limiting and optional schema output."""
+    """Build a ``ChatOpenAI`` client with shared rate limiting and optional schema output.
+
+    Pass ``output_schema`` (Pydantic model) when the caller needs structured JSON
+    instead of free-form assistant text (e.g. safety judges).
+    """
     kw: dict[str, Any] = {"model": model, "temperature": temperature}
     if OPENAI_RATE_LIMITER is not None:
         kw["rate_limiter"] = OPENAI_RATE_LIMITER

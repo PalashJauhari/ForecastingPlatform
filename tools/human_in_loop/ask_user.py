@@ -1,9 +1,9 @@
 """
 LangChain tool: ask the user a clarifying question via LangGraph ``interrupt``.
 
-When invoked, the graph pauses and surfaces the question to the API
-caller.  Execution resumes when the API sends ``Command(resume=<answer>)``.
-The user's answer is returned as the tool result (a ``ToolMessage``).
+**Orphan:** not registered on main ``AnalysisGraph.TOOLS``. The planner uses
+``sub_agents/planner_sub_agent/tools/ask_user.py`` (``phase: planner``).
+This copy remains for orchestrator-phase interrupts if wired later.
 """
 
 from __future__ import annotations

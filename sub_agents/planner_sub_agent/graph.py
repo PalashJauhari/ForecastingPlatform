@@ -61,6 +61,7 @@ def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Di
     planner_messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
         *state["messages"],
+        # Ephemeral LLM context only — not appended to shared ``messages`` channel.
         HumanMessage(content=f"## Session workspace (data_profile)\n{profile_block}"),
     ]
     response = llm_with_tools.invoke(planner_messages, config=config)
@@ -71,6 +72,7 @@ def route_after_planner(state: PlannerAgentState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "RunTools"
+    # No tool calls: planning done; parent continues to Orchestrator.
     return END
 
 
@@ -80,7 +82,11 @@ def route_after_planner(state: PlannerAgentState) -> str:
 
 
 class PlannerGraph:
-    """Wrapper around the planner LangGraph subgraph (mounted on ``AnalysisGraph``)."""
+    """Wrapper around the planner LangGraph subgraph (mounted on ``AnalysisGraph``).
+
+    Compiled without a checkpointer so ``ask_user`` interrupts use the parent
+    ``session_id`` thread (``AnalysisGraph.resume``).
+    """
 
     def __init__(self) -> None:
         self.graph = self.build_graph()
