@@ -47,7 +47,7 @@ from observability.langfuse_handler import (
 from prompts.graph_prompts import SYSTEM_PROMPT
 from session_paths import session_id_from_config
 from tools.coding_tools.coding_tool import coding_tool
-from sub_agents.planner_sub_agent.graph import invoke_planner
+from sub_agents.planner_sub_agent.graph import get_planner_graph
 from tools.file_management_tools.profiling_data import profile_session_workspace
 from tools.forecasting.prophet_tool import prophet_tool
 from tools.forecasting.sarima_tool import sarima_tool
@@ -113,16 +113,6 @@ llm_with_tools = llm.bind_tools(TOOLS)
 langfuse = get_langfuse_client()
 
 
-def latest_user_query(messages: list) -> str:
-    """Return text from the most recent HumanMessage."""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if content.strip():
-                return content.strip()
-    return "Complete the user's request."
-
-
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
@@ -178,31 +168,6 @@ def summarise_conversational_summary(state: AgentState, config: RunnableConfig) 
                 "use asynchronous graph execution (ainvoke) for this stack."
             )
         return {"message_summary": summary, "messages": remove_ops}
-
-
-def planner_step(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Invoke planner sub-agent; replace ``todos`` for this user turn."""
-    session_id = session_id_from_config(config)
-    messages = state["messages"]
-    data_profile_rows = state.get("data_profile") or []
-
-    with observation_parented_to_run(
-        langfuse,
-        config,
-        name="graph.Planner",
-        as_type="chain",
-    ):
-        todos_out = invoke_planner(session_id, messages, data_profile_rows)
-        if not todos_out:
-            todos_out = [
-                {
-                    "id": "1",
-                    "content": latest_user_query(messages),
-                    "status": "pending",
-                }
-            ]
-        langfuse.update_current_span(metadata={"planner_todo_count": len(todos_out)})
-        return {"todos": todos_out}
 
 
 def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -357,7 +322,7 @@ class AnalysisGraph:
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
-        builder.add_node("Planner", planner_step)
+        builder.add_node("Planner", get_planner_graph())
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
         builder.add_node("TodoCompletionCheck", todo_completion_check)

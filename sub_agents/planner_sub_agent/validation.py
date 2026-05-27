@@ -15,6 +15,16 @@ class TodoDraftInput(BaseModel):
     )
 
 
+class PlannerAskUserInput(BaseModel):
+    """Arguments for planner ``ask_user``."""
+
+    clarification_required: str = Field(
+        min_length=1,
+        max_length=4000,
+        description="The clarifying question to present to the user before planning continues.",
+    )
+
+
 class WriteTodoInput(BaseModel):
     """Arguments for ``write_todo``: full replacement list for the current user turn."""
 

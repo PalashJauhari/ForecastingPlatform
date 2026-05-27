@@ -105,9 +105,10 @@ Runtime session data lives in `agent_filesystem/` (gitignored). Secrets belong i
 ```text
 api/                 FastAPI service and SSE streaming
 graph/               Main LangGraph agent
-sub_agents/          Planner and coding sub-graphs (prompts, config, validation)
-  planner_sub_agent/tools/write_todo.py   Planner-only ToolNode tool
-  coding_sub_agent/graph.py               Coding pipeline (judge + E2B inlined)
+sub_agents/          Planner and coding sub-graphs (AnalysisGraph-style classes)
+  planner_sub_agent/graph.py              PlannerGraph — mounted on main graph
+  planner_sub_agent/tools/                write_todo, ask_user (planner clarification)
+  coding_sub_agent/graph.py               CodingGraph — invoked by coding_tool
 tools/               Main-graph @tool wrappers only
   coding_tools/coding_tool.py             Invokes coding sub-agent pipeline
   planning/update_todo.py                   Orchestrator todo status patches
@@ -119,7 +120,9 @@ session_paths.py     Session filesystem layout
 config.yaml          Main platform settings
 ```
 
-**Tool placement:** main-graph tools live under `tools/` and register on `graph/graph.py`. Sub-agent internal tools (e.g. planner `write_todo`) live under `sub_agents/<name>/tools/` only.
+**Tool placement:** main-graph tools live under `tools/` and register on `graph/graph.py`. Sub-agent internal tools (planner `write_todo`, `ask_user`) live under `sub_agents/planner_sub_agent/tools/` only.
+
+**Graph classes:** `AnalysisGraph` (main), `PlannerGraph` (mounted subgraph, no checkpointer — inherits parent for interrupts), `CodingGraph` (tool-invoked pipeline). Planner may pause for clarification via `ask_user` before `write_todo`; resume with `POST /resume` on the same session.
 
 ## For contributors
 

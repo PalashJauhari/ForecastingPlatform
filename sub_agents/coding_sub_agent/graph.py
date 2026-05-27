@@ -11,7 +11,6 @@ from typing import Annotated, Any, Dict, List, Literal, NotRequired, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph, add_messages
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
@@ -69,10 +68,6 @@ class CodingAgentState(TypedDict):
     execution_feedback: str
     code_execution_result: NotRequired[CodeExecutionResult]
     status: NotRequired[Literal["success", "failed"]]
-
-
-checkpointer = InMemorySaver()
-compiled_graph = None
 
 
 def build_feedback_block(state: CodingAgentState) -> str:
@@ -379,54 +374,6 @@ def route_after_e2b(state: CodingAgentState) -> str:
     return "CodeGen"
 
 
-def build_graph():
-    """Construct and compile the coding pipeline ``StateGraph``."""
-    builder = StateGraph(CodingAgentState)
-
-    builder.add_node("CodeGen", codegen_node)
-    builder.add_node("SemgrepScan", semgrep_scan_node)
-    builder.add_node("SafetyJudge", safety_judge_node)
-    builder.add_node("IOAllowlistJudge", io_allowlist_judge_node)
-    builder.add_node("E2BExecute", e2b_execute_node)
-
-    builder.set_entry_point("CodeGen")
-    builder.add_edge("CodeGen", "SemgrepScan")
-    builder.add_conditional_edges(
-        "SemgrepScan",
-        route_after_semgrep,
-        {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "SafetyJudge",
-        route_after_safety_judge,
-        {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "IOAllowlistJudge",
-        route_after_io_judge,
-        {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "E2BExecute",
-        route_after_e2b,
-        {END: END, "CodeGen": "CodeGen"},
-    )
-    return builder.compile(checkpointer=checkpointer)
-
-
-def get_graph():
-    """Return the compiled coding sub-graph (lazy singleton)."""
-    global compiled_graph
-    if compiled_graph is None:
-        compiled_graph = build_graph()
-    return compiled_graph
-
-
-def coding_thread_id(session_id: str) -> str:
-    """Checkpoint thread id for the coding sub-agent."""
-    return f"coding_sub_agent_{session_id}"
-
-
 def build_coding_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     """Map sub-graph state to the JSON body returned by ``coding_tool``."""
     status = result.get("status") or "failed"
@@ -461,6 +408,114 @@ def build_coding_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+class CodingGraph:
+    """Wrapper around the coding pipeline LangGraph (invoked by ``coding_tool``)."""
+
+    def __init__(self) -> None:
+        self.graph = self.build_graph()
+
+    def build_graph(self) -> Any:
+        """Construct and compile the coding pipeline ``StateGraph`` (no checkpointer)."""
+        builder = StateGraph(CodingAgentState)
+
+        builder.add_node("CodeGen", codegen_node)
+        builder.add_node("SemgrepScan", semgrep_scan_node)
+        builder.add_node("SafetyJudge", safety_judge_node)
+        builder.add_node("IOAllowlistJudge", io_allowlist_judge_node)
+        builder.add_node("E2BExecute", e2b_execute_node)
+
+        builder.set_entry_point("CodeGen")
+        builder.add_edge("CodeGen", "SemgrepScan")
+        builder.add_conditional_edges(
+            "SemgrepScan",
+            route_after_semgrep,
+            {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
+        )
+        builder.add_conditional_edges(
+            "SafetyJudge",
+            route_after_safety_judge,
+            {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
+        )
+        builder.add_conditional_edges(
+            "IOAllowlistJudge",
+            route_after_io_judge,
+            {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
+        )
+        builder.add_conditional_edges(
+            "E2BExecute",
+            route_after_e2b,
+            {END: END, "CodeGen": "CodeGen"},
+        )
+        return builder.compile()
+
+    @staticmethod
+    def coding_thread_id(session_id: str) -> str:
+        return f"coding_sub_agent_{session_id}"
+
+    def run_config(self, session_id: str) -> Dict[str, Any]:
+        return {
+            "configurable": {"thread_id": self.coding_thread_id(session_id)},
+            "recursion_limit": CODING_RECURSION_LIMIT,
+        }
+
+    def invoke_pipeline(
+        self,
+        *,
+        session_id: str,
+        tool_call_id: str,
+        requirements: str,
+        input_files: list[str],
+        output_files: list[str],
+        data_profile: list,
+    ) -> dict[str, Any]:
+        """Run the coding sub-graph and return a tool JSON-shaped dict."""
+        profile_block = (
+            "## Session workspace (data_profile)\n"
+            f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}"
+        )
+        initial: CodingAgentState = {
+            "requirements": requirements,
+            "input_files": input_files,
+            "output_files": output_files,
+            "session_id": session_id,
+            "tool_call_id": tool_call_id,
+            "messages": [HumanMessage(content=profile_block)],
+            "code": "",
+            "semgrep_feedback": "",
+            "judge_feedback": "",
+            "io_feedback": "",
+            "execution_feedback": "",
+        }
+        config = self.run_config(session_id)
+        try:
+            result = self.graph.invoke(initial, config=config)
+        except GraphRecursionError:
+            snap = self.graph.get_state(config)
+            result = dict(snap.values) if snap and snap.values else dict(initial)
+            if result.get("status") != "success":
+                result.setdefault("execution_feedback", "")
+                if not (result.get("execution_feedback") or "").strip():
+                    result["execution_feedback"] = (
+                        f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
+                    )
+
+        return build_coding_tool_response(result)
+
+
+_default: CodingGraph | None = None
+
+
+def get_coding_graph() -> Any:
+    """Return the compiled coding subgraph (lazy singleton)."""
+    global _default
+    if _default is None:
+        _default = CodingGraph()
+    return _default.graph
+
+
+get_graph = get_coding_graph
+
+
 def invoke_coding_pipeline(
     *,
     session_id: str,
@@ -470,39 +525,15 @@ def invoke_coding_pipeline(
     output_files: list[str],
     data_profile: list,
 ) -> dict[str, Any]:
-    """Run the coding sub-graph and return a tool JSON-shaped dict."""
-    graph = get_graph()
-    profile_block = (
-        "## Session workspace (data_profile)\n"
-        f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}"
+    """Backward-compatible entrypoint for ``coding_tool``."""
+    global _default
+    if _default is None:
+        _default = CodingGraph()
+    return _default.invoke_pipeline(
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        requirements=requirements,
+        input_files=input_files,
+        output_files=output_files,
+        data_profile=data_profile,
     )
-    initial: CodingAgentState = {
-        "requirements": requirements,
-        "input_files": input_files,
-        "output_files": output_files,
-        "session_id": session_id,
-        "tool_call_id": tool_call_id,
-        "messages": [HumanMessage(content=profile_block)],
-        "code": "",
-        "semgrep_feedback": "",
-        "judge_feedback": "",
-        "io_feedback": "",
-        "execution_feedback": "",
-    }
-    config: Dict[str, Any] = {
-        "configurable": {"thread_id": coding_thread_id(session_id)},
-        "recursion_limit": CODING_RECURSION_LIMIT,
-    }
-    try:
-        result = graph.invoke(initial, config=config)
-    except GraphRecursionError:
-        snap = graph.get_state(config)
-        result = dict(snap.values) if snap and snap.values else dict(initial)
-        if result.get("status") != "success":
-            result.setdefault("execution_feedback", "")
-            if not (result.get("execution_feedback") or "").strip():
-                result["execution_feedback"] = (
-                    f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
-                )
-
-    return build_coding_tool_response(result)
