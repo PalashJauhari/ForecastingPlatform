@@ -52,26 +52,36 @@ llm_with_tools = llm.bind_tools(TOOLS)
 
 
 def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Invoke planner LLM; ``write_todo`` commits todos via ``ToolMessage`` + ``todos`` state."""
+    """Invoke planner LLM; latest todos from ``state.todos`` via context block."""
     profile_block = json.dumps(
-        state.get("data_profile") or [],
+        state["data_profile"],
         indent=2,
         ensure_ascii=False,
         default=str,
     )
+    todos_block = json.dumps(
+        state["todos"],
+        indent=2,
+        ensure_ascii=False,
+        default=str,
+    )
+    context_content = (
+        f"## Session workspace (data_profile)\n{profile_block}\n\n"
+        f"## Current Todo List\n{todos_block}"
+    )
     planner_messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
         *state["messages"],
-        HumanMessage(content=f"## Session workspace (data_profile)\n{profile_block}"),
+        HumanMessage(content=context_content),
     ]
     with traced_span("PlannerOrchestrator") as node_span:
         with traced_generation("PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
             response = llm_with_tools.invoke(planner_messages, config=config)
             if gen is not None:
                 update_llm_generation(gen, model=PLANNER_MODEL, raw=response)
-        tool_calls = list(getattr(response, "tool_calls", None) or [])
+        tool_calls = response.tool_calls or []
         if node_span is not None:
-            node_span.update(output={"tool_calls_count": len(tool_calls)})
+            node_span.update(output={"tool_calls": [tc["name"] for tc in tool_calls]})
     return {"messages": [response]}
 
 
@@ -96,10 +106,6 @@ class PlannerGraph:
     """
 
     def __init__(self) -> None:
-        self.graph = self.build_graph()
-
-    def build_graph(self) -> Any:
-        """Construct and compile the planner ``StateGraph`` (no checkpointer)."""
         builder = StateGraph(PlannerAgentState)
         tool_node = ToolNode(TOOLS)
 
@@ -112,7 +118,11 @@ class PlannerGraph:
             {"RunTools": "RunTools", END: END},
         )
         builder.add_edge("RunTools", "PlannerOrchestrator")
-        return builder.compile()
+        self.graph = builder.compile()
+
+    def build_graph(self) -> Any:
+        """Return the compiled planner graph (delegate for callers that build explicitly)."""
+        return self.graph
 
 
 planner_graph_instance: PlannerGraph | None = None
