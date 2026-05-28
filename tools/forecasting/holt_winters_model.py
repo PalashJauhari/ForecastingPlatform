@@ -37,10 +37,11 @@ from prompts.holt_winters_interpretation_prompts import (
     MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
     RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
 )
-from tools.forecasting.base import FitBundle, ForecastingModel, ForecastingToolError, ValidatedData
+from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 DEFAULT_ALPHA = 0.05
 INITIALIZATION_METHOD = "estimated"
+SIMULATION_REPETITIONS = 500
 
 
 class HoltWintersModel(ForecastingModel):
@@ -60,11 +61,10 @@ class HoltWintersModel(ForecastingModel):
             return None
         return value
 
-    def build_series(self, validated: ValidatedData) -> pd.Series:
-        """Build a regular-frequency series from validated ``ds``/``y``."""
-        df = validated.df
-        date_idx = pd.DatetimeIndex(df["ds"].values, freq=validated.freq)
-        return pd.Series(df["y"].values, index=date_idx, name=validated.target_column)
+    def build_series(self, df: pd.DataFrame, freq: str, target_column: str) -> pd.Series:
+        """Build a regular-frequency series from normalized ``ds``/``y``."""
+        date_idx = pd.DatetimeIndex(df["ds"].values, freq=freq)
+        return pd.Series(df["y"].values, index=date_idx, name=target_column)
 
     def validate_holt_winters_config(self, hw_params: HoltWintersToolInput, n_obs: int) -> None:
         """Pre-fit checks for trend/seasonal/period combinations."""
@@ -84,10 +84,18 @@ class HoltWintersModel(ForecastingModel):
                     "fit",
                 )
 
-    def fit(self, validated: ValidatedData, params: BaseForecastToolInput) -> FitBundle:
+    def fit(
+        self,
+        df: pd.DataFrame,
+        freq: str,
+        file_name: str,
+        date_column: str,
+        target_column: str,
+        params: BaseForecastToolInput,
+    ) -> tuple[Any, dict, dict, list[dict], dict]:
         """Fit exponential smoothing / Holt-Winters and compute in-sample fit quality."""
         hw_params = HoltWintersToolInput.model_validate(params.model_dump())
-        series = self.build_series(validated)
+        series = self.build_series(df, freq, target_column)
         self.validate_holt_winters_config(hw_params, int(len(series)))
 
         trend_sm = self.map_component(hw_params.trend)
@@ -169,40 +177,43 @@ class HoltWintersModel(ForecastingModel):
             "initialization_method": INITIALIZATION_METHOD,
         }
 
-        return FitBundle(
-            model=es_fit,
-            model_spec=model_spec,
-            fit_quality=fit_quality,
-            extras={
-                "series": series,
-                "trend_enabled": trend_sm is not None,
-                "seasonal_enabled": seasonal_sm is not None,
-            },
-        )
+        return es_fit, model_spec, fit_quality, [], {
+            "series": series,
+            "trend_enabled": trend_sm is not None,
+            "seasonal_enabled": seasonal_sm is not None,
+        }
 
-    def component_arrays(self, es_fit: Any, fit: FitBundle) -> dict[str, Optional[np.ndarray]]:
+    def component_arrays(
+        self,
+        es_fit: Any,
+        fit_extras: dict,
+    ) -> dict[str, Optional[np.ndarray]]:
         """Extract level/trend/seasonal state arrays from the statsmodels fit."""
         components: dict[str, Optional[np.ndarray]] = {"level": None, "trend": None, "seasonal": None}
         try:
             components["level"] = np.asarray(es_fit.level, dtype=float)
         except Exception:
             pass
-        if fit.extras.get("trend_enabled"):
+        if fit_extras.get("trend_enabled"):
             try:
                 components["trend"] = np.asarray(es_fit.trend, dtype=float)
             except Exception:
                 pass
-        if fit.extras.get("seasonal_enabled"):
+        if fit_extras.get("seasonal_enabled"):
             try:
                 components["seasonal"] = np.asarray(es_fit.season, dtype=float)
             except Exception:
                 pass
         return components
 
-    def analyze_residuals(self, fitted_table: pd.DataFrame, fit: FitBundle) -> dict:
+    def analyze_residuals(
+        self,
+        fitted_table: pd.DataFrame,
+        model_spec: dict,
+        fit_extras: dict,
+    ) -> dict:
         """Ljung-Box and Jarque-Bera diagnostics on in-sample residuals."""
-        spec = fit.model_spec or {}
-        seasonal_period = spec.get("seasonal_period")
+        seasonal_period = model_spec.get("seasonal_period")
         resid = pd.to_numeric(fitted_table["residual"], errors="coerce").dropna()
         n = int(len(resid))
 
@@ -272,10 +283,16 @@ class HoltWintersModel(ForecastingModel):
             },
         }
 
-    def build_fitted_table(self, validated: ValidatedData, fit: FitBundle) -> pd.DataFrame:
+    def build_fitted_table(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        model: Any,
+        fit_extras: dict,
+    ) -> pd.DataFrame:
         """In-sample actual, fitted, and residual."""
-        es_fit = fit.model
-        series: pd.Series = fit.extras["series"]
+        es_fit = model
+        series: pd.Series = fit_extras["series"]
         fitted_vals = es_fit.fittedvalues.reindex(series.index)
         fitted_table = pd.DataFrame(
             {
@@ -289,19 +306,32 @@ class HoltWintersModel(ForecastingModel):
 
     def generate_forecast(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        freq: str,
+        model: Any,
+        fit_extras: dict,
         params: BaseForecastToolInput,
     ) -> pd.DataFrame:
         """Out-of-sample forecasts with 95% prediction intervals."""
-        es_fit = fit.model
-        series: pd.Series = fit.extras["series"]
+        es_fit = model
+        series: pd.Series = fit_extras["series"]
         horizon = int(params.horizon)
 
         try:
-            pred = es_fit.get_forecast(steps=horizon)
-            mean = pred.predicted_mean
-            conf = pred.conf_int(alpha=DEFAULT_ALPHA)
+            mean = es_fit.forecast(steps=horizon)
+            mean_arr = np.asarray(mean, dtype=float).reshape(-1)
+            sim = es_fit.simulate(
+                nsimulations=horizon,
+                anchor="end",
+                repetitions=SIMULATION_REPETITIONS,
+                random_state=42,
+                random_errors="bootstrap",
+            )
+            sim_arr = np.asarray(sim, dtype=float)
+            if sim_arr.ndim == 1:
+                sim_arr = sim_arr.reshape(-1, 1)
+            lower = np.quantile(sim_arr, DEFAULT_ALPHA / 2.0, axis=1)
+            upper = np.quantile(sim_arr, 1.0 - DEFAULT_ALPHA / 2.0, axis=1)
         except Exception as exc:
             raise ForecastingToolError(
                 "forecast_failed",
@@ -309,9 +339,9 @@ class HoltWintersModel(ForecastingModel):
                 "generate_forecast",
             ) from exc
 
-        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=validated.freq)[1:]
+        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=freq)[1:]
         rows: list[dict] = []
-        for ts, m, lo, hi in zip(future_dates, mean.values, conf.iloc[:, 0].values, conf.iloc[:, 1].values):
+        for ts, m, lo, hi in zip(future_dates, mean_arr, lower, upper):
             rows.append(
                 {
                     "calendar_date": pd.Timestamp(ts).date().isoformat(),
@@ -324,15 +354,15 @@ class HoltWintersModel(ForecastingModel):
 
     def build_decomposition(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        model: Any,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
     ) -> pd.DataFrame | None:
         """Combined fitted + forecast decomposition with level/trend/seasonal where available."""
-        es_fit = fit.model
-        series: pd.Series = fit.extras["series"]
-        components = self.component_arrays(es_fit, fit)
+        es_fit = model
+        components = self.component_arrays(es_fit, fit_extras)
 
         fitted_part = fitted_table.copy()
         fitted_part["period_type"] = "fitted"
@@ -361,8 +391,9 @@ class HoltWintersModel(ForecastingModel):
 
     def run_llm_interpretations(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        model_spec: dict,
+        fit_quality: dict,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
         residual_diagnostics: dict,
@@ -370,7 +401,6 @@ class HoltWintersModel(ForecastingModel):
         decomposition_table: pd.DataFrame | None,
     ) -> dict:
         """Five structured LLM calls for Holt-Winters results."""
-        model_spec = fit.model_spec
         forecast_rows = forecast_table.to_dict(orient="records")
         decomposition_rows = decomposition_table.to_dict(orient="records") if decomposition_table is not None else []
         interpretations: dict[str, dict] = {}
@@ -392,7 +422,7 @@ class HoltWintersModel(ForecastingModel):
         )
 
         fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit.fit_quality, "residual_diagnostics": residual_diagnostics},
+            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
             indent=2,
             default=str,
         )
@@ -442,7 +472,7 @@ class HoltWintersModel(ForecastingModel):
         guidance_payload = json.dumps(
             {
                 "model": model_spec,
-                "fit_quality": fit.fit_quality,
+                "fit_quality": fit_quality,
                 "residual_diagnostics": residual_diagnostics,
                 "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": forecast_preview},
             },

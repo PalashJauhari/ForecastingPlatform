@@ -11,10 +11,7 @@ from output_validation.prophet_tool import ProphetToolInput
 from tools.forecasting.prophet_model import ProphetModel
 
 
-@tool(
-    args_schema=ProphetToolInput,
-    description="Prophet forecast on one regular time series; returns JSON + CSV tables (no charts).",
-)
+@tool(args_schema=ProphetToolInput)
 def prophet_tool(
     runtime: ToolRuntime,
     file_name: str,

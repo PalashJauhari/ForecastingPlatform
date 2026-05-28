@@ -11,10 +11,7 @@ from output_validation.holt_winters_tool import HoltWintersToolInput
 from tools.forecasting.holt_winters_model import HoltWintersModel
 
 
-@tool(
-    args_schema=HoltWintersToolInput,
-    description="Holt-Winters / exponential smoothing forecast on one regular time series; JSON + CSV tables (no charts).",
-)
+@tool(args_schema=HoltWintersToolInput)
 def holt_winters_tool(
     runtime: ToolRuntime,
     file_name: str,

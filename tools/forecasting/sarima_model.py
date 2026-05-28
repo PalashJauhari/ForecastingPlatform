@@ -35,7 +35,7 @@ from prompts.sarima_interpretation_prompts import (
     MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
     RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
 )
-from tools.forecasting.base import FitBundle, ForecastingModel, ForecastingToolError, ValidatedData
+from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 DEFAULT_ALPHA = 0.05
 
@@ -51,14 +51,13 @@ class SarimaModel(ForecastingModel):
     def allow_missing_target(self) -> bool:
         return False
 
-    def build_series(self, validated: ValidatedData) -> pd.Series:
-        """Build a regular DatetimeIndex series from validated ``ds``/``y``."""
-        df = validated.df
-        date_idx = pd.DatetimeIndex(df["ds"].values, freq=validated.freq)
+    def build_series(self, df: pd.DataFrame, freq: str, target_column: str) -> pd.Series:
+        """Build a regular DatetimeIndex series from normalized ``ds``/``y``."""
+        date_idx = pd.DatetimeIndex(df["ds"].values, freq=freq)
         return pd.Series(
             df["y"].values,
             index=date_idx,
-            name=validated.target_column,
+            name=target_column,
         )
 
     def select_or_prepare_model_order(
@@ -168,10 +167,18 @@ class SarimaModel(ForecastingModel):
         }
         return spec, warnings_out
 
-    def fit(self, validated: ValidatedData, params: BaseForecastToolInput) -> FitBundle:
+    def fit(
+        self,
+        df: pd.DataFrame,
+        freq: str,
+        file_name: str,
+        date_column: str,
+        target_column: str,
+        params: BaseForecastToolInput,
+    ) -> tuple[Any, dict, dict, list[dict], dict]:
         """Select order, fit SARIMAX, and summarise fit-quality metrics."""
         sarima_params = SarimaToolInput.model_validate(params.model_dump())
-        series = self.build_series(validated)
+        series = self.build_series(df, freq, target_column)
         spec, warnings_out = self.select_or_prepare_model_order(series, sarima_params)
 
         order = tuple(spec["order"])
@@ -245,17 +252,16 @@ class SarimaModel(ForecastingModel):
 
         model_spec = {"model_type": "sarima", **spec}
 
-        return FitBundle(
-            model=sm_fit,
-            model_spec=model_spec,
-            fit_quality=fit_quality,
-            warnings=warnings_out,
-            extras={"spec": spec, "series": series},
-        )
+        return sm_fit, model_spec, fit_quality, warnings_out, {"spec": spec, "series": series}
 
-    def analyze_residuals(self, fitted_table: pd.DataFrame, fit: FitBundle) -> dict:
+    def analyze_residuals(
+        self,
+        fitted_table: pd.DataFrame,
+        model_spec: dict,
+        fit_extras: dict,
+    ) -> dict:
         """Ljung-Box and Jarque-Bera diagnostics on in-sample residuals."""
-        spec = fit.extras.get("spec") or {}
+        spec = fit_extras.get("spec") or {}
         seasonal_period = spec.get("seasonal_period")
         resid = pd.to_numeric(fitted_table["residual"], errors="coerce").dropna()
         n = int(len(resid))
@@ -326,10 +332,16 @@ class SarimaModel(ForecastingModel):
             },
         }
 
-    def build_fitted_table(self, validated: ValidatedData, fit: FitBundle) -> pd.DataFrame:
+    def build_fitted_table(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        model: Any,
+        fit_extras: dict,
+    ) -> pd.DataFrame:
         """In-sample actual, fitted, and residual from the SARIMAX fit."""
-        sm_fit = fit.model
-        series: pd.Series = fit.extras["series"]
+        sm_fit = model
+        series: pd.Series = fit_extras["series"]
         fitted_vals = sm_fit.fittedvalues.reindex(series.index)
         fitted_table = pd.DataFrame(
             {
@@ -343,13 +355,15 @@ class SarimaModel(ForecastingModel):
 
     def generate_forecast(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        freq: str,
+        model: Any,
+        fit_extras: dict,
         params: BaseForecastToolInput,
     ) -> pd.DataFrame:
         """Out-of-sample point forecasts with 95% prediction intervals."""
-        sm_fit = fit.model
-        series: pd.Series = fit.extras["series"]
+        sm_fit = model
+        series: pd.Series = fit_extras["series"]
         horizon = int(params.horizon)
 
         try:
@@ -363,7 +377,7 @@ class SarimaModel(ForecastingModel):
                 "generate_forecast",
             ) from exc
 
-        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=validated.freq)[1:]
+        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=freq)[1:]
         rows: list[dict] = []
         for ts, m, lo, hi in zip(future_dates, mean.values, conf.iloc[:, 0].values, conf.iloc[:, 1].values):
             rows.append(
@@ -378,8 +392,9 @@ class SarimaModel(ForecastingModel):
 
     def run_llm_interpretations(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        model_spec: dict,
+        fit_quality: dict,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
         residual_diagnostics: dict,
@@ -387,7 +402,6 @@ class SarimaModel(ForecastingModel):
         decomposition_table: pd.DataFrame | None,
     ) -> dict:
         """Four structured LLM calls for SARIMA results."""
-        model_spec = fit.model_spec
         forecast_rows = forecast_table.to_dict(orient="records")
         interpretations: dict[str, dict] = {}
 
@@ -408,7 +422,7 @@ class SarimaModel(ForecastingModel):
         )
 
         fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit.fit_quality, "residual_diagnostics": residual_diagnostics},
+            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
             indent=2,
             default=str,
         )
@@ -440,7 +454,7 @@ class SarimaModel(ForecastingModel):
         guidance_payload = json.dumps(
             {
                 "model": model_spec,
-                "fit_quality": fit.fit_quality,
+                "fit_quality": fit_quality,
                 "residual_diagnostics": residual_diagnostics,
                 "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": preview},
             },

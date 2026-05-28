@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,40 +55,9 @@ class ForecastingToolError(Exception):
         self.stage = stage
 
 
-@dataclass
-class ValidatedData:
-    """Normalized session input after ``validate_data``."""
-
-    df: pd.DataFrame
-    freq: str
-    file_name: str
-    date_column: str
-    target_column: str
-
-
-@dataclass
-class FitBundle:
-    """Output of ``fit`` — everything downstream needs except forecast tables."""
-
-    model: Any
-    model_spec: dict
-    fit_quality: dict
-    warnings: list[dict] = field(default_factory=list)
-    extras: dict = field(default_factory=dict)
-
-
-@dataclass
-class SavedPaths:
-    """Logical paths written under ``agent_filesystem/<session>/``."""
-
-    forecast_output_file: str
-    fitted_output_file: str
-    decomposition_output_file: str | None = None
-
-
 class ForecastingModel(ABC):
     """
-    Template-method base for ``sarima_tool`` and ``prophet_tool``.
+    Template-method base for forecasting tools.
 
     Subclasses override ``fit``, ``analyze_residuals``, ``generate_forecast``,
     ``build_fitted_table``, and ``run_llm_interpretations``.
@@ -101,7 +69,7 @@ class ForecastingModel(ABC):
     @property
     @abstractmethod
     def model_type(self) -> str:
-        """Short model id surfaced in JSON (``sarima`` or ``prophet``)."""
+        """Short model id surfaced in JSON (``sarima``, ``prophet``, ``holt_winters``)."""
 
     @property
     @abstractmethod
@@ -109,31 +77,53 @@ class ForecastingModel(ABC):
         """If false, any missing target row fails validation (SARIMA)."""
 
     @abstractmethod
-    def fit(self, validated: ValidatedData, params: BaseForecastToolInput) -> FitBundle:
-        """Fit the model and return spec + fit-quality metrics."""
+    def fit(
+        self,
+        df: pd.DataFrame,
+        freq: str,
+        file_name: str,
+        date_column: str,
+        target_column: str,
+        params: BaseForecastToolInput,
+    ) -> tuple[Any, dict, dict, list[dict], dict]:
+        """Fit the model; return (model, model_spec, fit_quality, fit_warnings, fit_extras)."""
 
     @abstractmethod
-    def analyze_residuals(self, fitted_table: pd.DataFrame, fit: FitBundle) -> dict:
+    def analyze_residuals(
+        self,
+        fitted_table: pd.DataFrame,
+        model_spec: dict,
+        fit_extras: dict,
+    ) -> dict:
         """Return residual diagnostics dict with status, metrics, warnings, definitions."""
 
     @abstractmethod
     def generate_forecast(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        freq: str,
+        model: Any,
+        fit_extras: dict,
         params: BaseForecastToolInput,
     ) -> pd.DataFrame:
         """Return forecast table with at least calendar_date and forecast columns."""
 
     @abstractmethod
-    def build_fitted_table(self, validated: ValidatedData, fit: FitBundle) -> pd.DataFrame:
+    def build_fitted_table(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        model: Any,
+        fit_extras: dict,
+    ) -> pd.DataFrame:
         """Return in-sample table: calendar_date, actual, fitted, residual."""
 
     @abstractmethod
     def run_llm_interpretations(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        model_spec: dict,
+        fit_quality: dict,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
         residual_diagnostics: dict,
@@ -144,15 +134,16 @@ class ForecastingModel(ABC):
 
     def build_decomposition(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        model: Any,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
     ) -> pd.DataFrame | None:
         """Optional combined fitted + forecast decomposition; default none."""
         return None
 
-    def changepoints_for_response(self, fit: FitBundle) -> dict | None:
+    def changepoints_for_response(self, fit_extras: dict) -> dict | None:
         """Optional changepoint block for unified JSON; default none."""
         return None
 
@@ -166,12 +157,11 @@ class ForecastingModel(ABC):
         file_name: str,
         date_column: str,
         target_column: str,
-    ) -> ValidatedData:
+    ) -> tuple[pd.DataFrame, str, str, str, str]:
         """
         Load CSV/XLSX from the session workspace and normalize to ``ds`` / ``y``.
 
-        Steps: locate file, read by extension, check columns, parse dates, sort,
-        dedupe dates, infer regular frequency, sanity-check target column.
+        Returns (df, freq, file_name, date_column, target_column).
         """
         # 1. Locate the file inside the session workspace; error if missing.
         name = Path(file_name).name
@@ -277,13 +267,7 @@ class ForecastingModel(ABC):
                     "data_validation",
                 )
 
-        return ValidatedData(
-            df=df,
-            freq=freq,
-            file_name=name,
-            date_column=date_column,
-            target_column=target_column,
-        )
+        return df, freq, name, date_column, target_column
 
     def save_table(
         self,
@@ -349,8 +333,8 @@ class ForecastingModel(ABC):
         forecast_table: pd.DataFrame,
         params: BaseForecastToolInput,
         decomposition_table: pd.DataFrame | None,
-    ) -> SavedPaths:
-        """Persist forecast + fitted (+ optional decomposition) tables."""
+    ) -> tuple[str, str, str | None]:
+        """Persist forecast + fitted (+ optional decomposition) tables; return logical paths."""
         forecast_path = self.save_table(
             forecast_table,
             session_id,
@@ -372,23 +356,23 @@ class ForecastingModel(ABC):
                 decomp_file,
                 "save_decomposition",
             )
-        return SavedPaths(
-            forecast_output_file=forecast_path,
-            fitted_output_file=fitted_path,
-            decomposition_output_file=decomposition_path,
-        )
+        return forecast_path, fitted_path, decomposition_path
 
     def build_response(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        freq: str,
+        model_spec: dict,
+        fit_quality: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
         residual_diagnostics: dict,
-        paths: SavedPaths,
+        forecast_output_file: str,
+        fitted_output_file: str,
+        decomposition_output_file: str | None,
         llm_interpretation: dict,
         warnings_out: list[dict],
         decomposition_table: pd.DataFrame | None,
+        fit_extras: dict,
     ) -> str:
         """Pack the unified JSON envelope returned to the orchestrator."""
         forecast_rows = forecast_table.to_dict(orient="records")
@@ -400,14 +384,14 @@ class ForecastingModel(ABC):
         response: dict[str, Any] = {
             "status": "success_with_warnings" if has_warnings else "success",
             "model_type": self.model_type,
-            "frequency": validated.freq,
-            "model": fit.model_spec,
-            "fit_quality": fit.fit_quality,
+            "frequency": freq,
+            "model": model_spec,
+            "fit_quality": fit_quality,
             "residual_diagnostics": residual_diagnostics,
-            "changepoints": self.changepoints_for_response(fit),
-            "forecast_output_file": paths.forecast_output_file,
-            "fitted_output_file": paths.fitted_output_file,
-            "decomposition_output_file": paths.decomposition_output_file,
+            "changepoints": self.changepoints_for_response(fit_extras),
+            "forecast_output_file": forecast_output_file,
+            "fitted_output_file": fitted_output_file,
+            "decomposition_output_file": decomposition_output_file,
             "horizon": len(forecast_rows),
             "forecast_preview": forecast_rows[:FORECAST_PREVIEW_ROWS],
             "fitted_preview": fitted_rows[-FITTED_PREVIEW_ROWS:],
@@ -455,7 +439,7 @@ class ForecastingModel(ABC):
             warnings_out: list[dict] = []
             try:
                 # 1. Validate and normalize input.
-                validated = self.validate_data(
+                df, freq, file_name, date_column, target_column = self.validate_data(
                     self.session_id,
                     params.file_name,
                     params.date_column,
@@ -463,25 +447,38 @@ class ForecastingModel(ABC):
                 )
 
                 # 2. Fit the model.
-                fit = self.fit(validated, params)
-                warnings_out.extend(fit.warnings)
+                model, model_spec, fit_quality, fit_warnings, fit_extras = self.fit(
+                    df,
+                    freq,
+                    file_name,
+                    date_column,
+                    target_column,
+                    params,
+                )
+                warnings_out.extend(fit_warnings)
 
                 # 3. Build in-sample fitted table.
-                fitted_table = self.build_fitted_table(validated, fit)
+                fitted_table = self.build_fitted_table(df, target_column, model, fit_extras)
 
                 # 4. Residual diagnostics (warnings only, not errors).
-                residual_diagnostics = self.analyze_residuals(fitted_table, fit)
+                residual_diagnostics = self.analyze_residuals(fitted_table, model_spec, fit_extras)
                 for w in residual_diagnostics.get("warnings", []) or []:
                     warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
                 # 5. Future forecast table.
-                forecast_table = self.generate_forecast(validated, fit, params)
+                forecast_table = self.generate_forecast(df, freq, model, fit_extras, params)
 
-                # 6. Optional decomposition (Prophet).
-                decomposition_table = self.build_decomposition(validated, fit, fitted_table, forecast_table)
+                # 6. Optional decomposition (Prophet / Holt-Winters).
+                decomposition_table = self.build_decomposition(
+                    df,
+                    model,
+                    fit_extras,
+                    fitted_table,
+                    forecast_table,
+                )
 
                 # 7. Save artifacts to session workspace.
-                paths = self.save_outputs(
+                forecast_path, fitted_path, decomposition_path = self.save_outputs(
                     self.session_id,
                     fitted_table,
                     forecast_table,
@@ -491,8 +488,9 @@ class ForecastingModel(ABC):
 
                 # 8. LLM interpretation of deterministic results.
                 llm_interpretation = self.run_llm_interpretations(
-                    validated,
-                    fit,
+                    model_spec,
+                    fit_quality,
+                    fit_extras,
                     fitted_table,
                     forecast_table,
                     residual_diagnostics,
@@ -502,15 +500,19 @@ class ForecastingModel(ABC):
 
                 # 9. Unified JSON response.
                 response = self.build_response(
-                    validated,
-                    fit,
+                    freq,
+                    model_spec,
+                    fit_quality,
                     fitted_table,
                     forecast_table,
                     residual_diagnostics,
-                    paths,
+                    forecast_path,
+                    fitted_path,
+                    decomposition_path,
                     llm_interpretation,
                     warnings_out,
                     decomposition_table,
+                    fit_extras,
                 )
                 if tool_span is not None:
                     tool_span.update(metadata={"warnings": str(len(warnings_out))})

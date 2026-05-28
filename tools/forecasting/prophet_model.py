@@ -35,7 +35,7 @@ from prompts.prophet_interpretation_prompts import (
     MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
     RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
 )
-from tools.forecasting.base import FitBundle, ForecastingModel, ForecastingToolError, ValidatedData
+from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 # Fixed Prophet parameters kept off the tool surface.
 CHANGEPOINT_RANGE = 0.8
@@ -60,13 +60,20 @@ class ProphetModel(ForecastingModel):
     def allow_missing_target(self) -> bool:
         return True
 
-    def changepoints_for_response(self, fit: FitBundle) -> dict | None:
-        return fit.extras.get("changepoints")
+    def changepoints_for_response(self, fit_extras: dict) -> dict | None:
+        return fit_extras.get("changepoints")
 
-    def fit(self, validated: ValidatedData, params: BaseForecastToolInput) -> FitBundle:
+    def fit(
+        self,
+        df: pd.DataFrame,
+        freq: str,
+        file_name: str,
+        date_column: str,
+        target_column: str,
+        params: BaseForecastToolInput,
+    ) -> tuple[Any, dict, dict, list[dict], dict]:
         """Configure Prophet, fit on ``ds``/``y``, and compute in-sample predictions."""
         prophet_params = ProphetToolInput.model_validate(params.model_dump())
-        df = validated.df
 
         with traced_span(
             "prophet_tool.fit_model",
@@ -155,15 +162,10 @@ class ProphetModel(ForecastingModel):
             "daily_seasonality": DAILY_SEASONALITY,
         }
 
-        return FitBundle(
-            model=model,
-            model_spec=model_spec,
-            fit_quality=fit_quality,
-            extras={
-                "in_sample": in_sample,
-                "changepoints": changepoints,
-            },
-        )
+        return model, model_spec, fit_quality, [], {
+            "in_sample": in_sample,
+            "changepoints": changepoints,
+        }
 
     def extract_changepoints(self, model: Any) -> dict:
         """Summarise Prophet changepoint dates and top deltas."""
@@ -195,7 +197,12 @@ class ProphetModel(ForecastingModel):
             "largest_delta_changepoints": largest_delta_changepoints,
         }
 
-    def analyze_residuals(self, fitted_table: pd.DataFrame, fit: FitBundle) -> dict:
+    def analyze_residuals(
+        self,
+        fitted_table: pd.DataFrame,
+        model_spec: dict,
+        fit_extras: dict,
+    ) -> dict:
         """MAD-based residual outlier diagnostics on the fitted table."""
         actuals = pd.to_numeric(fitted_table["actual"], errors="coerce").to_numpy()
         fitted_vals = pd.to_numeric(fitted_table["fitted"], errors="coerce").to_numpy()
@@ -263,16 +270,17 @@ class ProphetModel(ForecastingModel):
 
     def generate_forecast(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        freq: str,
+        model: Any,
+        fit_extras: dict,
         params: BaseForecastToolInput,
     ) -> pd.DataFrame:
         """Future-only Prophet forecast at the inferred frequency."""
-        model = fit.model
         try:
             future = model.make_future_dataframe(
                 periods=int(params.horizon),
-                freq=validated.freq,
+                freq=freq,
                 include_history=False,
             )
             forecast_future = model.predict(future)
@@ -283,7 +291,7 @@ class ProphetModel(ForecastingModel):
                 "generate_forecast",
             ) from exc
 
-        in_sample = fit.extras["in_sample"]
+        in_sample = fit_extras["in_sample"]
         fitted_components = [c for c in COMPONENT_COLS if c in in_sample.columns]
         forecast_components = [c for c in COMPONENT_COLS if c in forecast_future.columns]
         component_cols = forecast_components or fitted_components
@@ -291,17 +299,22 @@ class ProphetModel(ForecastingModel):
         forecast_table = forecast_future[["ds", "yhat"] + component_cols].copy()
         forecast_table = forecast_table.rename(columns={"ds": "calendar_date", "yhat": "forecast"})
         forecast_table["calendar_date"] = pd.to_datetime(forecast_table["calendar_date"]).dt.date.astype(str)
-        fit.extras["forecast_components"] = component_cols
-        fit.extras["fitted_components"] = fitted_components
-        fit.extras["forecast_future"] = forecast_future
+        fit_extras["forecast_components"] = component_cols
+        fit_extras["fitted_components"] = fitted_components
+        fit_extras["forecast_future"] = forecast_future
         return forecast_table
 
-    def build_fitted_table(self, validated: ValidatedData, fit: FitBundle) -> pd.DataFrame:
+    def build_fitted_table(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        model: Any,
+        fit_extras: dict,
+    ) -> pd.DataFrame:
         """In-sample actual, fitted, residual, and component columns."""
-        df = validated.df
-        in_sample = fit.extras["in_sample"]
+        in_sample = fit_extras["in_sample"]
         fitted_components = [c for c in COMPONENT_COLS if c in in_sample.columns]
-        fit.extras["fitted_components"] = fitted_components
+        fit_extras["fitted_components"] = fitted_components
 
         fitted_table = pd.merge(
             df[["ds", "y"]],
@@ -317,20 +330,20 @@ class ProphetModel(ForecastingModel):
 
     def build_decomposition(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        df: pd.DataFrame,
+        model: Any,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
     ) -> pd.DataFrame | None:
         """Combined fitted + forecast decomposition table."""
-        df = validated.df
-        in_sample = fit.extras["in_sample"]
-        forecast_future = fit.extras.get("forecast_future")
+        in_sample = fit_extras["in_sample"]
+        forecast_future = fit_extras.get("forecast_future")
         if forecast_future is None:
             return None
 
-        fitted_components = fit.extras.get("fitted_components") or []
-        forecast_components = fit.extras.get("forecast_components") or []
+        fitted_components = fit_extras.get("fitted_components") or []
+        forecast_components = fit_extras.get("forecast_components") or []
         all_components = [c for c in COMPONENT_COLS if c in fitted_components or c in forecast_components]
 
         decomposition_fit = pd.merge(
@@ -354,8 +367,9 @@ class ProphetModel(ForecastingModel):
 
     def run_llm_interpretations(
         self,
-        validated: ValidatedData,
-        fit: FitBundle,
+        model_spec: dict,
+        fit_quality: dict,
+        fit_extras: dict,
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
         residual_diagnostics: dict,
@@ -363,8 +377,7 @@ class ProphetModel(ForecastingModel):
         decomposition_table: pd.DataFrame | None,
     ) -> dict:
         """Five structured LLM calls for Prophet results."""
-        model_spec = fit.model_spec
-        changepoints = fit.extras.get("changepoints") or {}
+        changepoints = fit_extras.get("changepoints") or {}
         forecast_rows = forecast_table.to_dict(orient="records")
         decomposition_rows = decomposition_table.to_dict(orient="records") if decomposition_table is not None else []
         interpretations: dict[str, dict] = {}
@@ -386,7 +399,7 @@ class ProphetModel(ForecastingModel):
         )
 
         fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit.fit_quality, "residual_diagnostics": residual_diagnostics},
+            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
             indent=2,
             default=str,
         )
@@ -431,7 +444,7 @@ class ProphetModel(ForecastingModel):
         guidance_payload = json.dumps(
             {
                 "model": model_spec,
-                "fit_quality": fit.fit_quality,
+                "fit_quality": fit_quality,
                 "residual_diagnostics": residual_diagnostics,
                 "changepoints": changepoints,
                 "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": forecast_preview},

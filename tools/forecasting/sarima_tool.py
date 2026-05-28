@@ -11,10 +11,7 @@ from output_validation.sarima_tool import SarimaToolInput
 from tools.forecasting.sarima_model import SarimaModel
 
 
-@tool(
-    args_schema=SarimaToolInput,
-    description="ARIMA/SARIMA forecast on one regular time series; returns JSON + CSV tables (no charts).",
-)
+@tool(args_schema=SarimaToolInput)
 def sarima_tool(
     runtime: ToolRuntime,
     file_name: str,
