@@ -28,5 +28,17 @@ CODING_RECURSION_LIMIT = int(os.environ.get("CODING_RECURSION_LIMIT", "24"))
 E2B_SANDBOX_TIMEOUT_SECONDS = int(os.environ.get("E2B_SANDBOX_TIMEOUT_SECONDS", "120"))
 E2B_EXECUTION_TIMEOUT_SECONDS = int(os.environ.get("E2B_EXECUTION_TIMEOUT_SECONDS", "120"))
 
+
+def env_bool(name: str, *, default: bool) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+# When true, ``e2b_execute_node`` calls ``sandbox.kill()`` after each run (production default).
+# Set false to leave sandboxes in the E2B dashboard for debugging (clean up manually).
+E2B_KILL_SANDBOX = env_bool("E2B_KILL_SANDBOX", default=False)
+
 PLOT_FILE_EXTENSIONS = frozenset({".png", ".svg"})
 TABULAR_OUTPUT_EXTENSIONS = frozenset({".csv", ".xlsx"})

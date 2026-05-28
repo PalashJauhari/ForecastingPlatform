@@ -41,7 +41,7 @@ On each new message the agent profiles your files, summarizes long context, buil
 
 2. **Configure environment**
 
-   - Copy `.env.example` to `.env` at the repo root (OpenAI key, optional Postgres checkpoint URL).
+   - Copy `.env.example` to `.env` at the repo root (OpenAI key, optional Postgres checkpoint URL, optional Langfuse keys when tracing is enabled).
    - Copy sub-agent templates:
      - `sub_agents/planner_sub_agent/.env.example` → `.env`
      - `sub_agents/coding_sub_agent/.env.example` → `.env`
@@ -94,7 +94,7 @@ pip install 'e2b>=2.3.0'
 python sub_agents/coding_sub_agent/build_e2b_template.py --write-env
 ```
 
-Set `E2B_API_KEY` in `sub_agents/coding_sub_agent/.env` before building. After build, ensure `E2B_TEMPLATE_NAME` (and optional `E2B_TEMPLATE_ID`) are in that `.env`. Runtime uses `allow_internet_access=False` and a 2-minute sandbox timeout (`E2B_SANDBOX_TIMEOUT_SECONDS=120`).
+Set `E2B_API_KEY` in `sub_agents/coding_sub_agent/.env` before building. After build, ensure `E2B_TEMPLATE_NAME` (and optional `E2B_TEMPLATE_ID`) are in that `.env`. Requires `e2b-code-interpreter>=2.7.0` (supports `lifecycle` on `Sandbox.create`). Runtime uses `allow_internet_access=False` and a 2-minute sandbox timeout (`E2B_SANDBOX_TIMEOUT_SECONDS=120`). By default `E2B_KILL_SANDBOX=false` so sandboxes stay visible in the E2B dashboard for debugging; set `true` in production to `kill()` after each run.
 
 Guardrails include basename-only paths, allowed extensions, and blocked OS/network/subprocess patterns.
 
@@ -110,6 +110,16 @@ Guardrails include basename-only paths, allowed extensions, and blocked OS/netwo
 **Sub-agents** (separate `.env` files): planner model and limits; coding/judge models, E2B keys, retry limits. See each folder’s `.env.example`.
 
 Runtime session data lives in `agent_filesystem/` (gitignored). Secrets belong in `.env` files only.
+
+## Observability
+
+Set `LANGFUSE_TRACING_ENABLED=true` (plus Langfuse keys in root `.env`) for one trace per `POST /run`, `POST /run/stream`, or `POST /resume`. The graph layer owns tracing: nested node spans, planner sub-graph spans, forecasting tool pipelines, and coding sub-agent spans (with explicit trace linking for nested `coding_tool` invokes). LLM generations record token counts only; SSE and the UI stay trace-free.
+
+Notes:
+
+- Planner `ask_user` interrupts produce a separate `resume` root span when you call `POST /resume` — expected for one logical turn.
+- Coding span payloads truncate code and stderr previews; full artifacts remain on disk.
+- Parallel tool calls (`max_concurrency: 2`) may flatten nesting in Langfuse when multiple tools run in one orchestrator step.
 
 ## Project structure
 

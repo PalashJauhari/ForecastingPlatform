@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 
+from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
 from sub_agents.planner_sub_agent.config import PLANNER_MODEL
 from sub_agents.planner_sub_agent.prompts import PLANNER_SYSTEM_PROMPT
 from sub_agents.planner_sub_agent.tools.ask_user import ask_user
@@ -51,7 +52,7 @@ llm_with_tools = llm.bind_tools(TOOLS)
 
 
 def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Invoke planner LLM with parent messages and ephemeral data_profile context."""
+    """Invoke planner LLM; ``write_todo`` commits todos via ``ToolMessage`` + ``todos`` state."""
     profile_block = json.dumps(
         state.get("data_profile") or [],
         indent=2,
@@ -61,18 +62,24 @@ def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Di
     planner_messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
         *state["messages"],
-        # Ephemeral LLM context only — not appended to shared ``messages`` channel.
         HumanMessage(content=f"## Session workspace (data_profile)\n{profile_block}"),
     ]
-    response = llm_with_tools.invoke(planner_messages, config=config)
+    with traced_span("PlannerOrchestrator") as node_span:
+        with traced_generation("PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
+            response = llm_with_tools.invoke(planner_messages, config=config)
+            if gen is not None:
+                update_llm_generation(gen, model=PLANNER_MODEL, raw=response)
+        tool_calls = list(getattr(response, "tool_calls", None) or [])
+        if node_span is not None:
+            node_span.update(output={"tool_calls_count": len(tool_calls)})
     return {"messages": [response]}
 
 
 def route_after_planner(state: PlannerAgentState) -> str:
+    """Only ``PlannerOrchestrator`` ends planning: no tool calls → ``END``; else ``RunTools``."""
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "RunTools"
-    # No tool calls: planning done; parent continues to Orchestrator.
     return END
 
 
@@ -108,16 +115,15 @@ class PlannerGraph:
         return builder.compile()
 
 
-_default: PlannerGraph | None = None
+planner_graph_instance: PlannerGraph | None = None
 
 
 def get_planner_graph() -> Any:
     """Return the compiled planner subgraph (lazy singleton)."""
-    global _default
-    if _default is None:
-        _default = PlannerGraph()
-    return _default.graph
+    global planner_graph_instance
+    if planner_graph_instance is None:
+        planner_graph_instance = PlannerGraph()
+    return planner_graph_instance.graph
 
 
-# Backward-compatible alias
 get_graph = get_planner_graph

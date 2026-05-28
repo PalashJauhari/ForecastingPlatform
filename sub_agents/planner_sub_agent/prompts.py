@@ -10,6 +10,7 @@ Finish planning with exactly one **`write_todo`** call containing the full repla
 # Input context
 - **`messages`** — the live conversation channel from the main graph (user, assistant, tool, and workflow turns). Focus on the **latest user goal**; ignore orchestrator workflow or tool noise from earlier turns when deciding the plan.
 - **`data_profile`** — appended below as session workspace context (filenames and structure).
+- **`Current Todo List`** — after **`write_todo`**, read it from the latest **`write_todo` tool message** in **`messages`** (and from graph state for the main Orchestrator).
 
 Use **filename only** for files (e.g. `sales.csv`), never session paths.
 
@@ -27,5 +28,6 @@ When the request is ambiguous and you cannot plan responsibly, call **`ask_user`
 Do not set statuses or ids — **`write_todo`** assigns sequential ids and `pending` to every row.
 
 # Stop rules
-When planning is complete (with any clarifications resolved), call **`write_todo` once** with the final list — including **`[]`** when no checklist is needed. Do not end without calling **`write_todo`**.
+When planning is complete (with any clarifications resolved), call **`write_todo` once** with the final list — including **`[]`** when no checklist is needed.
+After **`write_todo`** succeeds, the tool **`messages`** entry with **`## Current Todo List`** is authoritative. Do **not** call **`write_todo`** again. End planning by replying with a short confirmation and **no tool calls** — only that reply routes to graph **`END`**; execution then continues on the main Orchestrator.
 """

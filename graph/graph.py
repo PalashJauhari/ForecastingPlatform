@@ -23,7 +23,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langfuse import observe
+from langfuse import propagate_attributes
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, StateGraph, add_messages
@@ -36,13 +36,14 @@ from typing_extensions import NotRequired, TypedDict
 # from middleware.context_editing import truncate_and_summarize  # disabled with Summarise node
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
-    LANGFUSE_PARENT_OBS_METADATA_KEY,
-    LANGFUSE_TRACE_ID_METADATA_KEY,
-    extract_usage_details,
-    get_langfuse_client,
-    observation_parented_to_run,
-    serialize_message,
-    serialize_messages,
+    flush_langfuse,
+    is_tracing_enabled,
+    reset_run_trace_snapshot,
+    set_run_trace_snapshot,
+    traced_generation,
+    traced_span,
+    tracing_root,
+    update_llm_generation,
 )
 from prompts.graph_prompts import SYSTEM_PROMPT
 from session_paths import session_id_from_config
@@ -65,6 +66,7 @@ cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 _USE_NEON = bool((cfg.get("checkpointer") or {}).get("use_neon"))
 GRAPH_RECURSION_LIMIT = int((cfg.get("graph") or {}).get("recursion_limit", 100))
 GRAPH_MAX_CONCURRENCY = int((cfg.get("graph") or {}).get("max_concurrency", 2))
+ORCHESTRATOR_MODEL = cfg["models"]["orchestrator"]
 
 
 class TodoEntry(TypedDict):
@@ -111,9 +113,8 @@ TOOLS = [
     update_todo,
 ]  # Main-graph tier only; planner tools live under sub_agents/planner_sub_agent/tools/
 
-llm = make_llm(model=cfg["models"]["orchestrator"], temperature=0)
+llm = make_llm(model=ORCHESTRATOR_MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
-langfuse = get_langfuse_client()
 
 
 # ---------------------------------------------------------------------------
@@ -124,20 +125,20 @@ langfuse = get_langfuse_client()
 def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Delegate to ``profiling_data.profile_session_workspace`` and set ``data_profile``."""
     session_id = session_id_from_config(config)
-    with observation_parented_to_run(langfuse, config, name="graph.ProfileSavedData", as_type="span") as obs:
+    with traced_span("ProfileSavedData", metadata={"session_id": session_id}) as span:
         rows: List[Any] = profile_session_workspace(session_id)
-        obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
+        if span is not None:
+            span.update(output={"profile_entries": len(rows), "session_id": session_id})
         return {"data_profile": rows}
 
 
 def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Re-profile workspace after ``RunTools`` so new CSV/XLSX from tools appear in ``data_profile``."""
     session_id = session_id_from_config(config)
-    with observation_parented_to_run(
-        langfuse, config, name="graph.ProfileSavedData_PostTools", as_type="span"
-    ) as obs:
+    with traced_span("ProfileSavedData_PostTools", metadata={"session_id": session_id}) as span:
         rows: List[Any] = profile_session_workspace(session_id)
-        obs.update(metadata={"profile_entries": len(rows), "session_id": session_id})
+        if span is not None:
+            span.update(output={"profile_entries": len(rows), "session_id": session_id})
         return {"data_profile": rows}
 
 
@@ -146,93 +147,45 @@ def summarise_conversational_summary(state: AgentState, config: RunnableConfig) 
     del state, config
     return {}
 
-    # def run_truncation() -> tuple[str, list, list]:
-    #     return asyncio.run(
-    #         truncate_and_summarize(
-    #             state["messages"],
-    #             state.get("message_summary", ""),
-    #             KEEP_RECENT,
-    #             TOKEN_THRESHOLD,
-    #             runnable_config=config,
-    #         )
-    #     )
-    #
-    # with observation_parented_to_run(
-    #     langfuse,
-    #     config,
-    #     name="graph.SummariseConversationalSummary",
-    #     as_type="chain",
-    # ):
-    #     # API/Dash invoke synchronously; truncate uses async LLM via asyncio.run.
-    #     # Fail fast if already inside a running loop (would need ainvoke path).
-    #     try:
-    #         asyncio.get_running_loop()
-    #     except RuntimeError:
-    #         summary, kept, remove_ops = run_truncation()
-    #     else:
-    #         raise RuntimeError(
-    #             "SummariseConversationalSummary invoked under a running event loop; "
-    #             "use asynchronous graph execution (ainvoke) for this stack."
-    #         )
-    #     return {"message_summary": summary, "messages": remove_ops}
-
 
 def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Build context from state and invoke the tool-bound LLM."""
-    with observation_parented_to_run(
-        langfuse,
-        config,
-        name="graph.Orchestrator",
-        as_type="chain",
-    ):
-        messages = state["messages"]
-        summary = state.get("message_summary", "")
-        raw_todos = state.get("todos") or []
-        data_profile_rows = state.get("data_profile", [])
+    messages = state["messages"]
+    summary = state.get("message_summary", "")
+    raw_todos = state.get("todos") or []
+    data_profile_rows = state.get("data_profile", [])
 
-        context = (
-            "## File Rules\n"
-            "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
-            "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
-            "## Session Workspace\n"
-            f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
-            "## Current Todo List\n"
-            f"{json.dumps(raw_todos, indent=2)}\n\n"
-            "## Conversation Summary\n"
-            f"{summary}\n\n"
-        )
-        # Context HumanMessage is orchestrator-only (prepended per call, not a separate state key).
-        orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
-        with observation_parented_to_run(
-            langfuse,
-            config,
-            name="graph.Orchestrator.llm",
-            as_type="generation",
-            model=cfg["models"]["orchestrator"],
-            input=serialize_messages(orchestrator_messages),
-        ) as generation:
+    context = (
+        "## File Rules\n"
+        "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
+        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
+        "## Session Workspace\n"
+        f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
+        "## Current Todo List\n"
+        f"{json.dumps(raw_todos, indent=2)}\n\n"
+        "## Conversation Summary\n"
+        f"{summary}\n\n"
+    )
+    orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
+    model = ORCHESTRATOR_MODEL
+
+    with traced_span("Orchestrator") as node_span:
+        with traced_generation("Orchestrator-llm", model=model) as gen:
             response = llm_with_tools.invoke(orchestrator_messages, config=config)
-            generation.update(
-                output=serialize_message(response),
-                usage_details=extract_usage_details(response),
-                metadata={"tool_calls_requested": len(getattr(response, "tool_calls", None) or [])},
-            )
-
+            if gen is not None:
+                update_llm_generation(gen, model=model, raw=response)
         tool_calls = list(getattr(response, "tool_calls", None) or [])
-        langfuse.update_current_span(
-            metadata={
-                "tool_calls_this_step": len(tool_calls),
-                "had_summary_context": "true" if bool(summary) else "false",
-            }
-        )
+        if node_span is not None:
+            node_span.update(output={"tool_calls_this_step": len(tool_calls), "had_summary_context": bool(summary)})
 
-        return {"messages": [response]}
+    return {"messages": [response]}
 
 
 def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Terminal hook after a non-tool assistant reply."""
-    with observation_parented_to_run(langfuse, config, name="graph.FinalAnswer", as_type="span") as obs:
-        obs.update(metadata={})
+    del state
+    with traced_span("FinalAnswer", metadata={"session_id": session_id_from_config(config)}):
+        pass
     return {}
 
 
@@ -256,25 +209,20 @@ def pending_todos_message(incomplete: List[dict[str, Any]]) -> str:
 
 
 def todo_completion_check(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items.
-
-    Blocks a non-tool assistant reply until the orchestrator calls ``update_todo``
-    for each item (routes back to Orchestrator via ``route_after_todo_check``).
-    """
+    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items."""
     todos_raw = state.get("todos") or []
     todos: List[dict[str, Any]] = [t for t in todos_raw if isinstance(t, dict)]
     incomplete = [t for t in todos if t.get("status") != "completed"]
+    session_id = session_id_from_config(config)
     if not incomplete:
-        with observation_parented_to_run(langfuse, config, name="graph.TodoCompletionGate", as_type="span") as obs:
-            obs.update(metadata={"action": "pass"})
+        with traced_span("TodoCompletionCheck", metadata={"session_id": session_id, "action": "pass"}):
+            pass
         return {}
 
     content = pending_todos_message(incomplete)
-    with observation_parented_to_run(langfuse, config, name="graph.TodoCompletionGate", as_type="span") as obs:
-        obs.update(
-            output=content[:4000],
-            metadata={"action": "block", "incomplete_todos": len(incomplete)},
-        )
+    with traced_span("TodoCompletionCheck", metadata={"session_id": session_id, "action": "block", "incomplete_todos": len(incomplete)}) as span:
+        if span is not None:
+            span.update(output={"preview": content[:4000]})
     return {"messages": [AIMessage(content=content)]}
 
 
@@ -332,9 +280,7 @@ class AnalysisGraph:
         tool_node = ToolNode(TOOLS)
 
         builder.add_node("ProfileSavedData", profile_saved_data)
-        # builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
-        # Mounted subgraph: no planner checkpointer; inherits parent for ask_user interrupts.
         builder.add_node("Planner", get_planner_graph())
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
@@ -342,9 +288,7 @@ class AnalysisGraph:
         builder.add_node("FinalAnswer", final_answer)
 
         builder.set_entry_point("ProfileSavedData")
-        # builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-        # builder.add_edge("SummariseConversationalSummary", "Planner")
-        builder.add_edge("ProfileSavedData", "Planner")  # bypass summarise (disabled for now)
+        builder.add_edge("ProfileSavedData", "Planner")
         builder.add_edge("Planner", "Orchestrator")
         builder.add_conditional_edges(
             "Orchestrator",
@@ -362,98 +306,58 @@ class AnalysisGraph:
 
         return builder.compile(checkpointer=self.checkpointer)
 
-    def langfuse_invoke_metadata_pins(self) -> dict[str, str] | None:
-        """Pins current trace/parent IDs from the active span."""
-        trace_id = langfuse.get_current_trace_id()
-        obs_id = langfuse.get_current_observation_id()
-        if not trace_id and not obs_id:
-            return None
-        pins: dict[str, str] = {}
-        if trace_id:
-            pins[LANGFUSE_TRACE_ID_METADATA_KEY] = str(trace_id)
-        if obs_id:
-            pins[LANGFUSE_PARENT_OBS_METADATA_KEY] = str(obs_id)
-        return pins or None
-
-    def thread_config(self, session_id: str, *, langfuse_pin: dict[str, str] | None = None) -> Dict[str, Any]:
+    def thread_config(self, session_id: str) -> Dict[str, Any]:
         """Runnable config aligned with ``run_graph`` / ``resume``."""
-        out: Dict[str, Any] = {
+        return {
             "configurable": {"thread_id": session_id},
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "max_concurrency": GRAPH_MAX_CONCURRENCY,
         }
-        if langfuse_pin:
-            merged = dict(out.get("metadata") or {})
-            merged.update(langfuse_pin)
-            out["metadata"] = merged
-        return out
 
-    def stream_graph(
-        self,
-        session_id: str,
-        user_query: str,
-        *,
-        langfuse_pin: dict[str, str] | None = None,
-    ) -> Iterator[Dict[str, Any]]:
+    def stream_graph(self, session_id: str, user_query: str) -> Iterator[Dict[str, Any]]:
         """Yield graph progress as ``updates`` payloads."""
-        pins = langfuse_pin if langfuse_pin is not None else self.langfuse_invoke_metadata_pins()
-        config = self.thread_config(session_id, langfuse_pin=pins)
-        yield from self.graph.stream(
-            {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]},
-            config=config,
-            stream_mode="updates",
-        )
+        config = self.thread_config(session_id)
+        invoke_input = {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]}
+        trace_token = set_run_trace_snapshot("stream_run", metadata={"session_id": session_id})
+        try:
+            yield from self.graph.stream(invoke_input, config=config, stream_mode="updates")
+        finally:
+            reset_run_trace_snapshot(trace_token)
+            flush_langfuse()
 
-    def stream_resume(
-        self,
-        session_id: str,
-        value: Any,
-        *,
-        langfuse_pin: dict[str, str] | None = None,
-    ) -> Iterator[Dict[str, Any]]:
-        """Stream after an ``interrupt``, using ``Command(resume=…)``.
+    def stream_resume(self, session_id: str, value: Any) -> Iterator[Dict[str, Any]]:
+        """Stream after an ``interrupt``, using ``Command(resume=…)``."""
+        config = self.thread_config(session_id)
+        trace_token = set_run_trace_snapshot("resume", metadata={"session_id": session_id})
+        try:
+            yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
+        finally:
+            reset_run_trace_snapshot(trace_token)
+            flush_langfuse()
 
-        Resumes planner ``ask_user`` mid-subgraph when planning paused the main thread.
-        """
-        pins = langfuse_pin if langfuse_pin is not None else self.langfuse_invoke_metadata_pins()
-        config = self.thread_config(session_id, langfuse_pin=pins)
-        yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
+    def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
+        config = self.thread_config(session_id)
+        invoke_input = {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]}
+        if not is_tracing_enabled():
+            return self.graph.invoke(invoke_input, config=config)
+        try:
+            with tracing_root("run", metadata={"session_id": session_id}):
+                with propagate_attributes(session_id=session_id):
+                    return self.graph.invoke(invoke_input, config=config)
+        finally:
+            flush_langfuse()
 
-    @observe(name="graph.run_graph", as_type="chain")
-    def run_graph(
-        self,
-        session_id: str,
-        user_query: str,
-    ) -> Dict[str, Any]:
-        pins = self.langfuse_invoke_metadata_pins()
-        config = self.thread_config(session_id, langfuse_pin=pins)
-        result = self.graph.invoke(
-            {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]},
-            config=config,
-        )
-        langfuse.update_current_span(
-            input={"session_id": session_id, "user_query": user_query},
-            output={"message_count": len(result.get("messages", []))},
-            metadata={"session_id": session_id},
-        )
-        return result
-
-    @observe(name="graph.resume", as_type="chain")
-    def resume(
-        self,
-        session_id: str,
-        value: Any,
-    ) -> Dict[str, Any]:
+    def resume(self, session_id: str, value: Any) -> Dict[str, Any]:
         """Resume after planner ``ask_user`` interrupt; same ``thread_id`` as ``run_graph``."""
-        pins = self.langfuse_invoke_metadata_pins()
-        config = self.thread_config(session_id, langfuse_pin=pins)
-        result = self.graph.invoke(Command(resume=value), config=config)
-        langfuse.update_current_span(
-            input={"session_id": session_id, "resume_value": value},
-            output={"message_count": len(result.get("messages", []))},
-            metadata={"session_id": session_id},
-        )
-        return result
+        config = self.thread_config(session_id)
+        if not is_tracing_enabled():
+            return self.graph.invoke(Command(resume=value), config=config)
+        try:
+            with tracing_root("resume", metadata={"session_id": session_id}):
+                with propagate_attributes(session_id=session_id):
+                    return self.graph.invoke(Command(resume=value), config=config)
+        finally:
+            flush_langfuse()
 
     def get_state(self, session_id: str) -> Any:
         """Return the current state snapshot for *session_id*."""

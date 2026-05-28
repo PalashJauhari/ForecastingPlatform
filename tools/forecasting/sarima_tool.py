@@ -49,18 +49,14 @@ import pandas as pd
 import pmdarima as pm
 import yaml
 from langchain.tools import ToolRuntime
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langfuse import observe
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import (
-    get_langfuse_client,
-    serialize_message,
-)
+from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
 from output_validation.sarima_tool import (
     FitQualityOutput,
     ForecastSummaryOutput,
@@ -99,8 +95,6 @@ DEFAULT_ALPHA = 0.05
 
 ALLOWED_TABLE_EXTS = {".csv", ".xlsx"}
 
-langfuse = get_langfuse_client()
-
 
 class SarimaToolError(Exception):
     """Domain error raised by pipeline stages so the wrapper can return clean JSON."""
@@ -111,6 +105,26 @@ class SarimaToolError(Exception):
         self.code = code
         self.message = message
         self.stage = stage
+
+
+def _structured_llm_call(name: str, schema: type, messages: list, fallback: dict) -> dict:
+    llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=schema, include_raw=True)
+    with traced_generation(name, model=INTERPRETATION_MODEL) as gen:
+        try:
+            raw = llm.invoke(messages)
+            if isinstance(raw, dict) and "parsed" in raw:
+                parsed = raw["parsed"]
+                raw_msg = raw.get("raw")
+            else:
+                parsed = raw
+                raw_msg = None
+            if gen is not None:
+                update_llm_generation(gen, model=INTERPRETATION_MODEL, raw=raw_msg if isinstance(raw_msg, AIMessage) else None)
+            return parsed.model_dump()
+        except Exception as exc:
+            if gen is not None:
+                gen.update(output={"error": str(exc)})
+            return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -288,11 +302,7 @@ def select_or_prepare_model_order(
         # ``m=1`` and ``seasonal=False`` are pmdarima's "non-seasonal" signals.
         seasonal = seasonal_period is not None and int(seasonal_period) > 1
         m = int(seasonal_period) if seasonal else 1
-        with langfuse.start_as_current_observation(
-            name="sarima_tool.auto_arima",
-            as_type="span",
-            input={"seasonal": seasonal, "m": m, "n_obs": int(len(series))},
-        ) as span:
+        with traced_span("sarima_tool.auto_arima", input={"seasonal": seasonal, "m": m, "n_obs": int(len(series))}) as span:
             try:
                 model = pm.auto_arima(
                     series,
@@ -304,7 +314,8 @@ def select_or_prepare_model_order(
                     stepwise=True,
                 )
             except Exception as exc:
-                span.update(output={"error": str(exc)})
+                if span is not None:
+                    span.update(output={"error": str(exc)})
                 raise SarimaToolError(
                     "auto_arima_failed",
                     f"pmdarima.auto_arima failed: {exc}",
@@ -320,13 +331,8 @@ def select_or_prepare_model_order(
                 chosen_seasonal_order = None
                 chosen_m = None
 
-            span.update(
-                output={
-                    "order": chosen_order,
-                    "seasonal_order": chosen_seasonal_order,
-                    "seasonal_period": chosen_m,
-                },
-            )
+            if span is not None:
+                span.update(output={"order": chosen_order, "seasonal_order": chosen_seasonal_order, "seasonal_period": chosen_m})
 
         return (
             {
@@ -391,11 +397,7 @@ def fit_model(series: pd.Series, spec: dict) -> tuple[Any, dict, dict]:
         seasonal_order = (0, 0, 0, 0)
 
     # 1. Fit the SARIMAX model.
-    with langfuse.start_as_current_observation(
-        name="sarima_tool.fit_model",
-        as_type="span",
-        input={"order": list(order), "seasonal_order": list(seasonal_order)},
-    ) as span:
+    with traced_span("sarima_tool.fit_model", input={"order": list(order), "seasonal_order": list(seasonal_order)}) as span:
         try:
             model = SARIMAX(
                 series,
@@ -407,14 +409,11 @@ def fit_model(series: pd.Series, spec: dict) -> tuple[Any, dict, dict]:
             with _warns.catch_warnings():
                 _warns.simplefilter("ignore")
                 fit = model.fit(disp=False)
-            span.update(
-                output={
-                    "converged": bool(fit.mle_retvals.get("converged", True)),
-                    "aic": float(fit.aic),
-                },
-            )
+            if span is not None:
+                span.update(output={"converged": bool(fit.mle_retvals.get("converged", True)), "aic": float(fit.aic)})
         except Exception as exc:
-            span.update(output={"error": str(exc)})
+            if span is not None:
+                span.update(output={"error": str(exc)})
             raise SarimaToolError(
                 "fit_failed",
                 f"SARIMAX fit failed for order={list(order)} seasonal_order={list(seasonal_order)}: {exc}",
@@ -605,124 +604,46 @@ def run_llm_interpretations(
     """
     interpretations: dict[str, dict] = {}
 
-    # Residual analysis
-    residual_payload = json.dumps(
-        {"model": model_spec, "residual_diagnostics": residual_diagnostics},
-        indent=2,
-        default=str,
+    residual_payload = json.dumps({"model": model_spec, "residual_diagnostics": residual_diagnostics}, indent=2, default=str)
+    residual_messages = [SystemMessage(content=RESIDUAL_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=residual_payload)]
+    interpretations["residual_analysis"] = _structured_llm_call(
+        "sarima_tool.llm.residual_analysis",
+        ResidualAnalysisOutput,
+        residual_messages,
+        {"status": residual_diagnostics.get("status", "warn"), "summary": "LLM interpretation failed; review the raw residual diagnostics.", "caveat": ""},
     )
-    residual_messages = [
-        SystemMessage(content=RESIDUAL_ANALYSIS_SYSTEM_PROMPT),
-        HumanMessage(content=residual_payload),
-    ]
-    residual_llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=ResidualAnalysisOutput)
-    with langfuse.start_as_current_observation(name="sarima_tool.llm.residual_analysis", as_type="generation", model=INTERPRETATION_MODEL, input=[serialize_message(m) for m in residual_messages]) as gen:
-        try:
-            resp = residual_llm.invoke(residual_messages)
-            interpretations["residual_analysis"] = resp.model_dump()
-            gen.update(output=interpretations["residual_analysis"])
-        except Exception as exc:
-            gen.update(output={"error": str(exc)})
-            interpretations["residual_analysis"] = {
-                "status": residual_diagnostics.get("status", "warn"),
-                "summary": "LLM interpretation failed; review the raw residual diagnostics.",
-                "caveat": str(exc)[:200],
-            }
 
-    # Fit quality
-    fit_payload = json.dumps(
-        {
-            "model": model_spec,
-            "fit_quality": fit_quality,
-            "residual_diagnostics": residual_diagnostics,
-        },
-        indent=2,
-        default=str,
+    fit_payload = json.dumps({"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics}, indent=2, default=str)
+    fit_messages = [SystemMessage(content=FIT_QUALITY_SYSTEM_PROMPT), HumanMessage(content=fit_payload)]
+    interpretations["fit_quality"] = _structured_llm_call(
+        "sarima_tool.llm.fit_quality",
+        FitQualityOutput,
+        fit_messages,
+        {"status": "warn", "summary": "LLM interpretation failed; review the raw fit-quality metrics.", "caveat": ""},
     )
-    fit_messages = [
-        SystemMessage(content=FIT_QUALITY_SYSTEM_PROMPT),
-        HumanMessage(content=fit_payload),
-    ]
-    fit_llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=FitQualityOutput)
-    with langfuse.start_as_current_observation(
-        name="sarima_tool.llm.fit_quality",
-        as_type="generation",
-        model=INTERPRETATION_MODEL,
-        input=[serialize_message(m) for m in fit_messages],
-    ) as gen:
-        try:
-            resp = fit_llm.invoke(fit_messages)
-            interpretations["fit_quality"] = resp.model_dump()
-            gen.update(output=interpretations["fit_quality"])
-        except Exception as exc:
-            gen.update(output={"error": str(exc)})
-            interpretations["fit_quality"] = {
-                "status": "warn",
-                "summary": "LLM interpretation failed; review the raw fit-quality metrics.",
-                "caveat": str(exc)[:200],
-            }
 
-    # Forecast summary — only send a compact preview to keep the prompt small;
-    # the deterministic table on disk is the source of truth.
     preview = forecast_rows[:24]
-    forecast_payload = json.dumps(
-        {"model": model_spec, "horizon": len(forecast_rows), "forecast_preview": preview},
-        indent=2,
-        default=str,
+    forecast_payload = json.dumps({"model": model_spec, "horizon": len(forecast_rows), "forecast_preview": preview}, indent=2, default=str)
+    forecast_messages = [SystemMessage(content=FORECAST_SUMMARY_SYSTEM_PROMPT), HumanMessage(content=forecast_payload)]
+    interpretations["forecast_summary"] = _structured_llm_call(
+        "sarima_tool.llm.forecast_summary",
+        ForecastSummaryOutput,
+        forecast_messages,
+        {"status": "warn", "summary": "LLM interpretation failed; review the raw forecast values.", "uncertainty": "", "business_readout": ""},
     )
-    forecast_messages = [
-        SystemMessage(content=FORECAST_SUMMARY_SYSTEM_PROMPT),
-        HumanMessage(content=forecast_payload),
-    ]
-    forecast_llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=ForecastSummaryOutput)
-    with langfuse.start_as_current_observation(
-        name="sarima_tool.llm.forecast_summary",
-        as_type="generation",
-        model=INTERPRETATION_MODEL,
-        input=[serialize_message(m) for m in forecast_messages],
-    ) as gen:
-        try:
-            resp = forecast_llm.invoke(forecast_messages)
-            interpretations["forecast_summary"] = resp.model_dump()
-            gen.update(output=interpretations["forecast_summary"])
-        except Exception as exc:
-            gen.update(output={"error": str(exc)})
-            interpretations["forecast_summary"] = {
-                "status": "warn",
-                "summary": "LLM interpretation failed; review the raw forecast values.",
-                "uncertainty": "",
-                "business_readout": "",
-            }
 
-    # Model improvement guidance — uses the same deterministic facts plus the
-    # forecast summary so the LLM can suggest grounded next tuning steps.
     guidance_payload = json.dumps(
-        {
-            "model": model_spec,
-            "fit_quality": fit_quality,
-            "residual_diagnostics": residual_diagnostics,
-            "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": preview},
-        },
+        {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics, "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": preview}},
         indent=2,
         default=str,
     )
-    guidance_messages = [
-        SystemMessage(content=MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT),
-        HumanMessage(content=guidance_payload),
-    ]
-    guidance_llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=ModelImprovementGuidanceOutput)
-    with langfuse.start_as_current_observation(name="sarima_tool.llm.model_improvement_guidance", as_type="generation", model=INTERPRETATION_MODEL, input=[serialize_message(m) for m in guidance_messages]) as gen:
-        try:
-            resp = guidance_llm.invoke(guidance_messages)
-            interpretations["model_improvement_guidance"] = resp.model_dump()
-            gen.update(output=interpretations["model_improvement_guidance"])
-        except Exception as exc:
-            gen.update(output={"error": str(exc)})
-            interpretations["model_improvement_guidance"] = {
-                "summary": "LLM guidance failed; review the raw fit quality and residual diagnostics to decide next steps.",
-                "possible_next_steps": [],
-                "caution": str(exc)[:200],
-            }
+    guidance_messages = [SystemMessage(content=MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT), HumanMessage(content=guidance_payload)]
+    interpretations["model_improvement_guidance"] = _structured_llm_call(
+        "sarima_tool.llm.model_improvement_guidance",
+        ModelImprovementGuidanceOutput,
+        guidance_messages,
+        {"summary": "LLM guidance failed; review the raw fit quality and residual diagnostics to decide next steps.", "possible_next_steps": [], "caution": ""},
+    )
 
     return interpretations
 
@@ -762,8 +683,6 @@ def build_response(
 # ---------------------------------------------------------------------------
 
 
-@observe(name="tool.sarima_tool", as_type="tool")
-# Brief: Orchestrate validation, fitting, diagnostics, artifact saving, and response building.
 def run_sarima_pipeline(
     *,
     file_name: str,
@@ -777,93 +696,40 @@ def run_sarima_pipeline(
     forecast_output_file: str,
     runtime: ToolRuntime,
 ) -> str:
-    """
-    End-to-end SARIMA pipeline. Returns a JSON string (success or error).
-
-    Any pipeline-level error short-circuits to a clean error JSON so the
-    orchestrator can decide what to do next (e.g. ask the user for a missing
-    column, request a different frequency, fall back to ``coding_tool``).
-    """
+    """End-to-end SARIMA pipeline. Returns a JSON string (success or error)."""
     session_id = session_id_from_config(runtime.config)
 
-    try:
-        # 1. Load and validate the source file, then turn it into a model-ready time series.
-        #    data_validation performs all of the following:
-        #    - Confirms the file exists in the session workspace; otherwise raises a tool error.
-        #    - Reads the file via pandas based on its .csv / .xlsx extension.
-        #    - Confirms the requested date and target columns are present.
-        #    - Sorts by date and drops duplicate dates (keeps the first row per date).
-        #    - Infers a regular cadence with pd.infer_freq; ARIMA needs evenly spaced data.
-        #    - Builds a numeric pd.Series indexed by the regular DatetimeIndex.
-        #    - Rejects a series with no numeric values, any missing values, too few values,
-        #      or a constant target; SARIMAX cannot be fitted in those cases.
-        #    - Returns the model-ready series and its inferred frequency string.
-        series, freq = data_validation(file_name=file_name, date_column=date_column, target_column=target_column, session_id=session_id)
-
-        # 2. Resolve the SARIMA spec (manual order, auto-ARIMA, or fall back to auto-ARIMA).
-        model_spec, warnings_out = select_or_prepare_model_order(series=series, use_auto_arima=use_auto_arima, order=order, seasonal_order=seasonal_order, seasonal_period=seasonal_period)
-
-        # 3. Fit SARIMAX and produce fit-quality metrics + residual diagnostics in one stage.
-        fit, fit_quality, residual_diagnostics = fit_model(series, model_spec)
-
-        # 4. Generate the requested forecast horizon (point forecasts + 95% prediction intervals).
-        forecast_rows = generate_forecast(fit, horizon=int(horizon), freq=freq, last_date=series.index[-1])
-
-        # 5. Persist the forecast table for the UI/download. Charts are intentionally
-        #    not produced here; ``coding_tool`` is the single source of plot artifacts.
-        forecast_path = save_forecast(forecast_rows, session_id=session_id, output_file=forecast_output_file)
-
-        # 6. Ask the LLM to summarize residuals, fit quality, forecast, and improvement guidance.
-        llm_interpretation = run_llm_interpretations(fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, model_spec=model_spec)
-
-        # 7. Bubble residual diagnostic warnings up to the top-level warnings array so the
-        #    orchestrator does not have to dig into nested diagnostics.
-        for w in residual_diagnostics.get("warnings", []) or []:
-            warnings_out.append({"code": "residual_assumption", "message": str(w)})
-
-        # 8. Pack everything into the JSON response the orchestrator will see.
-        response = build_response(
-            freq=freq,
-            model_spec=model_spec,
-            fit_quality=fit_quality,
-            residual_diagnostics=residual_diagnostics,
-            forecast_rows=forecast_rows,
-            forecast_path=forecast_path,
-            llm_interpretation=llm_interpretation,
-            warnings_out=warnings_out,
-        )
-
-        # 9. Attach high-signal trace metadata for langfuse and return the JSON string.
-        langfuse.update_current_span(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "seasonal_order": str(model_spec.get("seasonal_order")), "seasonal_period": str(model_spec.get("seasonal_period")), "warnings": str(len(warnings_out))})
-
-        return response
-
-    except SarimaToolError as exc:
-        langfuse.update_current_span(
-            metadata={"status": "error", "stage": exc.stage, "code": exc.code},
-        )
-        return json.dumps(
-            {
-                "status": "error",
-                "stage": exc.stage,
-                "error": {"code": exc.code, "message": exc.message},
-            },
-            default=str,
-        )
-    except Exception as exc:
-        # Catch-all so a stray ``statsmodels``/``pmdarima`` exception still surfaces as a
-        # tool result the orchestrator can act on rather than crashing the graph.
-        langfuse.update_current_span(
-            metadata={"status": "error", "stage": "unknown", "code": "internal_error"},
-        )
-        return json.dumps(
-            {
-                "status": "error",
-                "stage": "unknown",
-                "error": {"code": "internal_error", "message": str(exc)[:500]},
-            },
-            default=str,
-        )
+    with traced_span("sarima_tool", metadata={"session_id": session_id}) as tool_span:
+        try:
+            series, freq = data_validation(file_name=file_name, date_column=date_column, target_column=target_column, session_id=session_id)
+            model_spec, warnings_out = select_or_prepare_model_order(series=series, use_auto_arima=use_auto_arima, order=order, seasonal_order=seasonal_order, seasonal_period=seasonal_period)
+            fit, fit_quality, residual_diagnostics = fit_model(series, model_spec)
+            forecast_rows = generate_forecast(fit, horizon=int(horizon), freq=freq, last_date=series.index[-1])
+            forecast_path = save_forecast(forecast_rows, session_id=session_id, output_file=forecast_output_file)
+            llm_interpretation = run_llm_interpretations(fit_quality=fit_quality, residual_diagnostics=residual_diagnostics, forecast_rows=forecast_rows, model_spec=model_spec)
+            for w in residual_diagnostics.get("warnings", []) or []:
+                warnings_out.append({"code": "residual_assumption", "message": str(w)})
+            response = build_response(
+                freq=freq,
+                model_spec=model_spec,
+                fit_quality=fit_quality,
+                residual_diagnostics=residual_diagnostics,
+                forecast_rows=forecast_rows,
+                forecast_path=forecast_path,
+                llm_interpretation=llm_interpretation,
+                warnings_out=warnings_out,
+            )
+            if tool_span is not None:
+                tool_span.update(metadata={"selection_method": model_spec["selection_method"], "order": str(model_spec["order"]), "warnings": str(len(warnings_out))})
+            return response
+        except SarimaToolError as exc:
+            if tool_span is not None:
+                tool_span.update(metadata={"status": "error", "stage": exc.stage, "code": exc.code})
+            return json.dumps({"status": "error", "stage": exc.stage, "error": {"code": exc.code, "message": exc.message}}, default=str)
+        except Exception as exc:
+            if tool_span is not None:
+                tool_span.update(metadata={"status": "error", "stage": "unknown", "code": "internal_error"})
+            return json.dumps({"status": "error", "stage": "unknown", "error": {"code": "internal_error", "message": str(exc)[:500]}}, default=str)
 
 
 # ---------------------------------------------------------------------------

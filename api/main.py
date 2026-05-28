@@ -16,8 +16,8 @@ SSE contract (additive; Form routes unchanged): each frame follows the Server-Se
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
-Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
-Langfuse keys.
+Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional Langfuse keys
+(when ``LANGFUSE_TRACING_ENABLED=true``; tracing is owned by the graph layer, not this API).
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
-from langfuse import observe, propagate_attributes
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -44,11 +43,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from graph import AnalysisGraph
-from observability.langfuse_handler import (
-    build_request_metadata,
-    get_langfuse_client,
-    sse_stream_runnable_langfuse_pin,
-)
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,
@@ -80,7 +74,6 @@ app = FastAPI(
     ),
 )
 analysis_graph = AnalysisGraph()
-langfuse = get_langfuse_client()
 
 
 app.add_middleware(
@@ -491,12 +484,11 @@ def _sse_bytes_stream_run(
     analysis: AnalysisGraph,
     session_id: str,
     query: str,
-    langfuse_pin: dict[str, str],
 ) -> Iterator[bytes]:
     yield from sse_event_lines_for_turn(
         analysis,
         session_id,
-        analysis.stream_graph(session_id, query, langfuse_pin=langfuse_pin),
+        analysis.stream_graph(session_id, query),
     )
 
 
@@ -504,12 +496,11 @@ def _sse_bytes_stream_resume(
     analysis: AnalysisGraph,
     session_id: str,
     resume_value: str,
-    langfuse_pin: dict[str, str],
 ) -> Iterator[bytes]:
     yield from sse_event_lines_for_turn(
         analysis,
         session_id,
-        analysis.stream_resume(session_id, resume_value, langfuse_pin=langfuse_pin),
+        analysis.stream_resume(session_id, resume_value),
     )
 
 
@@ -519,7 +510,6 @@ def _sse_bytes_stream_resume(
 
 
 @app.post("/run")
-@observe(name="api.run", as_type="chain")
 async def run(
     query: str = Form(...),
     session_id: str = Form("default"),
@@ -540,22 +530,12 @@ async def run(
         If the agent asks a clarifying question, ``interrupted`` is ``true``
         and ``question`` contains the text.
     """
-    with propagate_attributes(session_id=session_id, tags=["api", "run"], metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query)):
-        result = analysis_graph.run_graph(session_id, query)
-        response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-                "image_count": len(response.get("images") or []),
-            },
-        )
-        return response
+    result = analysis_graph.run_graph(session_id, query)
+    response = get_api_response(session_id, result)
+    return response
 
 
 @app.post("/resume")
-@observe(name="api.resume", as_type="chain")
 async def resume(
     resume_value: str = Form(...),
     session_id: str = Form("default"),
@@ -570,18 +550,9 @@ async def resume(
     Returns
         Same shape as ``/run``.
     """
-    with propagate_attributes(session_id=session_id, tags=["api", "resume"], metadata=build_request_metadata(endpoint="/resume", interface="fastapi", query=resume_value)):
-        result = analysis_graph.resume(session_id, resume_value)
-        response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-                "image_count": len(response.get("images") or []),
-            },
-        )
-        return response
+    result = analysis_graph.resume(session_id, resume_value)
+    response = get_api_response(session_id, result)
+    return response
 
 
 @app.post("/run/stream")
@@ -595,9 +566,8 @@ async def run_stream(request_body: StreamRunRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     query = request_body.query
-    pin = sse_stream_runnable_langfuse_pin()
     return StreamingResponse(
-        _sse_bytes_stream_run(analysis_graph, sid, query, pin),
+        _sse_bytes_stream_run(analysis_graph, sid, query),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -611,16 +581,14 @@ async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     rv = request_body.resume_value
-    pin = sse_stream_runnable_langfuse_pin()
     return StreamingResponse(
-        _sse_bytes_stream_resume(analysis_graph, sid, rv, pin),
+        _sse_bytes_stream_resume(analysis_graph, sid, rv),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
 
 
 @app.post("/upload-data")
-@observe(name="api.upload_data", as_type="tool")
 async def upload_data(
     files: list[UploadFile] = File(...),
     session_id: str = Form("default"),
@@ -653,7 +621,6 @@ async def upload_data(
             renamed.append({"original_name": name, "stored_name": stored_name})
 
     response = {"saved": saved, "count": len(saved), "renamed": renamed}
-    langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved), "session_id": session_id})
     return response
 
 

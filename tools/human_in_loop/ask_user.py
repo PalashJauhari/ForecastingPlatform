@@ -9,9 +9,10 @@ This copy remains for orchestrator-phase interrupts if wired later.
 from __future__ import annotations
 
 from langchain_core.tools import tool
-from langfuse import observe
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
+
+from observability.langfuse_handler import traced_span
 
 
 class AskUserInput(BaseModel):
@@ -22,7 +23,6 @@ class AskUserInput(BaseModel):
     )
 
 
-@observe(name="tool.ask_user", as_type="tool")
 def _ask_user_impl(question: str) -> str:
     """
     Ask the user a clarifying question and pause until they respond.
@@ -33,7 +33,10 @@ def _ask_user_impl(question: str) -> str:
 
     Returns the user's response as a plain string.
     """
-    response = interrupt({"phase": "orchestrator", "question": question})
+    with traced_span("ask_user", metadata={"phase": "orchestrator"}) as span:
+        response = interrupt({"phase": "orchestrator", "question": question})
+        if span is not None:
+            span.update(output={"phase": "orchestrator", "question_preview": question[:120]})
     return response
 
 

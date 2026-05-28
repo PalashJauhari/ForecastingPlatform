@@ -10,6 +10,7 @@ import json
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
+from observability.langfuse_handler import trace_context_for_nested_invoke
 from session_paths import session_id_from_config
 from sub_agents.coding_sub_agent.graph import invoke_coding_pipeline
 from sub_agents.coding_sub_agent.validation import CodingToolInput
@@ -29,9 +30,10 @@ def coding_tool(
         output_files=output_files,
     )
     session_id = session_id_from_config(runtime.config)
-    tool_call_id = getattr(runtime, "tool_call_id", "") or ""  # drives run_<id>/ plot paths
+    tool_call_id = getattr(runtime, "tool_call_id", "") or ""
     state = runtime.state or {}
     data_profile = state.get("data_profile") or []
+    parent_ctx = trace_context_for_nested_invoke()
 
     body = invoke_coding_pipeline(
         session_id=session_id,
@@ -40,5 +42,6 @@ def coding_tool(
         input_files=list(validated.input_files),
         output_files=list(validated.output_files),
         data_profile=list(data_profile),
+        trace_context=parent_ctx,
     )
     return json.dumps(body, default=str)

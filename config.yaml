@@ -23,5 +23,8 @@ llm_rate_limit:
 paths:
   agent_filesystem: "agent_filesystem"
 
+observability:
+  langfuse_tracing_enabled: false  # overridden by LANGFUSE_TRACING_ENABLED env
+
 checkpointer:
   use_neon: false
