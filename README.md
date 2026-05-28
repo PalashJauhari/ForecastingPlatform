@@ -45,7 +45,7 @@ On each new message the agent profiles your files, summarizes long context, buil
    - Copy sub-agent templates:
      - `sub_agents/planner_sub_agent/.env.example` → `.env`
      - `sub_agents/coding_sub_agent/.env.example` → `.env`
-   - Set `OPENAI_API_KEY` in all three; set `E2B_API_KEY` and `E2B_TEMPLATE_NAME` for cloud code execution (run `build_e2b_template.py` first).
+   - Set `OPENAI_API_KEY` in all three; set `E2B_API_KEY` and `E2B_TEMPLATE_NAME` for cloud code execution (run `e2b/build_e2b_template.py` first).
 
 3. **Run**
 
@@ -91,7 +91,7 @@ Build the coding sandbox image manually (not on app startup). From the repo root
 
 ```bash
 pip install 'e2b>=2.3.0'
-python sub_agents/coding_sub_agent/build_e2b_template.py --write-env
+python sub_agents/coding_sub_agent/e2b/build_e2b_template.py --write-env
 ```
 
 Set `E2B_API_KEY` in `sub_agents/coding_sub_agent/.env` before building. After build, ensure `E2B_TEMPLATE_NAME` (and optional `E2B_TEMPLATE_ID`) are in that `.env`. Requires `e2b-code-interpreter>=2.7.0` (supports `lifecycle` on `Sandbox.create`). Runtime uses `allow_internet_access=False` and a 2-minute sandbox timeout (`E2B_SANDBOX_TIMEOUT_SECONDS=120`). By default `E2B_KILL_SANDBOX=false` so sandboxes stay visible in the E2B dashboard for debugging; set `true` in production to `kill()` after each run.
@@ -130,6 +130,8 @@ sub_agents/          Planner and coding sub-graphs (AnalysisGraph-style classes)
   planner_sub_agent/graph.py              PlannerGraph — mounted on main graph
   planner_sub_agent/tools/                write_todo, ask_user (planner clarification)
   coding_sub_agent/graph.py               CodingGraph — invoked by coding_tool
+  coding_sub_agent/e2b/                   E2B template build + sandbox requirements
+  coding_sub_agent/code_scan/             Semgrep rules + static scan for generated code
 tools/               Main-graph @tool wrappers only
   coding_tools/coding_tool.py             Invokes coding sub-agent pipeline
   planning/update_todo.py                   Orchestrator todo status patches

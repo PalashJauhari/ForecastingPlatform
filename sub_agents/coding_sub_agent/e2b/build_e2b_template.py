@@ -6,8 +6,8 @@ Run manually (not on app startup) from the repo root or this package directory::
 
     source ForecastingPlatform_env_1/bin/activate
     pip install 'e2b>=2.3.0'
-    python sub_agents/coding_sub_agent/build_e2b_template.py
-    python sub_agents/coding_sub_agent/build_e2b_template.py --write-env
+    python sub_agents/coding_sub_agent/e2b/build_e2b_template.py
+    python sub_agents/coding_sub_agent/e2b/build_e2b_template.py --write-env
 
 Requires ``E2B_API_KEY`` in ``sub_agents/coding_sub_agent/.env``.
 """
@@ -23,21 +23,22 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = PACKAGE_ROOT.parent.parent
-ENV_PATH = PACKAGE_ROOT / ".env"
+E2B_DIR = Path(__file__).resolve().parent
+CODING_AGENT_ROOT = E2B_DIR.parent
+PROJECT_ROOT = CODING_AGENT_ROOT.parent.parent
+ENV_PATH = CODING_AGENT_ROOT / ".env"
 DEFAULT_TEMPLATE_NAME = "forecasting-platform-ds"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def _load_env() -> None:
-    load_dotenv(PACKAGE_ROOT.parent.parent / ".env")
+def load_env() -> None:
+    load_dotenv(PROJECT_ROOT / ".env")
     load_dotenv(ENV_PATH)
 
 
-def _delete_template_cli(name: str) -> None:
+def delete_template_cli(name: str) -> None:
     """Best-effort delete via E2B CLI before rebuild."""
     try:
         subprocess.run(
@@ -50,7 +51,7 @@ def _delete_template_cli(name: str) -> None:
         print("Note: e2b CLI not found; skipping delete (Template.build may replace in place).")
 
 
-def _patch_env_file(template_name: str, template_id: str) -> None:
+def patch_env_file(template_name: str, template_id: str) -> None:
     lines: list[str] = []
     if ENV_PATH.is_file():
         lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
@@ -92,7 +93,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    _load_env()
+    load_env()
     api_key = os.environ.get("E2B_API_KEY", "").strip()
     if not api_key:
         print("E2B_API_KEY is missing. Set it in sub_agents/coding_sub_agent/.env", file=sys.stderr)
@@ -108,10 +109,10 @@ def main() -> int:
 
     from e2b import Template, default_build_logger
 
-    from sub_agents.coding_sub_agent.e2b_template_def import template
+    from sub_agents.coding_sub_agent.e2b.template_def import template
 
     print(f"Deleting existing template '{template_name}' if present...")
-    _delete_template_cli(template_name)
+    delete_template_cli(template_name)
 
     print(f"Building template '{template_name}' (skip_cache=True)...")
     build_info = Template.build(
@@ -134,7 +135,7 @@ def main() -> int:
         print(f"  E2B_TEMPLATE_ID={template_id}")
 
     if args.write_env:
-        _patch_env_file(template_name, template_id)
+        patch_env_file(template_name, template_id)
 
     return 0
 

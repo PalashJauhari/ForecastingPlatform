@@ -44,7 +44,7 @@ from sub_agents.coding_sub_agent.prompts import (
     CODE_JUDGE_SYSTEM_PROMPT,
     IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT,
 )
-from sub_agents.coding_sub_agent.semgrep_scan import run_semgrep_scan
+from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
 from sub_agents.coding_sub_agent.validation import CodeGenerationOutput, JudgeOutput, sanitize_run_id
 
 coding_trace_ctx: ContextVar[TraceContext | None] = ContextVar("coding_trace_ctx", default=None)
@@ -290,7 +290,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     ctx = get_coding_trace_context()
     if not E2B_TEMPLATE_NAME:
         raise ValueError(
-            "E2B_TEMPLATE_NAME is not set. Run build_e2b_template.py and add it to "
+            "E2B_TEMPLATE_NAME is not set. Run e2b/build_e2b_template.py and add it to "
             "sub_agents/coding_sub_agent/.env"
         )
 

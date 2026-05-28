@@ -13,12 +13,12 @@ from pathlib import Path
 
 from e2b import Template
 
-_PACKAGE_ROOT = Path(__file__).resolve().parent
-_REQ_DEST = "/home/user/requirements-sandbox.txt"
+E2B_DIR = Path(__file__).resolve().parent
+REQ_DEST = "/home/user/requirements-sandbox.txt"
 
 template = (
-    Template(file_context_path=str(_PACKAGE_ROOT))
+    Template(file_context_path=str(E2B_DIR))
     .from_base_image()
-    .copy("requirements-sandbox.txt", _REQ_DEST)
-    .run_cmd(f"pip install --no-cache-dir -r {_REQ_DEST}", user="root")
+    .copy("requirements-sandbox.txt", REQ_DEST)
+    .run_cmd(f"pip install --no-cache-dir -r {REQ_DEST}", user="root")
 )

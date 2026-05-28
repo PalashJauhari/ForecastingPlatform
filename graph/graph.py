@@ -272,10 +272,7 @@ class AnalysisGraph:
         else:
             self.checkpointer = InMemorySaver()
             print("GaussianBlurr checkpointer: InMemorySaver", flush=True)
-        self.graph = self.build_graph()
 
-    def build_graph(self) -> Any:
-        """Construct and compile the ``StateGraph``."""
         builder = StateGraph(AgentState)
         tool_node = ToolNode(TOOLS)
 
@@ -304,7 +301,11 @@ class AnalysisGraph:
         builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
         builder.add_edge("FinalAnswer", END)
 
-        return builder.compile(checkpointer=self.checkpointer)
+        self.graph = builder.compile(checkpointer=self.checkpointer)
+
+    def build_graph(self) -> Any:
+        """Return the compiled main graph."""
+        return self.graph
 
     def thread_config(self, session_id: str) -> Dict[str, Any]:
         """Runnable config aligned with ``run_graph`` / ``resume``."""

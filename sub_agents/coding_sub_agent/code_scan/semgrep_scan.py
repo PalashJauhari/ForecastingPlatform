@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from sub_agents.coding_sub_agent.safety_check import SafetyCheckResult
+from sub_agents.coding_sub_agent.code_scan.safety_check import SafetyCheckResult
 
 SEMGREP_CONFIG = Path(__file__).resolve().parent / "codegen_scan_semgrep.yaml"
 
@@ -26,7 +26,7 @@ def format_semgrep_issues(violations: list[dict]) -> str:
         if v.get("code"):
             lines.append(f"           Code: {v['code']}")
         lines.append("")
-    lines.append("Rules: see sub_agents/coding_sub_agent/codegen_scan_semgrep.yaml.")
+    lines.append("Rules: see sub_agents/coding_sub_agent/code_scan/codegen_scan_semgrep.yaml.")
     return "\n".join(lines)
 
 
