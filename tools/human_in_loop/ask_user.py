@@ -6,13 +6,12 @@ LangChain tool: ask the user a clarifying question via LangGraph ``interrupt``.
 This copy remains for orchestrator-phase interrupts if wired later.
 """
 
-from __future__ import annotations
-
+from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
-from observability.langfuse_handler import traced_span
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 
 
 class AskUserInput(BaseModel):
@@ -23,7 +22,7 @@ class AskUserInput(BaseModel):
     )
 
 
-def _ask_user_impl(question: str) -> str:
+def ask_user_impl(question: str, runtime: ToolRuntime) -> str:
     """
     Ask the user a clarifying question and pause until they respond.
 
@@ -33,7 +32,8 @@ def _ask_user_impl(question: str) -> str:
 
     Returns the user's response as a plain string.
     """
-    with traced_span("ask_user", metadata={"phase": "orchestrator"}) as span:
+    trace_context = trace_context_from_runnable_config(runtime.config)
+    with traced_span("ask_user", trace_context=trace_context, metadata={"phase": "orchestrator"}) as span:
         response = interrupt({"phase": "orchestrator", "question": question})
         if span is not None:
             span.update(output={"phase": "orchestrator", "question_preview": question[:120]})
@@ -41,6 +41,6 @@ def _ask_user_impl(question: str) -> str:
 
 
 @tool(args_schema=AskUserInput)
-def ask_user(question: str) -> str:
+def ask_user(question: str, runtime: ToolRuntime) -> str:
     """LangChain wrapper for the traced interrupt tool implementation."""
-    return _ask_user_impl(question=question)
+    return ask_user_impl(question=question, runtime=runtime)

@@ -56,7 +56,7 @@ from statsmodels.stats.stattools import jarque_bera
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
 from output_validation.sarima_tool import (
     FitQualityOutput,
     ForecastSummaryOutput,
@@ -698,8 +698,9 @@ def run_sarima_pipeline(
 ) -> str:
     """End-to-end SARIMA pipeline. Returns a JSON string (success or error)."""
     session_id = session_id_from_config(runtime.config)
+    trace_context = trace_context_from_runnable_config(runtime.config)
 
-    with traced_span("sarima_tool", metadata={"session_id": session_id}) as tool_span:
+    with traced_span("sarima_tool", trace_context=trace_context, metadata={"session_id": session_id}) as tool_span:
         try:
             series, freq = data_validation(file_name=file_name, date_column=date_column, target_column=target_column, session_id=session_id)
             model_spec, warnings_out = select_or_prepare_model_order(series=series, use_auto_arima=use_auto_arima, order=order, seasonal_order=seasonal_order, seasonal_period=seasonal_period)

@@ -335,13 +335,6 @@ def _build_layout() -> html.Div:
                             ),
                         ],
                     ),
-                    html.Div(
-                        className="gb-progress-col",
-                        children=[
-                            html.Div(className="gb-progress-head", children=[html.H3("Progress")]),
-                            html.Div(id="gb-stream-progress"),
-                        ],
-                    ),
                 ],
             ),
             html.Div(

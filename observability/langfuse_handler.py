@@ -5,7 +5,9 @@ One root span per ``run`` / ``stream_run`` / ``resume``; inline gated node spans
 No ``CallbackHandler``, no ``@observe``, no RunnableConfig metadata pins.
 
 Nested coding sub-graph invokes must pass ``trace_context`` from ``trace_context_for_nested_invoke()``.
-LangGraph steps often drop OTel context; ``tracing_root`` snapshots the run trace so orphan spans link under one ``run``.
+LangGraph steps often drop OTel context, so the run trace is also carried in
+``RunnableConfig["configurable"]``. Spans without a parent are skipped instead of
+being sent as noisy top-level traces.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from langfuse.types import TraceContext
 
 MAX_METADATA_VALUE_LEN = 200
 _TRACE_PREVIEW_LEN = 120
+LANGFUSE_TRACE_CONTEXT_CONFIG_KEY = "langfuse_trace_context"
 
 # Snapshot ``run`` / ``stream_run`` / ``resume`` trace id + root span id for LangGraph node/tool spans.
 _run_trace_ctx: ContextVar[TraceContext | None] = ContextVar("_run_trace_ctx", default=None)
@@ -102,34 +105,58 @@ def current_trace_context() -> TraceContext | None:
     return TraceContext(trace_id=str(trace_id))
 
 
+def trace_context_to_config_value(trace_context: TraceContext | None) -> dict[str, str] | None:
+    """Convert a Langfuse ``TraceContext`` into a JSON-safe graph config value."""
+    if trace_context is None:
+        return None
+    if isinstance(trace_context, dict):
+        trace_id = str(trace_context.get("trace_id") or "").strip()
+        parent_span_id = str(trace_context.get("parent_span_id") or "").strip()
+    else:
+        trace_id = str(getattr(trace_context, "trace_id", "") or "").strip()
+        parent_span_id = str(getattr(trace_context, "parent_span_id", "") or "").strip()
+    if not trace_id:
+        return None
+    value = {"trace_id": trace_id}
+    if parent_span_id:
+        value["parent_span_id"] = parent_span_id
+    return value
+
+
+def trace_context_from_config_value(value: Any) -> TraceContext | None:
+    """Read a Langfuse ``TraceContext`` from a graph config value."""
+    if not isinstance(value, dict):
+        return None
+    trace_id = str(value.get("trace_id") or "").strip()
+    parent_span_id = str(value.get("parent_span_id") or "").strip()
+    if not trace_id:
+        return None
+    if parent_span_id:
+        return TraceContext(trace_id=trace_id, parent_span_id=parent_span_id)
+    return TraceContext(trace_id=trace_id)
+
+
+def trace_context_from_runnable_config(config: Any = None) -> TraceContext | None:
+    """Return explicit Langfuse context carried by ``RunnableConfig.configurable``."""
+    configurable = (config or {}).get("configurable", {}) if isinstance(config or {}, dict) else {}
+    return trace_context_from_config_value(configurable.get(LANGFUSE_TRACE_CONTEXT_CONFIG_KEY))
+
+
+def add_trace_context_to_config(config: dict[str, Any], trace_context: TraceContext | None) -> dict[str, Any]:
+    """Return a copy of ``config`` with the Langfuse trace context stored under ``configurable``."""
+    value = trace_context_to_config_value(trace_context)
+    if value is None:
+        return config
+    updated = dict(config)
+    configurable = dict(updated.get("configurable") or {})
+    configurable[LANGFUSE_TRACE_CONTEXT_CONFIG_KEY] = value
+    updated["configurable"] = configurable
+    return updated
+
+
 def trace_context_for_nested_invoke() -> TraceContext | None:
     """Snapshot active trace context at tool entry for nested sub-graph spans."""
     return current_trace_context() or _run_trace_ctx.get()
-
-
-def set_run_trace_snapshot(name: str, *, metadata: dict[str, Any] | None = None) -> object | None:
-    """
-    Arm ``_run_trace_ctx`` for LangGraph streaming without holding OTel open across ``yield``.
-
-    Opens a short root observation, snapshots trace/span ids, closes the observation, then stores
-    the snapshot in a ContextVar for nested node spans.
-    """
-    if not is_tracing_enabled():
-        return None
-    client = get_langfuse_client()
-    if client is None:
-        return None
-    kw: dict[str, Any] = {"as_type": "span", "name": name}
-    if metadata:
-        kw["metadata"] = metadata
-    with client.start_as_current_observation(**kw):
-        snapshot = current_trace_context()
-    return _run_trace_ctx.set(snapshot)
-
-
-def reset_run_trace_snapshot(token: object | None) -> None:
-    """Disarm ``_run_trace_ctx`` after streaming; safe if the consumer ran in another context."""
-    safe_reset_contextvar(_run_trace_ctx, token)
 
 
 def _otel_has_active_observation() -> bool:
@@ -151,6 +178,11 @@ def _resolve_trace_context(explicit: TraceContext | None) -> TraceContext | None
     return _run_trace_ctx.get()
 
 
+def should_skip_orphan_observation(parent_ctx: TraceContext | None) -> bool:
+    """Avoid creating standalone Langfuse traces when a node/tool lost its parent context."""
+    return is_tracing_enabled() and parent_ctx is None and not _otel_has_active_observation()
+
+
 def truncate_preview(text: str, limit: int = _TRACE_PREVIEW_LEN) -> str:
     """Truncate span payload strings (coding code/stderr previews)."""
     s = (text or "").strip()
@@ -170,6 +202,9 @@ def traced_span(name: str, *, trace_context: TraceContext | None = None, **kwarg
         yield None
         return
     parent_ctx = _resolve_trace_context(trace_context)
+    if should_skip_orphan_observation(parent_ctx):
+        yield None
+        return
     if parent_ctx is not None:
         kwargs = {**kwargs, "trace_context": parent_ctx}
     with client.start_as_current_observation(as_type="span", name=name, **kwargs) as span:
@@ -187,6 +222,9 @@ def traced_generation(name: str, *, model: str, trace_context: TraceContext | No
         yield None
         return
     parent_ctx = _resolve_trace_context(trace_context)
+    if should_skip_orphan_observation(parent_ctx):
+        yield None
+        return
     if parent_ctx is not None:
         kwargs = {**kwargs, "trace_context": parent_ctx}
     with client.start_as_current_observation(as_type="generation", name=name, model=model, **kwargs) as gen:
@@ -194,7 +232,7 @@ def traced_generation(name: str, *, model: str, trace_context: TraceContext | No
 
 
 @contextmanager
-def tracing_root(name: str, *, metadata: dict[str, Any] | None = None) -> Iterator[Any]:
+def tracing_root(name: str, *, metadata: dict[str, Any] | None = None) -> Iterator[TraceContext | None]:
     """Outer ``run`` / ``stream_run`` / ``resume`` span; snapshots trace context for nested spans."""
     if not is_tracing_enabled():
         yield None
@@ -208,9 +246,10 @@ def tracing_root(name: str, *, metadata: dict[str, Any] | None = None) -> Iterat
         kw["metadata"] = metadata
     token: object | None = None
     with client.start_as_current_observation(**kw):
-        token = _run_trace_ctx.set(current_trace_context())
+        root_context = current_trace_context()
+        token = _run_trace_ctx.set(root_context)
         try:
-            yield
+            yield root_context
         finally:
             safe_reset_contextvar(_run_trace_ctx, token)
 

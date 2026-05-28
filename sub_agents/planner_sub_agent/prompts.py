@@ -28,6 +28,7 @@ Do not set statuses or ids — **`write_todo`** assigns sequential ids and `pend
 
 # After write_todo
 The ToolMessage only acknowledges the update. On your next step, re-read **Current Todo List** from context (state-backed), not from tool message body.
+Call **`write_todo`** at most once for the latest user goal. After writing the checklist, stop; the parent graph will continue with execution.
 
 # Stop rules
 When the plan matches the latest user goal (and any clarifications are resolved), end planning with a short confirmation and **no tool calls**. Only that reply routes to graph **`END`**; execution then continues on the main Orchestrator.

@@ -11,7 +11,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from observability.langfuse_handler import traced_span
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 from output_validation.update_todo import UpdateTodoInput
 
 
@@ -30,7 +30,8 @@ def normalize_todo_row(row: object) -> dict | None:
 
 
 def update_todo_impl(todo_id: str, status: str, runtime: ToolRuntime) -> Command:
-    with traced_span("update_todo", input={"todo_id": todo_id, "status": status}) as outer_span:
+    trace_context = trace_context_from_runnable_config(runtime.config)
+    with traced_span("update_todo", trace_context=trace_context, input={"todo_id": todo_id, "status": status}) as outer_span:
         validated = UpdateTodoInput(todo_id=todo_id, status=status)  # type: ignore[arg-type]
         state = runtime.state or {}
         raw = list(state.get("todos") or [])

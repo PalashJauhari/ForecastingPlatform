@@ -18,7 +18,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
-from observability.langfuse_handler import safe_reset_contextvar, traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import add_trace_context_to_config, current_trace_context, safe_reset_contextvar, trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
 from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL, CODING_MODEL, CODING_RECURSION_LIMIT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, IO_JUDGE_MODEL, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
 from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODE_JUDGE_SYSTEM_PROMPT, IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
 from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
@@ -88,7 +88,7 @@ class CodingAgentState(TypedDict):
 
 def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Generate Python from requirements; on retry, prior gate feedback is included in context."""
-    ctx = get_coding_trace_context()
+    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput, include_raw=True)
 
     # Ephemeral LLM context (mirrors planner orchestrator): task, files, workspace, then gate failures.
@@ -145,8 +145,7 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
 
 def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Static Semgrep scan."""
-    del config
-    ctx = get_coding_trace_context()
+    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     code = (state.get("code") or "").strip()
     if not code:
         return {"semgrep_feedback": "No code to scan.", "status": "failed"}
@@ -168,8 +167,7 @@ def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[s
 
 def safety_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Ask the judge model to accept or reject the script for safety policy."""
-    del config
-    ctx = get_coding_trace_context()
+    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     code = (state.get("code") or "").strip()
     llm = ChatOpenAI(model=CODE_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
     task_spec = json.dumps(
@@ -207,8 +205,7 @@ def safety_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[s
 
 def io_allowlist_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """LLM-only check that reads/writes match declared input/output basenames."""
-    del config
-    ctx = get_coding_trace_context()
+    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     code = (state.get("code") or "").strip()
     llm = ChatOpenAI(model=IO_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
     spec = json.dumps({"input_files": state.get("input_files") or [], "output_files": state.get("output_files") or []}, ensure_ascii=False, indent=2)
@@ -265,10 +262,9 @@ def parse_command_exit_code(result: Any) -> int:
 
 def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Run generated_code.py in a fresh E2B sandbox and copy outputs locally."""
-    del config
     from e2b_code_interpreter import Sandbox
 
-    ctx = get_coding_trace_context()
+    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     if not E2B_TEMPLATE_NAME:
         raise ValueError(
             "E2B_TEMPLATE_NAME is not set. Run e2b/build_e2b_template.py and add it to "
@@ -555,6 +551,9 @@ class CodingGraph:
         token = coding_trace_ctx.set(trace_context)  # nodes read via get_coding_trace_context()
         try:
             with traced_span("coding_pipeline", trace_context=trace_context, metadata=meta):
+                # LangGraph may execute coding nodes outside the current OTel context;
+                # carrying the active pipeline span in config keeps each gate nested.
+                config = add_trace_context_to_config(config, current_trace_context())
                 try:
                     result = self.graph.invoke(initial, config=config)
                 except GraphRecursionError:

@@ -62,7 +62,7 @@ from langchain_core.tools import tool
 from prophet import Prophet
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
 from output_validation.prophet_tool import (
     ComponentAnalysisOutput,
     FitQualityOutput,
@@ -644,8 +644,9 @@ def run_prophet_pipeline(
     column, request a different frequency, fall back to ``coding_tool``).
     """
     session_id = session_id_from_config(runtime.config)
+    trace_context = trace_context_from_runnable_config(runtime.config)
 
-    with traced_span("prophet_tool", metadata={"session_id": session_id}) as tool_span:
+    with traced_span("prophet_tool", trace_context=trace_context, metadata={"session_id": session_id}) as tool_span:
         warnings_out: list[dict] = []
         try:
             # 1. Load and validate the source file, then turn it into a Prophet-ready frame.

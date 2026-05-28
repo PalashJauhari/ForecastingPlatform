@@ -28,6 +28,77 @@ function gbAppendProgressLine(progressEl, boldText, restText) {
   if (restText) row.appendChild(document.createTextNode(restText));
   progressEl.appendChild(row);
   progressEl.scrollTop = progressEl.scrollHeight;
+  gbChatAreaScrollBottom();
+}
+
+function gbChatAreaScrollBottom() {
+  var chatArea = document.getElementById("chat-area");
+  if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function gbCreateInlineUserBubble(chatArea, text) {
+  var row = document.createElement("div");
+  row.className = "gb-live-turn";
+  row.style.display = "flex";
+  row.style.justifyContent = "flex-end";
+  row.style.marginBottom = "10px";
+
+  var bubble = document.createElement("div");
+  bubble.className = "gb-live-user-bubble";
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  chatArea.appendChild(row);
+}
+
+function gbCreateInlineProgressBubble(messageText) {
+  var chatArea = document.getElementById("chat-area");
+  if (!chatArea) return null;
+
+  var liveRows = chatArea.querySelectorAll(".gb-live-turn");
+  for (var i = 0; i < liveRows.length; i++) liveRows[i].remove();
+
+  gbCreateInlineUserBubble(chatArea, messageText);
+
+  var row = document.createElement("div");
+  row.className = "gb-live-turn";
+  row.style.display = "flex";
+  row.style.gap = "8px";
+  row.style.alignItems = "flex-start";
+  row.style.marginBottom = "10px";
+
+  var logo = document.createElement("img");
+  logo.src = "/assets/gaussianblurr_favicon.png";
+  logo.alt = "Agentic Forecasting Platform";
+  logo.width = 32;
+  logo.height = 32;
+  logo.style.width = "32px";
+  logo.style.height = "32px";
+  logo.style.borderRadius = "8px";
+  logo.style.objectFit = "cover";
+  logo.style.flexShrink = "0";
+
+  var bubble = document.createElement("div");
+  bubble.className = "gb-live-progress-bubble";
+
+  var title = document.createElement("div");
+  title.className = "gb-live-progress-title";
+  title.textContent = "Working";
+
+  var progressEl = document.createElement("div");
+  progressEl.className = "gb-inline-progress";
+
+  bubble.appendChild(title);
+  bubble.appendChild(progressEl);
+  row.appendChild(logo);
+  row.appendChild(bubble);
+  chatArea.appendChild(row);
+  gbChatAreaScrollBottom();
+  return progressEl;
+}
+
+function gbClearInlineProgress() {
+  var liveRows = document.querySelectorAll(".gb-live-turn");
+  for (var i = 0; i < liveRows.length; i++) liveRows[i].remove();
 }
 
 function gbAppendProgressSub(progressEl, boldText, restText) {
@@ -44,6 +115,7 @@ function gbAppendProgressSub(progressEl, boldText, restText) {
   }
   progressEl.appendChild(row);
   progressEl.scrollTop = progressEl.scrollHeight;
+  gbChatAreaScrollBottom();
 }
 
 /** Node ids not shown in the progress panel (bookkeeping; server may already omit them). */
@@ -80,6 +152,7 @@ function gbAppendTodosUnderNode(progressEl, ev) {
     ul.appendChild(li);
   }
   progressEl.appendChild(ul);
+  gbChatAreaScrollBottom();
 }
 
 function gbAppendRunToolsProgress(progressEl, ev) {
@@ -195,8 +268,7 @@ async function gbParseSSEStream(response, progressEl) {
 }
 
 window.dash_clientside.gb_stream_ui.clear_stream_progress = function (_uploadGen) {
-  var el = document.getElementById("gb-stream-progress");
-  if (el) el.innerHTML = "";
+  gbClearInlineProgress();
   return "";
 };
 
@@ -233,8 +305,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
 
     var base = (apiBase || "http://127.0.0.1:8000").replace(/\/$/, "");
     var sessionId = chat.session_id;
-    var progressEl = document.getElementById("gb-stream-progress");
-    if (progressEl) progressEl.innerHTML = "";
+    var progressEl = gbCreateInlineProgressBubble(raw);
     gbAppendProgressLine(progressEl, "…", " — connecting");
 
     var endpoint = awaitingResume ? "/resume/stream" : "/run/stream";
@@ -264,6 +335,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
       var donePayload = await gbParseSSEStream(r, progressEl);
 
       if (!donePayload) {
+        gbClearInlineProgress();
         chat.messages.push({
           role: "assistant",
           content: "Run finished without a final **done** event — check FastAPI logs or graph wiring.",
@@ -275,6 +347,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
         var q = donePayload.question || "Please clarify.";
         chat.awaiting_resume = true;
         chat.pending_question = q;
+        gbClearInlineProgress();
         chat.messages.push({
           role: "assistant",
           content: "I need a bit more information before I proceed:\n\n**" + q + "**",
@@ -288,6 +361,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
       var summary = donePayload.summary || "Done.";
       var images = donePayload.images || [];
       var amsg = { role: "assistant", content: summary, output_images: images };
+      gbClearInlineProgress();
       chat.messages.push(amsg);
       return [chat, ""];
     } catch (e) {
@@ -297,6 +371,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
         chat.pending_question = restorePendingQuestion;
       }
       gbAppendProgressLine(progressEl, "error", " — " + truncate(err, 400));
+      gbClearInlineProgress();
       chat.messages.push({
         role: "assistant",
         content: "Something went wrong: " + truncate(err, 800),

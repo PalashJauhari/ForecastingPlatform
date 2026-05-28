@@ -36,10 +36,10 @@ from typing_extensions import NotRequired, TypedDict
 # from middleware.context_editing import truncate_and_summarize  # disabled with Summarise node
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import (
+    add_trace_context_to_config,
     flush_langfuse,
     is_tracing_enabled,
-    reset_run_trace_snapshot,
-    set_run_trace_snapshot,
+    trace_context_from_runnable_config,
     traced_generation,
     traced_span,
     tracing_root,
@@ -125,7 +125,8 @@ llm_with_tools = llm.bind_tools(TOOLS)
 def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Delegate to ``profiling_data.profile_session_workspace`` and set ``data_profile``."""
     session_id = session_id_from_config(config)
-    with traced_span("ProfileSavedData", metadata={"session_id": session_id}) as span:
+    trace_context = trace_context_from_runnable_config(config)
+    with traced_span("ProfileSavedData", trace_context=trace_context, metadata={"session_id": session_id}) as span:
         rows: List[Any] = profile_session_workspace(session_id)
         if span is not None:
             span.update(output={"profile_entries": len(rows), "session_id": session_id})
@@ -138,7 +139,8 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
 def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Re-profile workspace after ``RunTools`` so new CSV/XLSX from tools appear in ``data_profile``."""
     session_id = session_id_from_config(config)
-    with traced_span("ProfileSavedData_PostTools", metadata={"session_id": session_id}) as span:
+    trace_context = trace_context_from_runnable_config(config)
+    with traced_span("ProfileSavedData_PostTools", trace_context=trace_context, metadata={"session_id": session_id}) as span:
         rows: List[Any] = profile_session_workspace(session_id)
         if span is not None:
             span.update(output={"profile_entries": len(rows), "session_id": session_id})
@@ -171,8 +173,9 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     )
     orchestrator_messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=context)] + messages
     model = ORCHESTRATOR_MODEL
+    trace_context = trace_context_from_runnable_config(config)
 
-    with traced_span("Orchestrator") as node_span:
+    with traced_span("Orchestrator", trace_context=trace_context) as node_span:
         with traced_generation("Orchestrator-llm", model=model) as gen:
             response = llm_with_tools.invoke(orchestrator_messages, config=config)
             if gen is not None:
@@ -187,7 +190,8 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Terminal hook after a non-tool assistant reply."""
     del state
-    with traced_span("FinalAnswer", metadata={"session_id": session_id_from_config(config)}):
+    trace_context = trace_context_from_runnable_config(config)
+    with traced_span("FinalAnswer", trace_context=trace_context, metadata={"session_id": session_id_from_config(config)}):
         pass
     return {}
 
@@ -217,13 +221,14 @@ def todo_completion_check(state: AgentState, config: RunnableConfig) -> Dict[str
     todos: List[dict[str, Any]] = [t for t in todos_raw if isinstance(t, dict)]
     incomplete = [t for t in todos if t.get("status") != "completed"]
     session_id = session_id_from_config(config)
+    trace_context = trace_context_from_runnable_config(config)
     if not incomplete:
-        with traced_span("TodoCompletionCheck", metadata={"session_id": session_id, "action": "pass"}):
+        with traced_span("TodoCompletionCheck", trace_context=trace_context, metadata={"session_id": session_id, "action": "pass"}):
             pass
         return {}
 
     content = pending_todos_message(incomplete)
-    with traced_span("TodoCompletionCheck", metadata={"session_id": session_id, "action": "block", "incomplete_todos": len(incomplete)}) as span:
+    with traced_span("TodoCompletionCheck", trace_context=trace_context, metadata={"session_id": session_id, "action": "block", "incomplete_todos": len(incomplete)}) as span:
         if span is not None:
             span.update(output={"preview": content[:4000]})
     return {"messages": [AIMessage(content=content)]}
@@ -310,48 +315,53 @@ class AnalysisGraph:
         """Return the compiled main graph."""
         return self.graph
 
-    def thread_config(self, session_id: str) -> Dict[str, Any]:
+    def thread_config(self, session_id: str, trace_context: Any | None = None) -> Dict[str, Any]:
         """Runnable config aligned with ``run_graph`` / ``resume``."""
-        return {
+        config = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "max_concurrency": GRAPH_MAX_CONCURRENCY,
         }
+        return add_trace_context_to_config(config, trace_context)
 
     def stream_graph(self, session_id: str, user_query: str) -> Iterator[Dict[str, Any]]:
         """Yield graph progress as ``updates`` payloads."""
-        config = self.thread_config(session_id)
-        invoke_input = {
-            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
-            "todos": [],
-        }
-        trace_token = set_run_trace_snapshot("stream_run", metadata={"session_id": session_id})
-        try:
-            yield from self.graph.stream(invoke_input, config=config, stream_mode="updates")
-        finally:
-            reset_run_trace_snapshot(trace_token)
-            flush_langfuse()
-
-    def stream_resume(self, session_id: str, value: Any) -> Iterator[Dict[str, Any]]:
-        """Stream after an ``interrupt``, using ``Command(resume=…)``."""
-        config = self.thread_config(session_id)
-        trace_token = set_run_trace_snapshot("resume", metadata={"session_id": session_id})
-        try:
-            yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
-        finally:
-            reset_run_trace_snapshot(trace_token)
-            flush_langfuse()
-
-    def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
-        config = self.thread_config(session_id)
         invoke_input = {
             "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
             "todos": [],
         }
         if not is_tracing_enabled():
-            return self.graph.invoke(invoke_input, config=config)
+            yield from self.graph.stream(invoke_input, config=self.thread_config(session_id), stream_mode="updates")
+            return
         try:
-            with tracing_root("run", metadata={"session_id": session_id}):
+            with tracing_root("stream_run", metadata={"session_id": session_id}) as trace_context:
+                config = self.thread_config(session_id, trace_context=trace_context)
+                yield from self.graph.stream(invoke_input, config=config, stream_mode="updates")
+        finally:
+            flush_langfuse()
+
+    def stream_resume(self, session_id: str, value: Any) -> Iterator[Dict[str, Any]]:
+        """Stream after an ``interrupt``, using ``Command(resume=…)``."""
+        if not is_tracing_enabled():
+            yield from self.graph.stream(Command(resume=value), config=self.thread_config(session_id), stream_mode="updates")
+            return
+        try:
+            with tracing_root("resume", metadata={"session_id": session_id}) as trace_context:
+                config = self.thread_config(session_id, trace_context=trace_context)
+                yield from self.graph.stream(Command(resume=value), config=config, stream_mode="updates")
+        finally:
+            flush_langfuse()
+
+    def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+            "todos": [],
+        }
+        if not is_tracing_enabled():
+            return self.graph.invoke(invoke_input, config=self.thread_config(session_id))
+        try:
+            with tracing_root("run", metadata={"session_id": session_id}) as trace_context:
+                config = self.thread_config(session_id, trace_context=trace_context)
                 with propagate_attributes(session_id=session_id):
                     return self.graph.invoke(invoke_input, config=config)
         finally:
@@ -359,11 +369,11 @@ class AnalysisGraph:
 
     def resume(self, session_id: str, value: Any) -> Dict[str, Any]:
         """Resume after planner ``ask_user`` interrupt; same ``thread_id`` as ``run_graph``."""
-        config = self.thread_config(session_id)
         if not is_tracing_enabled():
-            return self.graph.invoke(Command(resume=value), config=config)
+            return self.graph.invoke(Command(resume=value), config=self.thread_config(session_id))
         try:
-            with tracing_root("resume", metadata={"session_id": session_id}):
+            with tracing_root("resume", metadata={"session_id": session_id}) as trace_context:
+                config = self.thread_config(session_id, trace_context=trace_context)
                 with propagate_attributes(session_id=session_id):
                     return self.graph.invoke(Command(resume=value), config=config)
         finally:

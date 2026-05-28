@@ -10,7 +10,7 @@ import json
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-from observability.langfuse_handler import trace_context_for_nested_invoke
+from observability.langfuse_handler import trace_context_for_nested_invoke, trace_context_from_runnable_config
 from session_paths import session_id_from_config
 from sub_agents.coding_sub_agent.graph import CodingGraph
 from sub_agents.coding_sub_agent.validation import CodingToolInput
@@ -35,6 +35,7 @@ def coding_tool(
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""
     state = runtime.state or {}
     data_profile = state.get("data_profile") or []
+    trace_context = trace_context_for_nested_invoke() or trace_context_from_runnable_config(runtime.config)
 
     body = coding_graph.run(
         session_id=session_id,
@@ -43,6 +44,6 @@ def coding_tool(
         input_files=list(validated.input_files),
         output_files=list(validated.output_files),
         data_profile=list(data_profile),
-        trace_context=trace_context_for_nested_invoke(),
+        trace_context=trace_context,
     )
     return json.dumps(body, default=str)

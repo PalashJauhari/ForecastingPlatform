@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Dict, List, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 
-from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
 from sub_agents.planner_sub_agent.config import PLANNER_MODEL
 from sub_agents.planner_sub_agent.prompts import PLANNER_SYSTEM_PROMPT
 from sub_agents.planner_sub_agent.tools.ask_user import ask_user
@@ -74,7 +74,8 @@ def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Di
         *state["messages"],
         HumanMessage(content=context_content),
     ]
-    with traced_span("PlannerOrchestrator") as node_span:
+    trace_context = trace_context_from_runnable_config(config)
+    with traced_span("PlannerOrchestrator", trace_context=trace_context) as node_span:
         with traced_generation("PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
             response = llm_with_tools.invoke(planner_messages, config=config)
             if gen is not None:
@@ -90,6 +91,17 @@ def route_after_planner(state: PlannerAgentState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "RunTools"
+    return END
+
+
+def route_after_planner_tools(state: PlannerAgentState) -> str:
+    """End after ``write_todo``; continue only after ``ask_user`` returns with user clarification."""
+    recent_tool_messages = [m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)]
+    if not recent_tool_messages:
+        return "PlannerOrchestrator"
+    tool_name = str(getattr(recent_tool_messages[0], "name", "") or "")
+    if tool_name == "ask_user":
+        return "PlannerOrchestrator"
     return END
 
 
@@ -117,7 +129,11 @@ class PlannerGraph:
             route_after_planner,
             {"RunTools": "RunTools", END: END},
         )
-        builder.add_edge("RunTools", "PlannerOrchestrator")
+        builder.add_conditional_edges(
+            "RunTools",
+            route_after_planner_tools,
+            {"PlannerOrchestrator": "PlannerOrchestrator", END: END},
+        )
         self.graph = builder.compile()
 
     def build_graph(self) -> Any:
