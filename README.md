@@ -118,7 +118,7 @@ Set `LANGFUSE_TRACING_ENABLED=true` (plus Langfuse keys in root `.env`) for one 
 Notes:
 
 - Planner `ask_user` interrupts produce a separate `resume` root span when you call `POST /resume` — expected for one logical turn.
-- Coding span payloads truncate code and stderr previews; full artifacts remain on disk.
+- Coding spans store full generated code and stderr when tracing is on; artifacts also remain on disk.
 - Parallel tool calls (`max_concurrency: 2`) may flatten nesting in Langfuse when multiple tools run in one orchestrator step.
 
 ## Project structure

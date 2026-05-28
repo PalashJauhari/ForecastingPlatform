@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, NotRequired, TypedDict
+from typing import Any, Dict, Literal, NotRequired, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -15,42 +15,21 @@ from langchain_openai import ChatOpenAI
 from langfuse.types import TraceContext
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
-from langgraph.graph import END, StateGraph, add_messages
+from langgraph.graph import END, StateGraph
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
-from observability.langfuse_handler import (
-    safe_reset_contextvar,
-    traced_generation,
-    traced_span,
-    truncate_preview,
-    update_llm_generation,
-)
-
-from sub_agents.coding_sub_agent.config import (
-    CODE_JUDGE_MODEL,
-    CODING_MODEL,
-    CODING_RECURSION_LIMIT,
-    E2B_API_KEY,
-    E2B_EXECUTION_TIMEOUT_SECONDS,
-    E2B_KILL_SANDBOX,
-    E2B_SANDBOX_TIMEOUT_SECONDS,
-    E2B_TEMPLATE_NAME,
-    IO_JUDGE_MODEL,
-    PLOT_FILE_EXTENSIONS,
-    TABULAR_OUTPUT_EXTENSIONS,
-)
-from sub_agents.coding_sub_agent.prompts import (
-    CODE_GENERATION_SYSTEM_PROMPT,
-    CODE_JUDGE_SYSTEM_PROMPT,
-    IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT,
-)
+from observability.langfuse_handler import safe_reset_contextvar, traced_generation, traced_span, update_llm_generation
+from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL, CODING_MODEL, CODING_RECURSION_LIMIT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, IO_JUDGE_MODEL, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
+from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODE_JUDGE_SYSTEM_PROMPT, IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
 from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
 from sub_agents.coding_sub_agent.validation import CodeGenerationOutput, JudgeOutput, sanitize_run_id
 
+# Parent trace snapshot for nested invokes (coding_tool → run); LangGraph drops OTel context.
 coding_trace_ctx: ContextVar[TraceContext | None] = ContextVar("coding_trace_ctx", default=None)
 
 
 def get_coding_trace_context() -> TraceContext | None:
+    """Return the trace context set for the current coding_tool invoke."""
     return coding_trace_ctx.get()
 
 
@@ -85,59 +64,59 @@ class CodeExecutionResult(TypedDict):
 class CodingAgentState(TypedDict):
     """State for the coding pipeline sub-graph."""
 
-    requirements: str
-    input_files: list[str]
-    output_files: list[str]
+    requirements: str  # task text from coding_tool
+    input_files: list[str]  # CSV/XLSX basenames to upload into the sandbox
+    output_files: list[str]  # expected output basenames (tables + plots)
     session_id: str
     tool_call_id: str
-    messages: Annotated[list, add_messages]
+    data_profile: list[Any]  # session workspace profile from main graph (CodeGen context)
     code: str
     explanation: NotRequired[str]
-    semgrep_feedback: str
-    judge_feedback: str
-    io_feedback: str
-    execution_feedback: str
+    semgrep_feedback: str  # set by SemgrepScan; cleared after a successful CodeGen
+    judge_feedback: str  # set by SafetyJudge; cleared after a successful CodeGen
+    io_feedback: str  # set by IOAllowlistJudge; cleared after a successful CodeGen
+    execution_feedback: str  # set by E2BExecute on failure; cleared after a successful CodeGen
     code_execution_result: NotRequired[CodeExecutionResult]
     status: NotRequired[Literal["success", "failed"]]
     sandbox_id: NotRequired[str]
 
 
-def build_feedback_block(state: CodingAgentState) -> str:
-    """Combine prior gate failures for codegen retry."""
-    parts: list[str] = []
-    for label, key in (
-        ("Semgrep", "semgrep_feedback"),
-        ("Safety judge", "judge_feedback"),
-        ("IO allowlist", "io_feedback"),
-        ("Execution", "execution_feedback"),
-    ):
-        text = (state.get(key) or "").strip()
-        if text:
-            parts.append(f"## {label}\n{text}")
-    return "\n\n".join(parts)
+# ---------------------------------------------------------------------------
+# CodeGen — structured Python generation
+# ---------------------------------------------------------------------------
 
 
 def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """LLM structured codegen with requirements, file lists, and accumulated feedback."""
+    """Generate Python from requirements; on retry, prior gate feedback is included in context."""
     ctx = get_coding_trace_context()
     llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput, include_raw=True)
-    feedback = build_feedback_block(state)
-    blocks = [
-        f"## Requirements\n{state['requirements']}",
-        f"## Input files\n{json.dumps(state.get('input_files') or [], ensure_ascii=False)}",
-        f"## Output files\n{json.dumps(state.get('output_files') or [], ensure_ascii=False)}",
+
+    # Ephemeral LLM context (mirrors planner orchestrator): task, files, workspace, then gate failures.
+    context_content = (
+        f"## Requirements\n{state['requirements']}\n\n"
+        f"## Input files\n{json.dumps(state['input_files'], ensure_ascii=False)}\n\n"
+        f"## Output files\n{json.dumps(state['output_files'], ensure_ascii=False)}\n\n"
+        f"## Session workspace (data_profile)\n"
+        f"{json.dumps(state['data_profile'], indent=2, ensure_ascii=False, default=str)}"
+    )
+    semgrep_fb = (state["semgrep_feedback"] or "").strip()
+    if semgrep_fb:
+        context_content += f"\n\n## Semgrep\n{semgrep_fb}"
+    judge_fb = (state["judge_feedback"] or "").strip()
+    if judge_fb:
+        context_content += f"\n\n## Safety judge\n{judge_fb}"
+    io_fb = (state["io_feedback"] or "").strip()
+    if io_fb:
+        context_content += f"\n\n## IO allowlist\n{io_fb}"
+    execution_fb = (state["execution_feedback"] or "").strip()
+    if execution_fb:
+        context_content += f"\n\n## Execution\n{execution_fb}"
+    # First pass: only requirements, files, and data_profile. Retries append non-empty feedback above.
+
+    prompt_messages = [
+        SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT),
+        HumanMessage(content=context_content),
     ]
-    if feedback:
-        blocks.append(feedback)
-    if state.get("messages"):
-        for msg in state["messages"]:
-            if isinstance(msg, HumanMessage):
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if "data_profile" in content:
-                    blocks.append(content)
-                    break
-    user_payload = "\n\n".join(blocks)
-    prompt_messages = [SystemMessage(content=CODE_GENERATION_SYSTEM_PROMPT), HumanMessage(content=user_payload)]
     try:
         with traced_span("CodeGen", trace_context=ctx) as node_span:
             with traced_generation("CodeGen-llm", model=CODING_MODEL, trace_context=ctx) as gen:
@@ -148,16 +127,18 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
                 if isinstance(parsed, dict):
                     parsed = CodeGenerationOutput.model_validate(parsed)
                 code = (parsed.code or "").strip()
+                # New code attempt: drop stale feedback so downstream gates only see this revision.
+                result = {
+                    "code": code,
+                    "explanation": parsed.explanation or "",
+                    "semgrep_feedback": "",
+                    "judge_feedback": "",
+                    "io_feedback": "",
+                    "execution_feedback": "",
+                }
                 if node_span is not None:
-                    node_span.update(output={"code_preview": truncate_preview(code), "code_len": len(code)})
-        return {
-            "code": code,
-            "explanation": parsed.explanation or "",
-            "semgrep_feedback": "",
-            "judge_feedback": "",
-            "io_feedback": "",
-            "execution_feedback": "",
-        }
+                    node_span.update(output=result)
+        return result
     except Exception as exc:
         return {"code": "", "explanation": "", "semgrep_feedback": f"Code generation failed: {exc}", "status": "failed"}
 
@@ -386,10 +367,10 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
                     "exit_code": exit_code,
                     "plot_count": len(plots),
                     "copied_outputs": copied_outputs,
-                    "stderr_preview": truncate_preview(stderr),
+                    "stderr": stderr,
                     "sandbox_id": sandbox_id or None,
                     "sandbox_killed": E2B_KILL_SANDBOX,
-                    "error": truncate_preview(error) if error else None,
+                    "error": error or None,
                 }
             )
 
@@ -537,19 +518,7 @@ class CodingGraph:
         )
         return builder.compile(checkpointer=self.checkpointer)
 
-    @staticmethod
-    def coding_thread_id(session_id: str, tool_call_id: str) -> str:
-        """One checkpoint thread per ``coding_tool`` call (isolates retries from prior calls)."""
-        safe_id = (tool_call_id or "unknown").replace("/", "_")
-        return f"coding_sub_agent_{session_id}_{safe_id}"
-
-    def run_config(self, session_id: str, tool_call_id: str) -> Dict[str, Any]:
-        return {
-            "configurable": {"thread_id": self.coding_thread_id(session_id, tool_call_id)},
-            "recursion_limit": CODING_RECURSION_LIMIT,
-        }
-
-    def invoke_pipeline(
+    def run(
         self,
         *,
         session_id: str,
@@ -562,81 +531,41 @@ class CodingGraph:
     ) -> dict[str, Any]:
         """Run the coding sub-graph and return a tool JSON-shaped dict.
 
-        Separate ``thread_id`` per ``tool_call_id``; in-memory checkpointer supports ``get_state`` on recursion limit.
+        One checkpoint thread per ``tool_call_id``; in-memory checkpointer supports ``get_state`` on recursion limit.
         """
-        profile_block = (
-            "## Session workspace (data_profile)\n"
-            f"{json.dumps(data_profile, indent=2, ensure_ascii=False, default=str)}"
-        )
         initial: CodingAgentState = {
             "requirements": requirements,
             "input_files": input_files,
             "output_files": output_files,
             "session_id": session_id,
             "tool_call_id": tool_call_id,
-            "messages": [HumanMessage(content=profile_block)],
+            "data_profile": data_profile,
             "code": "",
             "semgrep_feedback": "",
             "judge_feedback": "",
             "io_feedback": "",
             "execution_feedback": "",
         }
-        config = self.run_config(session_id, tool_call_id)
+        safe_id = (tool_call_id or "unknown").replace("/", "_")
+        config = {
+            "configurable": {"thread_id": f"coding_sub_agent_{session_id}_{safe_id}"},
+            "recursion_limit": CODING_RECURSION_LIMIT,
+        }
         meta = {"session_id": session_id, "tool_call_id": tool_call_id}
-        token = coding_trace_ctx.set(trace_context)
+        token = coding_trace_ctx.set(trace_context)  # nodes read via get_coding_trace_context()
         try:
             with traced_span("coding_pipeline", trace_context=trace_context, metadata=meta):
                 try:
                     result = self.graph.invoke(initial, config=config)
                 except GraphRecursionError:
+                    # Recursion cap hit (retry loop); return last checkpoint so coding_tool gets JSON.
                     snap = self.graph.get_state(config)
                     result = dict(snap.values) if snap and snap.values else dict(initial)
-                    if result.get("status") != "success":
-                        result.setdefault("execution_feedback", "")
-                        if not (result.get("execution_feedback") or "").strip():
-                            result["execution_feedback"] = (
-                                f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
-                            )
+                    if result.get("status") != "success" and not (result.get("execution_feedback") or "").strip():
+                        result["execution_feedback"] = (
+                            f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
+                        )
         finally:
             safe_reset_contextvar(coding_trace_ctx, token)
 
         return build_coding_tool_response(result)
-
-
-coding_graph_instance: CodingGraph | None = None
-
-
-def get_coding_graph() -> Any:
-    """Return the compiled coding subgraph (lazy singleton)."""
-    global coding_graph_instance
-    if coding_graph_instance is None:
-        coding_graph_instance = CodingGraph()
-    return coding_graph_instance.graph
-
-
-get_graph = get_coding_graph
-
-
-def invoke_coding_pipeline(
-    *,
-    session_id: str,
-    tool_call_id: str,
-    requirements: str,
-    input_files: list[str],
-    output_files: list[str],
-    data_profile: list,
-    trace_context=None,
-) -> dict[str, Any]:
-    """Backward-compatible entrypoint for ``coding_tool``."""
-    global coding_graph_instance
-    if coding_graph_instance is None:
-        coding_graph_instance = CodingGraph()
-    return coding_graph_instance.invoke_pipeline(
-        session_id=session_id,
-        tool_call_id=tool_call_id,
-        requirements=requirements,
-        input_files=input_files,
-        output_files=output_files,
-        data_profile=data_profile,
-        trace_context=trace_context,
-    )
