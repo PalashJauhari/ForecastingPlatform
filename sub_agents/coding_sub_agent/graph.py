@@ -22,6 +22,7 @@ from sub_agents.coding_sub_agent.config import (
     E2B_API_KEY,
     E2B_EXECUTION_TIMEOUT_SECONDS,
     E2B_SANDBOX_TIMEOUT_SECONDS,
+    E2B_TEMPLATE_NAME,
     IO_JUDGE_MODEL,
     PLOT_FILE_EXTENSIONS,
     TABULAR_OUTPUT_EXTENSIONS,
@@ -68,6 +69,7 @@ class CodingAgentState(TypedDict):
     execution_feedback: str
     code_execution_result: NotRequired[CodeExecutionResult]
     status: NotRequired[Literal["success", "failed"]]
+    sandbox_id: NotRequired[str]
 
 
 def build_feedback_block(state: CodingAgentState) -> str:
@@ -232,6 +234,12 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     del config
     from e2b_code_interpreter import Sandbox
 
+    if not E2B_TEMPLATE_NAME:
+        raise ValueError(
+            "E2B_TEMPLATE_NAME is not set. Run build_e2b_template.py and add it to "
+            "sub_agents/coding_sub_agent/.env"
+        )
+
     code = (state.get("code") or "").strip()
     session_id = state["session_id"]
     tool_call_id = state["tool_call_id"]
@@ -246,6 +254,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
 
     workspace_dir = "/home/user/workspace"
     sandbox = None
+    sandbox_id = ""
     stdout = ""
     stderr = ""
     exit_code = -1
@@ -256,9 +265,13 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
 
     try:
         sandbox = Sandbox.create(
+            template=E2B_TEMPLATE_NAME,
             api_key=E2B_API_KEY or None,
             timeout=E2B_SANDBOX_TIMEOUT_SECONDS,
+            allow_internet_access=False,
+            lifecycle={"on_timeout": "pause"},
         )
+        sandbox_id = str(getattr(sandbox, "sandbox_id", "") or "")
         sandbox.commands.run(f"mkdir -p {workspace_dir}")
 
         # Upload session CSV/XLSX inputs into the sandbox workspace.
@@ -331,6 +344,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
             "code_execution_result": exec_result,
             "execution_feedback": "",
             "status": "success",
+            "sandbox_id": "",
         }
 
     parts: list[str] = []
@@ -347,6 +361,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
         "code_execution_result": exec_result,
         "execution_feedback": feedback,
         "status": "failed",
+        "sandbox_id": "",
     }
 
 

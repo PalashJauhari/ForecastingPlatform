@@ -45,7 +45,7 @@ On each new message the agent profiles your files, summarizes long context, buil
    - Copy sub-agent templates:
      - `sub_agents/planner_sub_agent/.env.example` → `.env`
      - `sub_agents/coding_sub_agent/.env.example` → `.env`
-   - Set `OPENAI_API_KEY` in all three; set `E2B_API_KEY` for cloud code execution.
+   - Set `OPENAI_API_KEY` in all three; set `E2B_API_KEY` and `E2B_TEMPLATE_NAME` for cloud code execution (run `build_e2b_template.py` first).
 
 3. **Run**
 
@@ -82,8 +82,19 @@ Custom analysis runs through a dedicated coding pipeline:
 
 1. Code is generated for your requirements and declared input/output filenames.
 2. Static rules (Semgrep) and LLM judges check safety and file allowlists.
-3. Approved scripts run in a fresh E2B cloud sandbox per run; gate failures retry CodeGen until `CODING_RECURSION_LIMIT` (see coding sub-agent `.env`) is reached.
+3. Approved scripts run in a fresh E2B cloud sandbox per `E2BExecute` attempt (custom template with data-science libraries, no internet); gate failures retry CodeGen until `CODING_RECURSION_LIMIT` (see coding sub-agent `.env`) is reached.
 4. CSV/XLSX outputs land at the session root; PNG/SVG plots under `run_<tool_call_id>/` for inline display.
+
+### E2B template (one-time setup)
+
+Build the coding sandbox image manually (not on app startup). From the repo root with your venv active:
+
+```bash
+pip install 'e2b>=2.3.0'
+python sub_agents/coding_sub_agent/build_e2b_template.py --write-env
+```
+
+Set `E2B_API_KEY` in `sub_agents/coding_sub_agent/.env` before building. After build, ensure `E2B_TEMPLATE_NAME` (and optional `E2B_TEMPLATE_ID`) are in that `.env`. Runtime uses `allow_internet_access=False` and a 2-minute sandbox timeout (`E2B_SANDBOX_TIMEOUT_SECONDS=120`).
 
 Guardrails include basename-only paths, allowed extensions, and blocked OS/network/subprocess patterns.
 
