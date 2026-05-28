@@ -54,13 +54,13 @@ llm_with_tools = llm.bind_tools(TOOLS)
 def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Invoke planner LLM; latest todos from ``state.todos`` via context block."""
     profile_block = json.dumps(
-        state["data_profile"],
+        state.get("data_profile") or [],
         indent=2,
         ensure_ascii=False,
         default=str,
     )
     todos_block = json.dumps(
-        state["todos"],
+        state.get("todos") or [],
         indent=2,
         ensure_ascii=False,
         default=str,

@@ -129,7 +129,10 @@ def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[str, A
         rows: List[Any] = profile_session_workspace(session_id)
         if span is not None:
             span.update(output={"profile_entries": len(rows), "session_id": session_id})
-        return {"data_profile": rows}
+        update: Dict[str, Any] = {"data_profile": rows}
+        if "todos" not in state:
+            update["todos"] = []
+        return update
 
 
 def profile_saved_data_post_tools(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -318,7 +321,10 @@ class AnalysisGraph:
     def stream_graph(self, session_id: str, user_query: str) -> Iterator[Dict[str, Any]]:
         """Yield graph progress as ``updates`` payloads."""
         config = self.thread_config(session_id)
-        invoke_input = {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]}
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+            "todos": [],
+        }
         trace_token = set_run_trace_snapshot("stream_run", metadata={"session_id": session_id})
         try:
             yield from self.graph.stream(invoke_input, config=config, stream_mode="updates")
@@ -338,7 +344,10 @@ class AnalysisGraph:
 
     def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
         config = self.thread_config(session_id)
-        invoke_input = {"messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")]}
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+            "todos": [],
+        }
         if not is_tracing_enabled():
             return self.graph.invoke(invoke_input, config=config)
         try:
