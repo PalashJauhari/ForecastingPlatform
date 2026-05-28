@@ -6,7 +6,7 @@ Upload tabular data, ask questions in plain language, and get forecasts, analysi
 
 - **Agentic workflow** — The platform plans tasks, runs tools, and tracks progress automatically instead of relying on a single static prompt.
 - **Session workspace** — Each conversation has its own folder for uploads and generated CSV/XLSX outputs.
-- **Deterministic forecasting** — Built-in SARIMA and Prophet tools for validated model fits when you want structured forecasts without custom code.
+- **Deterministic forecasting** — Built-in SARIMA, Prophet, and Holt-Winters tools for validated model fits when you want structured forecasts without custom code.
 - **Safe custom analysis** — When code is needed, it is generated, scanned, reviewed, and executed in an isolated cloud sandbox (E2B).
 - **Streaming UI** — Dash chat with live progress and inline plot rendering.
 
@@ -16,7 +16,7 @@ Upload tabular data, ask questions in plain language, and get forecasts, analysi
 - Automatic data profiling (columns, samples, basic stats)
 - Todo planning at the start of each user turn
 - Custom Python analysis and charts via the coding tool
-- SARIMA / Prophet forecasting with interpretable JSON results
+- SARIMA / Prophet / Holt-Winters forecasting with interpretable JSON results
 - FastAPI backend with SSE streaming; Plotly Dash frontend
 
 ## How it works
@@ -62,7 +62,7 @@ On each new message the agent profiles your files, summarizes long context, buil
 
 1. Upload `sales.csv`.
 2. Ask: *“Forecast the next 12 months of revenue and show a trend chart.”*
-3. The agent profiles the file, plans steps, may run Prophet or SARIMA for the table, and uses the coding tool for charts.
+3. The agent profiles the file, plans steps, may run Prophet or SARIMA for the table (forecast + fitted CSVs at session root), and uses the coding tool for charts from those outputs.
 4. Tables stay in your session workspace; plots appear inline in the assistant message.
 
 ## API overview
@@ -100,8 +100,16 @@ Guardrails include basename-only paths, allowed extensions, and blocked OS/netwo
 
 ## Forecasting tools
 
-- **SARIMA tool** — Auto-ARIMA order search, diagnostics, forecast table at session root. Use **coding_tool** for charts.
-- **Prophet tool** — Trend/seasonality decomposition with optional weekly/monthly/yearly seasonality. Use **coding_tool** for charts.
+All three tools inherit **`ForecastingModel`** (`tools/forecasting/base.py`) and share the same pipeline: validate → fit → fitted/residuals → forecast → save tables → LLM interpretation → unified JSON.
+
+- **SARIMA tool** (`sarima_tool`) — Auto/manual ARIMA order, SARIMAX fit, 95% prediction intervals, Ljung-Box/Jarque-Bera diagnostics. Strict data rules (no missing target values). Writes **forecast + fitted** CSV/XLSX at session root.
+- **Prophet tool** (`prophet_tool`) — Trend + weekly/monthly/yearly seasonality, changepoints, MAD residual checks. Tolerates missing target rows. Writes **forecast + fitted + decomposition** CSV/XLSX at session root.
+- **Holt-Winters tool** (`holt_winters_tool`) — Exponential smoothing with additive/multiplicative trend and seasonality, 95% intervals, Ljung-Box/Jarque-Bera diagnostics. Writes **forecast + fitted + decomposition** CSV/XLSX at session root.
+- **Charts** — No forecasting tool produces images. Use **`coding_tool`** on the saved forecast/fitted files (plots land under `run_<tool_call_id>/`).
+
+**Unified JSON response:** `status`, `model_type`, `frequency`, `model`, `fit_quality`, `residual_diagnostics`, output file paths, previews, `llm_interpretation`, `warnings`. See each tool’s docstring for data format, arguments, and example calls.
+
+**Input requirements:** regular date frequency (inferred from data), basename-only file references, minimum 10 observations. Upload CSV/XLSX to the session before calling a forecasting tool.
 
 ## Configuration
 
@@ -135,7 +143,14 @@ sub_agents/          Planner and coding sub-graphs (AnalysisGraph-style classes)
 tools/               Main-graph @tool wrappers only
   coding_tools/coding_tool.py             Invokes coding sub-agent pipeline
   planning/update_todo.py                   Orchestrator todo status patches
-  forecasting/                            SARIMA, Prophet tools
+  forecasting/                            ForecastingModel + SarimaModel / ProphetModel / HoltWintersModel + @tool wrappers
+    base.py                                 Shared pipeline base class
+    sarima_model.py                         SarimaModel
+    prophet_model.py                        ProphetModel
+    holt_winters_model.py                   HoltWintersModel
+    sarima_tool.py                          LangChain sarima_tool wrapper
+    prophet_tool.py                         LangChain prophet_tool wrapper
+    holt_winters_tool.py                    LangChain holt_winters_tool wrapper
 ui/                  Dash chat application
 prompts/             Orchestrator system prompt
 middleware/          LLM clients, context editing
@@ -150,6 +165,7 @@ config.yaml          Main platform settings
 ## For contributors
 
 - **Prompts** (`prompts/`, `sub_agents/*/prompts.py`) hold LLM instructions; **code comments** explain graph/tool wiring and invariants — do not duplicate prompt text in comments.
+- **Forecasting** — inherit `ForecastingModel`; use snake_case public methods; add `# Brief:` stage comments; tool docstrings are the orchestrator contract.
 - Main graph: `graph/graph.py`
 - Sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`
 - Regenerate topology diagrams: `python scripts/generate_artifact_plot.py` → `artifact/*.png`

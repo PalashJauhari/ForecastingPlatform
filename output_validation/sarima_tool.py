@@ -6,7 +6,7 @@ Two groups live here:
 * ``SarimaToolInput`` — the LangChain tool argument schema. Field descriptions
   are what the orchestrator model sees, so they must match the tool docstring.
 * ``ResidualAnalysisOutput`` / ``FitQualityOutput`` / ``ForecastSummaryOutput``
-  — structured outputs for the three internal LLM calls that translate the
+  — structured outputs for the internal LLM calls that translate the
   deterministic JSON into business-readable text.
 """
 
@@ -16,28 +16,17 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from output_validation.forecasting_common import BaseForecastToolInput
+
 
 # ---------------------------------------------------------------------------
 # Tool input
 # ---------------------------------------------------------------------------
 
 
-class SarimaToolInput(BaseModel):
+class SarimaToolInput(BaseForecastToolInput):
     """Arguments exposed to the orchestrator for ``sarima_tool``."""
 
-    file_name: str = Field(
-        description="Bare CSV/XLSX filename in the session workspace, e.g. 'sales.csv'.",
-    )
-    date_column: str = Field(
-        description="Column name in the file containing dates (parsed and used as the time index).",
-    )
-    target_column: str = Field(
-        description="Numeric column name to forecast.",
-    )
-    horizon: int = Field(
-        gt=0,
-        description="Number of future periods to forecast (positive integer).",
-    )
     # ``seasonal_period`` is intentionally a required field whose value can be ``null``:
     # this forces the orchestrator to make an explicit seasonality choice (or ask the user)
     # rather than relying on a hidden default.
@@ -49,9 +38,6 @@ class SarimaToolInput(BaseModel):
             "4 for quarterly, 7 for daily with weekly cycle). Must be provided when seasonal_order is set. "
             "If unsure, ask the user via ask_user before calling this tool."
         ),
-    )
-    forecast_output_file: str = Field(
-        description="Bare filename for the forecast table; must end with .csv or .xlsx.",
     )
     use_auto_arima: bool = Field(
         default=False,

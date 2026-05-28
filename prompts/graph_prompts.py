@@ -38,7 +38,7 @@ Decision rules:
    - `output_files` — every basename the script may write (`.csv`/`.xlsx`/`.png`/`.svg`).
 3. Parse the JSON result: `status`, `stdout`, `stderr`, `code_violation`, `outputs`, `plots`, and optionally `code` on failure.
 4. On `coding_tool` failure, refine `requirements` from feedback and retry up to a few times before explaining failure plainly.
-5. For forecasting, prefer `sarima_tool` or `prophet_tool` when appropriate.
+5. For forecasting, prefer `sarima_tool`, `prophet_tool`, or `holt_winters_tool` when appropriate. All return the same JSON envelope: `status`, `model_type`, `fit_quality`, `residual_diagnostics`, `forecast_output_file`, `fitted_output_file`, previews, and `llm_interpretation`. Prophet and Holt-Winters also include `decomposition_output_file`. None produce charts — use `coding_tool` on the saved CSV outputs.
 
 # Stop rules
 - If the core request is answered with sufficient evidence, respond to the user.

@@ -7,7 +7,7 @@ Two groups live here:
   are what the orchestrator model sees, so they must match the tool docstring.
 * ``ResidualAnalysisOutput`` / ``FitQualityOutput`` / ``ForecastSummaryOutput`` /
   ``ComponentAnalysisOutput`` / ``ModelImprovementGuidanceOutput`` — structured
-  outputs for the five internal LLM calls that translate the deterministic
+  outputs for the internal LLM calls that translate the deterministic
   Prophet JSON into business-readable text.
 """
 
@@ -17,28 +17,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from output_validation.forecasting_common import BaseForecastToolInput
+
 
 # ---------------------------------------------------------------------------
 # Tool input
 # ---------------------------------------------------------------------------
 
 
-class ProphetToolInput(BaseModel):
+class ProphetToolInput(BaseForecastToolInput):
     """Arguments exposed to the orchestrator for ``prophet_tool``."""
 
-    file_name: str = Field(
-        description="Bare CSV/XLSX filename in the session workspace, e.g. 'sales.csv'.",
-    )
-    date_column: str = Field(
-        description="Column name in the file containing dates (parsed and renamed to Prophet's required ``ds``).",
-    )
-    target_column: str = Field(
-        description="Numeric column name to forecast (renamed to Prophet's required ``y``).",
-    )
-    horizon: int = Field(
-        gt=0,
-        description="Number of future periods to forecast (positive integer).",
-    )
     changepoint_prior_scale: float = Field(
         gt=0,
         description=(
@@ -62,14 +51,11 @@ class ProphetToolInput(BaseModel):
     yearly_seasonality: bool = Field(
         description="Enable Prophet's built-in yearly seasonality.",
     )
-    forecast_output_file: str = Field(
-        description="Bare filename for the future-only forecast table; must end with .csv or .xlsx.",
-    )
-    fitted_output_file: str = Field(
-        description="Bare filename for the in-sample fitted table (actual + fitted + residual + components); must end with .csv or .xlsx.",
-    )
     decomposition_output_file: str = Field(
-        description="Bare filename for the combined fitted + forecast decomposition table; must end with .csv or .xlsx.",
+        description=(
+            "Output basename for the combined fitted + forecast decomposition table; "
+            "must end with .csv or .xlsx, e.g. 'revenue_decomposition.csv'."
+        ),
     )
 
 

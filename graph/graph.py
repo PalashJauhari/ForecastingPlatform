@@ -50,6 +50,7 @@ from session_paths import session_id_from_config
 from tools.coding_tools.coding_tool import coding_tool
 from sub_agents.planner_sub_agent.graph import get_planner_graph
 from tools.file_management_tools.profiling_data import profile_session_workspace
+from tools.forecasting.holt_winters_tool import holt_winters_tool
 from tools.forecasting.prophet_tool import prophet_tool
 from tools.forecasting.sarima_tool import sarima_tool
 from tools.planning.update_todo import update_todo
@@ -110,6 +111,7 @@ TOOLS = [
     coding_tool,
     sarima_tool,
     prophet_tool,
+    holt_winters_tool,
     update_todo,
 ]  # Main-graph tier only; planner tools live under sub_agents/planner_sub_agent/tools/
 
@@ -262,7 +264,7 @@ class AnalysisGraph:
     Wrapper around the compiled LangGraph ``StateGraph``.
 
     Notes
-        * **Tools** — ``coding_tool``, ``sarima_tool``, ``prophet_tool``, ``update_todo``.
+        * **Tools** — ``coding_tool``, ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``, ``update_todo``.
         * **Prep** — **ProfileSavedData** → **Planner** → **Orchestrator** (summarise disabled).
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield ``stream_mode="updates"`` chunks.
     """
