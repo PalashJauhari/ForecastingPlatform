@@ -1,15 +1,8 @@
 """
 Base forecasting pipeline for session tabular time-series tools.
 
-``ForecastingModel`` owns the shared template-method pipeline (validate → fit →
-fitted table → residual analysis → forecast → save → LLM interpret → JSON).
-``SarimaModel``, ``ProphetModel``, and ``HoltWintersModel`` inherit and override model-specific stages.
-
-Design rules:
-
-* Deterministic statistics are the source of truth; LLMs only interpret JSON.
-* Hard data errors return clean error JSON; bad residual diagnostics are warnings.
-* This module does not create images — use ``coding_tool`` for charts.
+``ForecastingModel`` owns validate → fit → fitted → residuals → forecast → save tables/plots → interpret → lean JSON.
+Subclasses override model-specific fit, forecast, and optional decomposition hooks.
 """
 
 from __future__ import annotations
@@ -19,35 +12,35 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
 from langchain.tools import ToolRuntime
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
-from output_validation.forecasting_common import BaseForecastToolInput
-from session_paths import ensure_session_dirs, session_dir_for_paths, session_id_from_config, session_root
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
+from output_validation.forecasting_common import BaseForecastToolInput, InterpretationSummaryOutput
+from prompts.forecasting_interpretation_prompt import FORECASTING_INTERPRETATION_SYSTEM_PROMPT
+from session_paths import ensure_session_dirs, session_id_from_config, session_root
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-# Reuse the orchestrator model for interpretation: already configured and rate-limited.
 INTERPRETATION_MODEL = cfg["models"].get("orchestrator", "gpt-4o-mini")
 
-# Lower bound for a meaningful fit; fail fast below this.
 MIN_OBS = 10
-
+PREVIEW_HEAD_ROWS = 5
 ALLOWED_TABLE_EXTS = {".csv", ".xlsx"}
-
-FORECAST_PREVIEW_ROWS = 12
-FITTED_PREVIEW_ROWS = 12
+ALLOWED_PLOT_EXTS = {".png"}
 
 
 class ForecastingToolError(Exception):
     """Domain error raised by pipeline stages so ``run()`` can return clean JSON."""
 
-    # Brief: Store a stable error code, user-facing message, and pipeline stage.
     def __init__(self, code: str, message: str, stage: str):
         super().__init__(message)
         self.code = code
@@ -56,12 +49,7 @@ class ForecastingToolError(Exception):
 
 
 class ForecastingModel(ABC):
-    """
-    Template-method base for forecasting tools.
-
-    Subclasses override ``fit``, ``analyze_residuals``, ``generate_forecast``,
-    ``build_fitted_table``, and ``run_llm_interpretations``.
-    """
+    """Template-method base for forecasting tools."""
 
     session_id: str = ""
     trace_context: Any = None
@@ -69,12 +57,12 @@ class ForecastingModel(ABC):
     @property
     @abstractmethod
     def model_type(self) -> str:
-        """Short model id surfaced in JSON (``sarima``, ``prophet``, ``holt_winters``)."""
+        """Short model id surfaced in JSON."""
 
     @property
     @abstractmethod
     def allow_missing_target(self) -> bool:
-        """If false, any missing target row fails validation (SARIMA)."""
+        """If false, any missing target row fails validation."""
 
     @abstractmethod
     def fit(
@@ -86,7 +74,7 @@ class ForecastingModel(ABC):
         target_column: str,
         params: BaseForecastToolInput,
     ) -> tuple[Any, dict, dict, list[dict], dict]:
-        """Fit the model; return (model, model_spec, fit_quality, fit_warnings, fit_extras)."""
+        """Return (model, model_spec, fit_quality, fit_warnings, fit_extras)."""
 
     @abstractmethod
     def analyze_residuals(
@@ -95,7 +83,7 @@ class ForecastingModel(ABC):
         model_spec: dict,
         fit_extras: dict,
     ) -> dict:
-        """Return residual diagnostics dict with status, metrics, warnings, definitions."""
+        """Return residual diagnostics (may include definitions; stripped before JSON)."""
 
     @abstractmethod
     def generate_forecast(
@@ -106,7 +94,7 @@ class ForecastingModel(ABC):
         fit_extras: dict,
         params: BaseForecastToolInput,
     ) -> pd.DataFrame:
-        """Return forecast table with at least calendar_date and forecast columns."""
+        """Return forecast table with calendar_date and forecast (+ intervals when available)."""
 
     @abstractmethod
     def build_fitted_table(
@@ -118,20 +106,6 @@ class ForecastingModel(ABC):
     ) -> pd.DataFrame:
         """Return in-sample table: calendar_date, actual, fitted, residual."""
 
-    @abstractmethod
-    def run_llm_interpretations(
-        self,
-        model_spec: dict,
-        fit_quality: dict,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        residual_diagnostics: dict,
-        params: BaseForecastToolInput,
-        decomposition_table: pd.DataFrame | None,
-    ) -> dict:
-        """Run structured LLM calls and return the llm_interpretation block."""
-
     def build_decomposition(
         self,
         df: pd.DataFrame,
@@ -140,15 +114,202 @@ class ForecastingModel(ABC):
         fitted_table: pd.DataFrame,
         forecast_table: pd.DataFrame,
     ) -> pd.DataFrame | None:
-        """Optional combined fitted + forecast decomposition; default none."""
-        return None
-
-    def changepoints_for_response(self, fit_extras: dict) -> dict | None:
-        """Optional changepoint block for unified JSON; default none."""
+        """Optional combined decomposition with period_type column; default none."""
         return None
 
     # ---------------------------------------------------------------------------
-    # Shared pipeline stages
+    # Artifact names and persistence
+    # ---------------------------------------------------------------------------
+
+    def artifact_basename(self, experiment_name: str, stem: str, suffix: str) -> str:
+        """Build output basename ``{experiment_name}_{stem}.{suffix}``."""
+        return f"{experiment_name}_{stem}.{suffix}"
+
+    def save_table(
+        self,
+        table: pd.DataFrame,
+        session_id: str,
+        basename: str,
+        stage: str,
+    ) -> str:
+        """Write table at session root; return basename only."""
+        name = Path(basename).name
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_TABLE_EXTS:
+            raise ForecastingToolError(
+                "invalid_output_file",
+                f"{stage} file must end with .csv or .xlsx (got '{ext or 'no extension'}').",
+                stage,
+            )
+        ensure_session_dirs(session_id)
+        out_path = session_root(session_id) / name
+        if ext == ".csv":
+            table.to_csv(out_path, index=False)
+        else:
+            table.to_excel(out_path, index=False)
+        return name
+
+    def save_plot(self, fig: plt.Figure, session_id: str, basename: str, stage: str) -> str:
+        """Save matplotlib figure as PNG; return basename only."""
+        name = Path(basename).name
+        if Path(name).suffix.lower() not in ALLOWED_PLOT_EXTS:
+            raise ForecastingToolError(
+                "invalid_output_file",
+                f"{stage} plot must end with .png.",
+                stage,
+            )
+        ensure_session_dirs(session_id)
+        out_path = session_root(session_id) / name
+        fig.savefig(out_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        return name
+
+    # ---------------------------------------------------------------------------
+    # Default plots
+    # ---------------------------------------------------------------------------
+
+    def plot_fitted(self, fitted_table: pd.DataFrame) -> plt.Figure:
+        """Actual vs fitted line chart."""
+        fig, ax = plt.subplots(figsize=(8, 4))
+        dates = pd.to_datetime(fitted_table["calendar_date"])
+        ax.plot(dates, fitted_table["actual"], label="actual", marker="o", markersize=3)
+        ax.plot(dates, fitted_table["fitted"], label="fitted", marker="o", markersize=3)
+        ax.legend()
+        ax.set_title("In-sample fit")
+        fig.autofmt_xdate()
+        return fig
+
+    def plot_forecast(self, forecast_table: pd.DataFrame) -> plt.Figure:
+        """Forecast line with optional 95% interval band."""
+        fig, ax = plt.subplots(figsize=(8, 4))
+        dates = pd.to_datetime(forecast_table["calendar_date"])
+        ax.plot(dates, forecast_table["forecast"], label="forecast", marker="o", markersize=3)
+        if "lower_95" in forecast_table.columns and "upper_95" in forecast_table.columns:
+            ax.fill_between(
+                dates,
+                forecast_table["lower_95"],
+                forecast_table["upper_95"],
+                alpha=0.2,
+                label="95% interval",
+            )
+        ax.legend()
+        ax.set_title("Forecast")
+        fig.autofmt_xdate()
+        return fig
+
+    def plot_residuals(self, fitted_table: pd.DataFrame) -> plt.Figure:
+        """Residuals over time."""
+        fig, ax = plt.subplots(figsize=(8, 4))
+        dates = pd.to_datetime(fitted_table["calendar_date"])
+        ax.axhline(0, color="gray", linewidth=0.8)
+        ax.plot(dates, fitted_table["residual"], marker="o", markersize=3)
+        ax.set_title("Residuals")
+        fig.autofmt_xdate()
+        return fig
+
+    def plot_decomposition(self, decomposition_table: pd.DataFrame) -> plt.Figure:
+        """Plot main level/trend/seasonal or forecast series from decomposition."""
+        fig, ax = plt.subplots(figsize=(8, 4))
+        dates = pd.to_datetime(decomposition_table["calendar_date"])
+        value_col = "forecast" if "forecast" in decomposition_table.columns else "fitted"
+        if "trend" in decomposition_table.columns:
+            ax.plot(dates, decomposition_table["trend"], label="trend")
+        elif value_col in decomposition_table.columns:
+            ax.plot(dates, decomposition_table[value_col], label=value_col)
+        if "seasonal" in decomposition_table.columns:
+            ax.plot(dates, decomposition_table["seasonal"], label="seasonal", alpha=0.8)
+        ax.legend()
+        ax.set_title("Decomposition")
+        fig.autofmt_xdate()
+        return fig
+
+    # ---------------------------------------------------------------------------
+    # JSON helpers
+    # ---------------------------------------------------------------------------
+
+    def preview_head(self, table: pd.DataFrame) -> list[dict]:
+        """First N rows for LLM-facing JSON."""
+        return table.head(PREVIEW_HEAD_ROWS).to_dict(orient="records")
+
+    def lean_residual_output(self, residual_diagnostics: dict) -> dict:
+        """Drop definitions and other clutter from residual diagnostics for the tool JSON."""
+        skip = {"definitions"}
+        out: dict[str, Any] = {}
+        for key, val in residual_diagnostics.items():
+            if key in skip:
+                continue
+            out[key] = val
+        return out
+
+    def lean_metrics(self, fit_quality: dict) -> dict:
+        """Fit metrics only (no definitions block)."""
+        skip = {"definitions"}
+        return {k: v for k, v in fit_quality.items() if k not in skip}
+
+    def hyperparameters_from_spec(self, model_spec: dict) -> dict:
+        """Model hyperparameters for JSON (exclude model_type)."""
+        return {k: v for k, v in model_spec.items() if k != "model_type"}
+
+    def warning_messages(self, warnings_out: list) -> list[str]:
+        """Flatten warning entries to plain strings for the top-level JSON."""
+        messages: list[str] = []
+        for w in warnings_out:
+            if isinstance(w, dict):
+                msg = w.get("message")
+                if msg:
+                    messages.append(str(msg))
+            elif w:
+                messages.append(str(w))
+        return messages
+
+    def interpretation_llm_invoke(self, messages: list) -> dict:
+        """Single structured interpretation call (no Langfuse generation span)."""
+        llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=InterpretationSummaryOutput)
+        try:
+            raw = llm.invoke(messages)
+            if isinstance(raw, dict) and "parsed" in raw:
+                parsed = raw["parsed"]
+            else:
+                parsed = raw
+            return parsed.model_dump()
+        except Exception:
+            return {"summary": "Interpretation unavailable; review pipeline metrics and previews."}
+
+    def run_llm_interpretation_summary(
+        self,
+        experiment_name: str,
+        freq: str,
+        model_spec: dict,
+        fit_quality: dict,
+        residual_lean: dict,
+        forecast_table: pd.DataFrame,
+        warnings_out: list,
+    ) -> str:
+        """One LLM call returning a short user-facing summary."""
+        payload = json.dumps(
+            {
+                "model_type": self.model_type,
+                "experiment_name": experiment_name,
+                "frequency": freq,
+                "hyperparameters": self.hyperparameters_from_spec(model_spec),
+                "metrics": self.lean_metrics(fit_quality),
+                "residual_analysis": residual_lean,
+                "forecast_preview": self.preview_head(forecast_table),
+                "warnings": self.warning_messages(warnings_out),
+            },
+            indent=2,
+            default=str,
+        )
+        result = self.interpretation_llm_invoke(
+            [
+                SystemMessage(content=FORECASTING_INTERPRETATION_SYSTEM_PROMPT),
+                HumanMessage(content=payload),
+            ]
+        )
+        return str(result.get("summary", ""))
+
+    # ---------------------------------------------------------------------------
+    # Data validation
     # ---------------------------------------------------------------------------
 
     def validate_data(
@@ -158,12 +319,7 @@ class ForecastingModel(ABC):
         date_column: str,
         target_column: str,
     ) -> tuple[pd.DataFrame, str, str, str, str]:
-        """
-        Load CSV/XLSX from the session workspace and normalize to ``ds`` / ``y``.
-
-        Returns (df, freq, file_name, date_column, target_column).
-        """
-        # 1. Locate the file inside the session workspace; error if missing.
+        """Load session file, normalize to ds/y, infer frequency."""
         name = Path(file_name).name
         path = session_root(session_id) / name
         if not path.exists() or not path.is_file():
@@ -173,7 +329,6 @@ class ForecastingModel(ABC):
                 "data_validation",
             )
 
-        # 2. Read the file based on its extension.
         suffix = Path(name).suffix.lower()
         if suffix == ".csv":
             raw_df = pd.read_csv(path)
@@ -186,12 +341,11 @@ class ForecastingModel(ABC):
                 "data_validation",
             )
 
-        # 3. Confirm the required date and target columns are present.
         missing_cols = [c for c in (date_column, target_column) if c not in raw_df.columns]
         if missing_cols:
             raise ForecastingToolError(
                 "missing_required_columns",
-                f"Required columns missing in '{name}': {missing_cols}. Available: {list(raw_df.columns)[:20]}",
+                f"Required columns missing in '{name}': {missing_cols}.",
                 "data_validation",
             )
 
@@ -199,8 +353,6 @@ class ForecastingModel(ABC):
         df = df.rename(columns={date_column: "ds", target_column: "y"})
         df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
-
-        # 4. Drop unparseable dates, sort, dedupe (keep first).
         df = (
             df.dropna(subset=["ds"])
             .sort_values("ds")
@@ -208,321 +360,221 @@ class ForecastingModel(ABC):
             .reset_index(drop=True)
         )
 
-        # 5. Infer a regular cadence; forecasting needs evenly spaced dates.
-        date_idx = pd.DatetimeIndex(df["ds"].values)
-        freq = pd.infer_freq(date_idx)
+        freq = pd.infer_freq(pd.DatetimeIndex(df["ds"].values))
         if freq is None:
             raise ForecastingToolError(
                 "frequency_not_inferred",
-                "Could not infer a regular frequency from the date column. Resample/clean first or ask the user.",
+                "Could not infer a regular frequency from the date column.",
                 "data_validation",
             )
 
-        # 6. Sanity-check the target column.
         if self.allow_missing_target:
             usable = df["y"].dropna()
-            if usable.empty:
-                raise ForecastingToolError(
-                    "all_target_missing",
-                    "Target column has no usable numeric values.",
-                    "data_validation",
-                )
-            if len(usable) < MIN_OBS:
+            if usable.empty or len(usable) < MIN_OBS or usable.nunique() <= 1:
                 raise ForecastingToolError(
                     "too_few_target_values",
-                    f"Need at least {MIN_OBS} non-missing target values; got {len(usable)}.",
-                    "data_validation",
-                )
-            if usable.nunique() <= 1:
-                raise ForecastingToolError(
-                    "constant_target",
-                    "Target column is constant; model cannot be fitted.",
+                    "Need at least 10 non-missing non-constant target values.",
                     "data_validation",
                 )
         else:
             n_obs = int(len(df))
             missing_target = int(df["y"].isna().sum())
-            if missing_target == n_obs:
-                raise ForecastingToolError(
-                    "all_target_missing",
-                    "Target column has no usable numeric values.",
-                    "data_validation",
-                )
             if missing_target > 0:
                 raise ForecastingToolError(
                     "missing_target_values",
-                    f"Target column has {missing_target} missing values. Clean/impute the data before fitting.",
+                    f"Target has {missing_target} missing values.",
                     "data_validation",
                 )
-            if n_obs < MIN_OBS:
+            if n_obs < MIN_OBS or df["y"].nunique() <= 1:
                 raise ForecastingToolError(
                     "too_few_target_values",
-                    f"Need at least {MIN_OBS} target values; got {n_obs}.",
-                    "data_validation",
-                )
-            if df["y"].nunique() <= 1:
-                raise ForecastingToolError(
-                    "constant_target",
-                    "Target column is constant; model cannot be fitted.",
+                    f"Need at least {MIN_OBS} target values.",
                     "data_validation",
                 )
 
         return df, freq, name, date_column, target_column
 
-    def save_table(
-        self,
-        table: pd.DataFrame,
-        session_id: str,
-        output_file: str,
-        stage: str,
-    ) -> str:
-        """Write ``table`` as CSV/XLSX at the session root; return logical path."""
-        name = Path(output_file).name
-        suffix = Path(name).suffix.lower()
-        if suffix not in ALLOWED_TABLE_EXTS:
-            raise ForecastingToolError(
-                "invalid_output_file",
-                f"{stage} output file must end with .csv or .xlsx (got '{suffix or 'no extension'}').",
-                stage,
-            )
-
-        ensure_session_dirs(session_id)
-        out_path = session_root(session_id) / name
-        if suffix == ".csv":
-            table.to_csv(out_path, index=False)
-        else:
-            table.to_excel(out_path, index=False)
-
-        sid = session_dir_for_paths(session_id)
-        return f"agent_filesystem/{sid}/{name}"
-
-    def structured_llm_call(
-        self,
-        name: str,
-        schema: type,
-        messages: list,
-        fallback: dict,
-    ) -> dict:
-        """One structured interpretation call with Langfuse generation span."""
-        llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=schema, include_raw=True)
-        with traced_generation(name, model=INTERPRETATION_MODEL) as gen:
-            try:
-                raw = llm.invoke(messages)
-                if isinstance(raw, dict) and "parsed" in raw:
-                    parsed = raw["parsed"]
-                    raw_msg = raw.get("raw")
-                else:
-                    parsed = raw
-                    raw_msg = None
-                if gen is not None:
-                    update_llm_generation(
-                        gen,
-                        model=INTERPRETATION_MODEL,
-                        raw=raw_msg if isinstance(raw_msg, AIMessage) else None,
-                    )
-                return parsed.model_dump()
-            except Exception as exc:
-                if gen is not None:
-                    gen.update(output={"error": str(exc)})
-                return fallback
-
-    def save_outputs(
-        self,
-        session_id: str,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        params: BaseForecastToolInput,
-        decomposition_table: pd.DataFrame | None,
-    ) -> tuple[str, str, str | None]:
-        """Persist forecast + fitted (+ optional decomposition) tables; return logical paths."""
-        forecast_path = self.save_table(
-            forecast_table,
-            session_id,
-            params.forecast_output_file,
-            "save_forecast",
-        )
-        fitted_path = self.save_table(
-            fitted_table,
-            session_id,
-            params.fitted_output_file,
-            "save_fitted",
-        )
-        decomposition_path = None
-        decomp_file = getattr(params, "decomposition_output_file", None)
-        if decomposition_table is not None and decomp_file:
-            decomposition_path = self.save_table(
-                decomposition_table,
-                session_id,
-                decomp_file,
-                "save_decomposition",
-            )
-        return forecast_path, fitted_path, decomposition_path
-
-    def build_response(
-        self,
-        freq: str,
-        model_spec: dict,
-        fit_quality: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        residual_diagnostics: dict,
-        forecast_output_file: str,
-        fitted_output_file: str,
-        decomposition_output_file: str | None,
-        llm_interpretation: dict,
-        warnings_out: list[dict],
-        decomposition_table: pd.DataFrame | None,
-        fit_extras: dict,
-    ) -> str:
-        """Pack the unified JSON envelope returned to the orchestrator."""
-        forecast_rows = forecast_table.to_dict(orient="records")
-        fitted_rows = fitted_table.to_dict(orient="records")
-        decomposition_rows = (
-            decomposition_table.to_dict(orient="records") if decomposition_table is not None else None
-        )
-        has_warnings = bool(warnings_out)
-        response: dict[str, Any] = {
-            "status": "success_with_warnings" if has_warnings else "success",
-            "model_type": self.model_type,
-            "frequency": freq,
-            "model": model_spec,
-            "fit_quality": fit_quality,
-            "residual_diagnostics": residual_diagnostics,
-            "changepoints": self.changepoints_for_response(fit_extras),
-            "forecast_output_file": forecast_output_file,
-            "fitted_output_file": fitted_output_file,
-            "decomposition_output_file": decomposition_output_file,
-            "horizon": len(forecast_rows),
-            "forecast_preview": forecast_rows[:FORECAST_PREVIEW_ROWS],
-            "fitted_preview": fitted_rows[-FITTED_PREVIEW_ROWS:],
-            "decomposition_preview": (
-                decomposition_rows[-FITTED_PREVIEW_ROWS:] if decomposition_rows else None
-            ),
-            "llm_interpretation": llm_interpretation,
-            "warnings": warnings_out,
+    def error_dict(self, exc: ForecastingToolError) -> dict:
+        return {
+            "status": "error",
+            "stage": exc.stage,
+            "error": {"code": exc.code, "message": exc.message},
         }
-        return json.dumps(response, default=str)
 
-    def error_json(self, exc: ForecastingToolError) -> str:
-        """Serialize a domain error for the orchestrator."""
-        return json.dumps(
-            {
-                "status": "error",
-                "stage": exc.stage,
-                "error": {"code": exc.code, "message": exc.message},
-            },
-            default=str,
-        )
-
-    def error_json_unknown(self, exc: Exception) -> str:
-        """Serialize an unexpected failure."""
-        return json.dumps(
-            {
-                "status": "error",
-                "stage": "unknown",
-                "error": {"code": "internal_error", "message": str(exc)[:500]},
-            },
-            default=str,
-        )
+    def error_dict_unknown(self, exc: Exception) -> dict:
+        return {
+            "status": "error",
+            "stage": "unknown",
+            "error": {"code": "internal_error", "message": str(exc)[:500]},
+        }
 
     def run(self, runtime: ToolRuntime, params: BaseForecastToolInput) -> str:
-        """
-        End-to-end forecasting pipeline. Returns a JSON string (success or error).
-
-        Subclasses do not override this — they override stage hooks instead.
-        """
+        """End-to-end pipeline; returns lean JSON string for the orchestrator."""
         self.session_id = session_id_from_config(runtime.config)
         self.trace_context = trace_context_from_runnable_config(runtime.config)
+        experiment_name = params.experiment_name
         span_name = f"{self.model_type}_tool"
+        span_input = {
+            "experiment_name": experiment_name,
+            "file_name": params.file_name,
+            "horizon": params.horizon,
+        }
 
-        with traced_span(span_name, trace_context=self.trace_context, metadata={"session_id": self.session_id}) as tool_span:
-            warnings_out: list[dict] = []
+        with traced_span(
+            span_name,
+            trace_context=self.trace_context,
+            input=span_input,
+            metadata={"session_id": self.session_id},
+        ) as tool_span:
+            warnings_out: list = []
             try:
-                # 1. Validate and normalize input.
                 df, freq, file_name, date_column, target_column = self.validate_data(
                     self.session_id,
                     params.file_name,
                     params.date_column,
                     params.target_column,
                 )
+                n_obs = int(len(df))
 
-                # 2. Fit the model.
                 model, model_spec, fit_quality, fit_warnings, fit_extras = self.fit(
-                    df,
-                    freq,
-                    file_name,
-                    date_column,
-                    target_column,
-                    params,
+                    df, freq, file_name, date_column, target_column, params
                 )
                 warnings_out.extend(fit_warnings)
 
-                # 3. Build in-sample fitted table.
                 fitted_table = self.build_fitted_table(df, target_column, model, fit_extras)
-
-                # 4. Residual diagnostics (warnings only, not errors).
-                residual_diagnostics = self.analyze_residuals(fitted_table, model_spec, fit_extras)
-                for w in residual_diagnostics.get("warnings", []) or []:
+                residual_raw = self.analyze_residuals(fitted_table, model_spec, fit_extras)
+                residual_lean = self.lean_residual_output(residual_raw)
+                for w in residual_raw.get("warnings", []) or []:
                     warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
-                # 5. Future forecast table.
                 forecast_table = self.generate_forecast(df, freq, model, fit_extras, params)
-
-                # 6. Optional decomposition (Prophet / Holt-Winters).
                 decomposition_table = self.build_decomposition(
-                    df,
-                    model,
-                    fit_extras,
-                    fitted_table,
-                    forecast_table,
+                    df, model, fit_extras, fitted_table, forecast_table
                 )
 
-                # 7. Save artifacts to session workspace.
-                forecast_path, fitted_path, decomposition_path = self.save_outputs(
-                    self.session_id,
-                    fitted_table,
-                    forecast_table,
-                    params,
-                    decomposition_table,
-                )
+                fitted_csv = self.artifact_basename(experiment_name, "fitted", "csv")
+                forecast_csv = self.artifact_basename(experiment_name, "forecast", "csv")
+                fitted_plot = self.artifact_basename(experiment_name, "fitted", "png")
+                forecast_plot = self.artifact_basename(experiment_name, "forecast", "png")
+                residual_plot = self.artifact_basename(experiment_name, "residuals", "png")
 
-                # 8. LLM interpretation of deterministic results.
-                llm_interpretation = self.run_llm_interpretations(
-                    model_spec,
-                    fit_quality,
-                    fit_extras,
-                    fitted_table,
-                    forecast_table,
-                    residual_diagnostics,
-                    params,
-                    decomposition_table,
-                )
+                self.save_table(fitted_table, self.session_id, fitted_csv, "save_fitted")
+                self.save_table(forecast_table, self.session_id, forecast_csv, "save_forecast")
+                self.save_plot(self.plot_fitted(fitted_table), self.session_id, fitted_plot, "save_fitted_plot")
+                self.save_plot(self.plot_forecast(forecast_table), self.session_id, forecast_plot, "save_forecast_plot")
+                self.save_plot(self.plot_residuals(fitted_table), self.session_id, residual_plot, "save_residual_plot")
 
-                # 9. Unified JSON response.
-                response = self.build_response(
-                    freq,
-                    model_spec,
-                    fit_quality,
-                    fitted_table,
-                    forecast_table,
-                    residual_diagnostics,
-                    forecast_path,
-                    fitted_path,
-                    decomposition_path,
-                    llm_interpretation,
-                    warnings_out,
-                    decomposition_table,
-                    fit_extras,
-                )
+                pipeline: dict[str, Any] = {
+                    "data_validation": {
+                        "description": "Loaded and checked regular time series.",
+                        "status": "success",
+                        "output": {"n_obs": n_obs, "frequency": freq},
+                    },
+                    "model_fit": {
+                        "description": "Fitted model and in-sample error metrics.",
+                        "status": "success",
+                        "output": {
+                            "hyperparameters": self.hyperparameters_from_spec(model_spec),
+                            "metrics": self.lean_metrics(fit_quality),
+                        },
+                    },
+                    "fitted_values": {
+                        "description": "In-sample actual, fitted, and residual.",
+                        "status": "success",
+                        "output": {
+                            "file_name": fitted_csv,
+                            "preview_head": self.preview_head(fitted_table),
+                        },
+                    },
+                    "forecast_values": {
+                        "description": "Out-of-sample forecast.",
+                        "status": "success",
+                        "output": {
+                            "file_name": forecast_csv,
+                            "preview_head": self.preview_head(forecast_table),
+                        },
+                    },
+                    "residual_analysis": {
+                        "description": "Residual diagnostic checks.",
+                        "status": residual_lean.get("status", "pass"),
+                        "output": residual_lean,
+                    },
+                    "fitted_plot": {
+                        "description": "Chart of actual vs fitted.",
+                        "status": "success",
+                        "output": {"file_name": fitted_plot},
+                    },
+                    "forecast_plot": {
+                        "description": "Chart of forecast.",
+                        "status": "success",
+                        "output": {"file_name": forecast_plot},
+                    },
+                    "residual_plot": {
+                        "description": "Chart of residuals over time.",
+                        "status": "success",
+                        "output": {"file_name": residual_plot},
+                    },
+                }
+
+                if decomposition_table is not None:
+                    decomp_csv = self.artifact_basename(experiment_name, "decomposition", "csv")
+                    decomp_plot = self.artifact_basename(experiment_name, "decomposition", "png")
+                    self.save_table(decomposition_table, self.session_id, decomp_csv, "save_decomposition")
+                    self.save_plot(
+                        self.plot_decomposition(decomposition_table),
+                        self.session_id,
+                        decomp_plot,
+                        "save_decomposition_plot",
+                    )
+                    fitted_decomp = decomposition_table[
+                        decomposition_table["period_type"] == "fitted"
+                    ]
+                    forecast_decomp = decomposition_table[
+                        decomposition_table["period_type"] == "forecast"
+                    ]
+                    pipeline["fitted_decomposition"] = {
+                        "description": "In-sample level/trend/seasonal breakdown.",
+                        "status": "success",
+                        "output": {
+                            "file_name": decomp_csv,
+                            "preview_head": self.preview_head(fitted_decomp),
+                        },
+                    }
+                    pipeline["forecast_decomposition"] = {
+                        "description": "Forecast-period decomposition (components may be null).",
+                        "status": "success",
+                        "output": {
+                            "preview_head": self.preview_head(forecast_decomp),
+                        },
+                    }
+                    pipeline["decomposition_plot"] = {
+                        "description": "Decomposition chart.",
+                        "status": "success",
+                        "output": {"file_name": decomp_plot},
+                    }
+
+                # Brief: LLM summary deferred; run_llm_interpretation_summary kept on base for later.
+
+                warn_msgs = self.warning_messages(warnings_out)
+                response: dict[str, Any] = {
+                    "status": "success_with_warnings" if warn_msgs else "success",
+                    "model_type": self.model_type,
+                    "experiment_name": experiment_name,
+                    "frequency": freq,
+                    "warnings": warn_msgs,
+                    "pipeline": pipeline,
+                }
                 if tool_span is not None:
-                    tool_span.update(metadata={"warnings": str(len(warnings_out))})
-                return response
+                    tool_span.update(output=response)
+                return json.dumps(response, default=str)
 
             except ForecastingToolError as exc:
+                err = self.error_dict(exc)
                 if tool_span is not None:
-                    tool_span.update(metadata={"status": "error", "stage": exc.stage, "code": exc.code})
-                return self.error_json(exc)
+                    tool_span.update(output=err)
+                return json.dumps(err, default=str)
             except Exception as exc:
+                err = self.error_dict_unknown(exc)
                 if tool_span is not None:
-                    tool_span.update(metadata={"status": "error", "stage": "unknown", "code": "internal_error"})
-                return self.error_json_unknown(exc)
+                    tool_span.update(output=err)
+                return json.dumps(err, default=str)

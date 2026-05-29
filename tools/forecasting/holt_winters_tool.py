@@ -14,23 +14,21 @@ from tools.forecasting.holt_winters_model import HoltWintersModel
 @tool(args_schema=HoltWintersToolInput)
 def holt_winters_tool(
     runtime: ToolRuntime,
+    experiment_name: str,
     file_name: str,
     date_column: str,
     target_column: str,
     horizon: int,
-    forecast_output_file: str,
-    fitted_output_file: str,
-    decomposition_output_file: str,
     seasonal_period: Optional[int],
     trend: str,
     seasonal: str,
     damped_trend: bool = False,
 ) -> str:
-    """Fit Holt-Winters / exponential smoothing on one univariate time series and return forecast, fitted, decomposition, diagnostics, and business interpretation as JSON.
+    """Fit Holt-Winters / exponential smoothing; return lean pipeline JSON with CSV/PNG basenames.
 
     ## Purpose
-    Deterministic Holt-Winters pipeline (validate → fit → residuals → forecast with 95% intervals → save tables → interpret).
-    Use instead of ``coding_tool`` when the user wants Holt-Winters, Holt's linear trend, or additive/multiplicative exponential smoothing.
+    Deterministic Holt-Winters pipeline (validate → fit → residuals → forecast with 95% intervals → decomposition → plots → summary).
+    Use instead of ``coding_tool`` when the user wants Holt-Winters or additive/multiplicative exponential smoothing.
 
     ## When to use
     - One numeric target over time with regular dates (daily/weekly/monthly).
@@ -42,7 +40,6 @@ def holt_winters_tool(
     - Facebook Prophet decomposition → ``prophet_tool``.
     - Neural nets, custom models, or irregular data → ``coding_tool`` first.
     - Multiple series → out of scope.
-    - Charts → tables only; follow with ``coding_tool``.
 
     ## Input data format (session CSV/XLSX)
     - File in session workspace; basename only in ``file_name``.
@@ -51,44 +48,37 @@ def holt_winters_tool(
     - Target: numeric, no missing values, at least 10 observations; seasonal models need ≥ 2×``seasonal_period`` rows.
 
     ## Arguments
+    - ``experiment_name`` — unique run label; prefixes all outputs.
     - ``file_name`` — e.g. ``sales.csv``.
     - ``date_column`` / ``target_column`` — column names.
     - ``horizon`` — future periods at inferred frequency.
-    - ``forecast_output_file`` / ``fitted_output_file`` / ``decomposition_output_file`` — output basenames (.csv or .xlsx).
     - ``seasonal_period`` — required field; ``null`` when ``seasonal='none'``; e.g. 12 for monthly+yearly cycle.
     - ``trend`` — ``none``, ``add``, or ``mul``.
     - ``seasonal`` — ``none``, ``add``, or ``mul``.
     - ``damped_trend`` — default ``false``; set ``true`` to damp trend over the forecast horizon.
 
     ## Output (JSON string)
-    **Success:** ``status``, ``model_type`` ``holt_winters``, ``frequency``, ``model``, ``fit_quality`` (MAE/RMSE/SMAPE),
-    ``residual_diagnostics`` (Ljung-Box, Jarque-Bera), three output file paths, previews,
-    ``llm_interpretation`` (+ ``component_analysis``), ``warnings``. Forecast columns include ``lower_95`` / ``upper_95``.
-    Forecast-period decomposition rows have point forecast only (level/trend/seasonal null).
+    **Success:** ``status``, ``model_type`` ``holt_winters``, ``experiment_name``, ``frequency``, ``warnings``,
+    ``pipeline`` including decomposition stages. Forecast columns include ``lower_95`` / ``upper_95``.
+    Plots are included in-tool. LLM summary stage is not emitted yet — use ``pipeline`` metrics, previews, and plots.
 
     **Error:** ``status`` ``error``; ``stage``; ``error.code`` / ``error.message``.
-
-    Present ``llm_interpretation`` to the user; do not narrate file paths.
 
     ## Example
     ```
     holt_winters_tool(
+      experiment_name="revenue_hw_may2026",
       file_name="sales.csv", date_column="month", target_column="revenue", horizon=6,
-      trend="add", seasonal="add", seasonal_period=12, damped_trend=false,
-      forecast_output_file="revenue_forecast.csv",
-      fitted_output_file="revenue_fitted.csv",
-      decomposition_output_file="revenue_decomposition.csv"
+      trend="add", seasonal="add", seasonal_period=12, damped_trend=false
     )
     ```
     """
     params = HoltWintersToolInput(
+        experiment_name=experiment_name,
         file_name=file_name,
         date_column=date_column,
         target_column=target_column,
         horizon=horizon,
-        forecast_output_file=forecast_output_file,
-        fitted_output_file=fitted_output_file,
-        decomposition_output_file=decomposition_output_file,
         seasonal_period=seasonal_period,
         trend=trend,
         seasonal=seasonal,

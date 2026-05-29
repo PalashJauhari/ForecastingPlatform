@@ -1,40 +1,19 @@
 """
 Prophet forecasting model — inherits the shared ``ForecastingModel`` pipeline.
-
-Fits Facebook Prophet with caller-controlled trend/seasonality, produces forecast,
-fitted, and decomposition tables, MAD residual diagnostics, and five LLM
-interpretation blocks.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import warnings as warns_module
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from langchain_core.messages import HumanMessage, SystemMessage
 from prophet import Prophet
 
-from observability.langfuse_handler import traced_span
 from output_validation.forecasting_common import BaseForecastToolInput
-from output_validation.prophet_tool import (
-    ComponentAnalysisOutput,
-    FitQualityOutput,
-    ForecastSummaryOutput,
-    ModelImprovementGuidanceOutput,
-    ProphetToolInput,
-    ResidualAnalysisOutput,
-)
-from prompts.prophet_interpretation_prompts import (
-    COMPONENT_ANALYSIS_SYSTEM_PROMPT,
-    FIT_QUALITY_SYSTEM_PROMPT,
-    FORECAST_SUMMARY_SYSTEM_PROMPT,
-    MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
-    RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
-)
+from output_validation.prophet_tool import ProphetToolInput
 from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 # Fixed Prophet parameters kept off the tool surface.
@@ -60,9 +39,6 @@ class ProphetModel(ForecastingModel):
     def allow_missing_target(self) -> bool:
         return True
 
-    def changepoints_for_response(self, fit_extras: dict) -> dict | None:
-        return fit_extras.get("changepoints")
-
     def fit(
         self,
         df: pd.DataFrame,
@@ -75,46 +51,30 @@ class ProphetModel(ForecastingModel):
         """Configure Prophet, fit on ``ds``/``y``, and compute in-sample predictions."""
         prophet_params = ProphetToolInput.model_validate(params.model_dump())
 
-        with traced_span(
-            "prophet_tool.fit_model",
-            trace_context=self.trace_context,
-            input={
-                "changepoint_prior_scale": prophet_params.changepoint_prior_scale,
-                "seasonality_mode": prophet_params.seasonality_mode,
-                "weekly_seasonality": prophet_params.weekly_seasonality,
-                "monthly_seasonality": prophet_params.monthly_seasonality,
-                "yearly_seasonality": prophet_params.yearly_seasonality,
-                "n_obs": int(len(df)),
-            },
-        ) as span:
-            try:
-                model = Prophet(
-                    changepoint_prior_scale=prophet_params.changepoint_prior_scale,
-                    changepoint_range=CHANGEPOINT_RANGE,
-                    seasonality_prior_scale=SEASONALITY_PRIOR_SCALE,
-                    seasonality_mode=prophet_params.seasonality_mode,
-                    weekly_seasonality=prophet_params.weekly_seasonality,
-                    yearly_seasonality=prophet_params.yearly_seasonality,
-                    daily_seasonality=DAILY_SEASONALITY,
-                )
-                if prophet_params.monthly_seasonality:
-                    model.add_seasonality(name="monthly", period=30.5, fourier_order=MONTHLY_FOURIER_ORDER)
+        try:
+            model = Prophet(
+                changepoint_prior_scale=prophet_params.changepoint_prior_scale,
+                changepoint_range=CHANGEPOINT_RANGE,
+                seasonality_prior_scale=SEASONALITY_PRIOR_SCALE,
+                seasonality_mode=prophet_params.seasonality_mode,
+                weekly_seasonality=prophet_params.weekly_seasonality,
+                yearly_seasonality=prophet_params.yearly_seasonality,
+                daily_seasonality=DAILY_SEASONALITY,
+            )
+            if prophet_params.monthly_seasonality:
+                model.add_seasonality(name="monthly", period=30.5, fourier_order=MONTHLY_FOURIER_ORDER)
 
-                with warns_module.catch_warnings():
-                    warns_module.simplefilter("ignore")
-                    model.fit(df)
+            with warns_module.catch_warnings():
+                warns_module.simplefilter("ignore")
+                model.fit(df)
 
-                in_sample = model.predict(df[["ds"]])
-                if span is not None:
-                    span.update(output={"n_obs": int(len(df)), "n_changepoints": int(len(model.changepoints))})
-            except Exception as exc:
-                if span is not None:
-                    span.update(output={"error": str(exc)})
-                raise ForecastingToolError(
-                    "fit_failed",
-                    f"Prophet fit failed: {exc}",
-                    "fit",
-                ) from exc
+            in_sample = model.predict(df[["ds"]])
+        except Exception as exc:
+            raise ForecastingToolError(
+                "fit_failed",
+                f"Prophet fit failed: {exc}",
+                "fit",
+            ) from exc
 
         # Fit-quality metrics on rows where actual y is present.
         actuals = df["y"].to_numpy()
@@ -364,102 +324,3 @@ class ProphetModel(ForecastingModel):
         decomposition_table = decomposition_table.rename(columns={"ds": "calendar_date"})
         decomposition_table["calendar_date"] = pd.to_datetime(decomposition_table["calendar_date"]).dt.date.astype(str)
         return decomposition_table
-
-    def run_llm_interpretations(
-        self,
-        model_spec: dict,
-        fit_quality: dict,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        residual_diagnostics: dict,
-        params: BaseForecastToolInput,
-        decomposition_table: pd.DataFrame | None,
-    ) -> dict:
-        """Five structured LLM calls for Prophet results."""
-        changepoints = fit_extras.get("changepoints") or {}
-        forecast_rows = forecast_table.to_dict(orient="records")
-        decomposition_rows = decomposition_table.to_dict(orient="records") if decomposition_table is not None else []
-        interpretations: dict[str, dict] = {}
-
-        residual_payload = json.dumps(
-            {"model": model_spec, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["residual_analysis"] = self.structured_llm_call(
-            "prophet_tool.llm.residual_analysis",
-            ResidualAnalysisOutput,
-            [SystemMessage(content=RESIDUAL_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=residual_payload)],
-            {
-                "status": residual_diagnostics.get("status", "warn"),
-                "summary": "LLM interpretation failed; review the raw residual diagnostics.",
-                "caveat": "",
-            },
-        )
-
-        fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["fit_quality"] = self.structured_llm_call(
-            "prophet_tool.llm.fit_quality",
-            FitQualityOutput,
-            [SystemMessage(content=FIT_QUALITY_SYSTEM_PROMPT), HumanMessage(content=fit_payload)],
-            {"status": "warn", "summary": "LLM interpretation failed; review the raw fit-quality metrics.", "caveat": ""},
-        )
-
-        forecast_preview = forecast_rows[:24]
-        forecast_payload = json.dumps(
-            {"model": model_spec, "horizon": len(forecast_rows), "forecast_preview": forecast_preview},
-            indent=2,
-            default=str,
-        )
-        interpretations["forecast_summary"] = self.structured_llm_call(
-            "prophet_tool.llm.forecast_summary",
-            ForecastSummaryOutput,
-            [SystemMessage(content=FORECAST_SUMMARY_SYSTEM_PROMPT), HumanMessage(content=forecast_payload)],
-            {"status": "warn", "summary": "LLM interpretation failed; review the raw forecast values.", "business_readout": ""},
-        )
-
-        decomposition_preview = decomposition_rows[:24]
-        component_payload = json.dumps(
-            {"model": model_spec, "changepoints": changepoints, "decomposition_preview": decomposition_preview},
-            indent=2,
-            default=str,
-        )
-        interpretations["component_analysis"] = self.structured_llm_call(
-            "prophet_tool.llm.component_analysis",
-            ComponentAnalysisOutput,
-            [SystemMessage(content=COMPONENT_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=component_payload)],
-            {
-                "summary": "LLM interpretation failed; review the raw decomposition table.",
-                "component_signals": [],
-                "changepoint_summary": "",
-                "caveat": "",
-            },
-        )
-
-        guidance_payload = json.dumps(
-            {
-                "model": model_spec,
-                "fit_quality": fit_quality,
-                "residual_diagnostics": residual_diagnostics,
-                "changepoints": changepoints,
-                "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": forecast_preview},
-            },
-            indent=2,
-            default=str,
-        )
-        interpretations["model_improvement_guidance"] = self.structured_llm_call(
-            "prophet_tool.llm.model_improvement_guidance",
-            ModelImprovementGuidanceOutput,
-            [SystemMessage(content=MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT), HumanMessage(content=guidance_payload)],
-            {
-                "summary": "LLM guidance failed; review diagnostics to decide next steps.",
-                "possible_next_steps": [],
-                "caution": "",
-            },
-        )
-        return interpretations

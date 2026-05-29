@@ -1,42 +1,20 @@
 """
 Holt-Winters / exponential smoothing model — inherits ``ForecastingModel``.
-
-Fits statsmodels ``ExponentialSmoothing`` with caller-controlled trend/seasonal
-components, produces forecast with 95% intervals, fitted/residual table,
-level/trend/seasonal decomposition, Ljung-Box/Jarque-Bera diagnostics, and
-five LLM interpretation blocks.
 """
 
 from __future__ import annotations
 
-import json
 import warnings as warns_module
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from langchain_core.messages import HumanMessage, SystemMessage
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-from observability.langfuse_handler import traced_span
 from output_validation.forecasting_common import BaseForecastToolInput
-from output_validation.holt_winters_tool import (
-    ComponentAnalysisOutput,
-    FitQualityOutput,
-    ForecastSummaryOutput,
-    HoltWintersToolInput,
-    ModelImprovementGuidanceOutput,
-    ResidualAnalysisOutput,
-)
-from prompts.holt_winters_interpretation_prompts import (
-    COMPONENT_ANALYSIS_SYSTEM_PROMPT,
-    FIT_QUALITY_SYSTEM_PROMPT,
-    FORECAST_SUMMARY_SYSTEM_PROMPT,
-    MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
-    RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
-)
+from output_validation.holt_winters_tool import HoltWintersToolInput
 from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 DEFAULT_ALPHA = 0.05
@@ -102,39 +80,24 @@ class HoltWintersModel(ForecastingModel):
         seasonal_sm = self.map_component(hw_params.seasonal)
         seasonal_periods = int(hw_params.seasonal_period) if hw_params.seasonal_period is not None else None
 
-        with traced_span(
-            "holt_winters_tool.fit_model",
-            trace_context=self.trace_context,
-            input={
-                "trend": hw_params.trend,
-                "seasonal": hw_params.seasonal,
-                "seasonal_period": seasonal_periods,
-                "damped_trend": hw_params.damped_trend,
-                "n_obs": int(len(series)),
-            },
-        ) as span:
-            try:
-                es_model = ExponentialSmoothing(
-                    series,
-                    trend=trend_sm,
-                    damped_trend=bool(hw_params.damped_trend),
-                    seasonal=seasonal_sm,
-                    seasonal_periods=seasonal_periods,
-                    initialization_method=INITIALIZATION_METHOD,
-                )
-                with warns_module.catch_warnings():
-                    warns_module.simplefilter("ignore")
-                    es_fit = es_model.fit(optimized=True)
-                if span is not None:
-                    span.update(output={"n_obs": int(len(series)), "aic": float(es_fit.aic)})
-            except Exception as exc:
-                if span is not None:
-                    span.update(output={"error": str(exc)})
-                raise ForecastingToolError(
-                    "fit_failed",
-                    f"Holt-Winters fit failed: {exc}",
-                    "fit",
-                ) from exc
+        try:
+            es_model = ExponentialSmoothing(
+                series,
+                trend=trend_sm,
+                damped_trend=bool(hw_params.damped_trend),
+                seasonal=seasonal_sm,
+                seasonal_periods=seasonal_periods,
+                initialization_method=INITIALIZATION_METHOD,
+            )
+            with warns_module.catch_warnings():
+                warns_module.simplefilter("ignore")
+                es_fit = es_model.fit(optimized=True)
+        except Exception as exc:
+            raise ForecastingToolError(
+                "fit_failed",
+                f"Holt-Winters fit failed: {exc}",
+                "fit",
+            ) from exc
 
         fitted_vals = es_fit.fittedvalues.reindex(series.index)
         actuals = series.values
@@ -388,105 +351,3 @@ class HoltWintersModel(ForecastingModel):
         decomposition_table = pd.concat([fitted_part, forecast_part], ignore_index=True)
         decomposition_table = decomposition_table.reindex(columns=base_cols + extra_cols)
         return decomposition_table
-
-    def run_llm_interpretations(
-        self,
-        model_spec: dict,
-        fit_quality: dict,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        residual_diagnostics: dict,
-        params: BaseForecastToolInput,
-        decomposition_table: pd.DataFrame | None,
-    ) -> dict:
-        """Five structured LLM calls for Holt-Winters results."""
-        forecast_rows = forecast_table.to_dict(orient="records")
-        decomposition_rows = decomposition_table.to_dict(orient="records") if decomposition_table is not None else []
-        interpretations: dict[str, dict] = {}
-
-        residual_payload = json.dumps(
-            {"model": model_spec, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["residual_analysis"] = self.structured_llm_call(
-            "holt_winters_tool.llm.residual_analysis",
-            ResidualAnalysisOutput,
-            [SystemMessage(content=RESIDUAL_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=residual_payload)],
-            {
-                "status": "warn" if residual_diagnostics.get("status") == "warn" else "ok",
-                "summary": "LLM interpretation failed; review the raw residual diagnostics.",
-                "caveat": "",
-            },
-        )
-
-        fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["fit_quality"] = self.structured_llm_call(
-            "holt_winters_tool.llm.fit_quality",
-            FitQualityOutput,
-            [SystemMessage(content=FIT_QUALITY_SYSTEM_PROMPT), HumanMessage(content=fit_payload)],
-            {"status": "warn", "summary": "LLM interpretation failed; review the raw fit-quality metrics.", "caveat": ""},
-        )
-
-        forecast_preview = forecast_rows[:24]
-        forecast_payload = json.dumps(
-            {"model": model_spec, "horizon": len(forecast_rows), "forecast_preview": forecast_preview},
-            indent=2,
-            default=str,
-        )
-        interpretations["forecast_summary"] = self.structured_llm_call(
-            "holt_winters_tool.llm.forecast_summary",
-            ForecastSummaryOutput,
-            [SystemMessage(content=FORECAST_SUMMARY_SYSTEM_PROMPT), HumanMessage(content=forecast_payload)],
-            {
-                "status": "warn",
-                "summary": "LLM interpretation failed; review the raw forecast values.",
-                "uncertainty": "",
-                "business_readout": "",
-            },
-        )
-
-        decomposition_preview = decomposition_rows[:24]
-        component_payload = json.dumps(
-            {"model": model_spec, "decomposition_preview": decomposition_preview},
-            indent=2,
-            default=str,
-        )
-        interpretations["component_analysis"] = self.structured_llm_call(
-            "holt_winters_tool.llm.component_analysis",
-            ComponentAnalysisOutput,
-            [SystemMessage(content=COMPONENT_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=component_payload)],
-            {
-                "summary": "LLM interpretation failed; review the raw decomposition table.",
-                "component_signals": [],
-                "changepoint_summary": "",
-                "caveat": "",
-            },
-        )
-
-        guidance_payload = json.dumps(
-            {
-                "model": model_spec,
-                "fit_quality": fit_quality,
-                "residual_diagnostics": residual_diagnostics,
-                "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": forecast_preview},
-            },
-            indent=2,
-            default=str,
-        )
-        interpretations["model_improvement_guidance"] = self.structured_llm_call(
-            "holt_winters_tool.llm.model_improvement_guidance",
-            ModelImprovementGuidanceOutput,
-            [SystemMessage(content=MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT), HumanMessage(content=guidance_payload)],
-            {
-                "summary": "LLM guidance failed; review diagnostics to decide next steps.",
-                "possible_next_steps": [],
-                "caution": "",
-            },
-        )
-        return interpretations

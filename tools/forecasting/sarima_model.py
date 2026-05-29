@@ -1,40 +1,21 @@
 """
 SARIMA/ARIMA forecasting model — inherits the shared ``ForecastingModel`` pipeline.
-
-Fits SARIMAX (manual or auto-ARIMA order search), produces forecast with 95%
-intervals, fitted/residual table, Ljung-Box/Jarque-Bera diagnostics, and four
-LLM interpretation blocks.
 """
 
 from __future__ import annotations
 
-import json
 import warnings as warns_module
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 import pmdarima as pm
-from langchain_core.messages import HumanMessage, SystemMessage
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-from observability.langfuse_handler import traced_span
 from output_validation.forecasting_common import BaseForecastToolInput
-from output_validation.sarima_tool import (
-    FitQualityOutput,
-    ForecastSummaryOutput,
-    ModelImprovementGuidanceOutput,
-    ResidualAnalysisOutput,
-    SarimaToolInput,
-)
-from prompts.sarima_interpretation_prompts import (
-    FIT_QUALITY_SYSTEM_PROMPT,
-    FORECAST_SUMMARY_SYSTEM_PROMPT,
-    MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT,
-    RESIDUAL_ANALYSIS_SYSTEM_PROMPT,
-)
+from output_validation.sarima_tool import SarimaToolInput
 from tools.forecasting.base import ForecastingModel, ForecastingToolError
 
 DEFAULT_ALPHA = 0.05
@@ -99,47 +80,31 @@ class SarimaModel(ForecastingModel):
         if use_auto_arima:
             seasonal = seasonal_period is not None and int(seasonal_period) > 1
             m = int(seasonal_period) if seasonal else 1
-            with traced_span(
-                "sarima_tool.auto_arima",
-                trace_context=self.trace_context,
-                input={"seasonal": seasonal, "m": m, "n_obs": int(len(series))},
-            ) as span:
-                try:
-                    auto_model = pm.auto_arima(
-                        series,
-                        seasonal=seasonal,
-                        m=m,
-                        information_criterion="aicc",
-                        suppress_warnings=True,
-                        error_action="ignore",
-                        stepwise=True,
-                    )
-                except Exception as exc:
-                    if span is not None:
-                        span.update(output={"error": str(exc)})
-                    raise ForecastingToolError(
-                        "auto_arima_failed",
-                        f"pmdarima.auto_arima failed: {exc}",
-                        "fit",
-                    ) from exc
+            try:
+                auto_model = pm.auto_arima(
+                    series,
+                    seasonal=seasonal,
+                    m=m,
+                    information_criterion="aicc",
+                    suppress_warnings=True,
+                    error_action="ignore",
+                    stepwise=True,
+                )
+            except Exception as exc:
+                raise ForecastingToolError(
+                    "auto_arima_failed",
+                    f"pmdarima.auto_arima failed: {exc}",
+                    "fit",
+                ) from exc
 
-                chosen_order = [int(x) for x in auto_model.order]
-                full_seasonal = list(auto_model.seasonal_order)
-                if seasonal and len(full_seasonal) == 4 and full_seasonal[3] > 1:
-                    chosen_seasonal_order: Optional[list[int]] = [int(x) for x in full_seasonal[:3]]
-                    chosen_m: Optional[int] = int(full_seasonal[3])
-                else:
-                    chosen_seasonal_order = None
-                    chosen_m = None
-
-                if span is not None:
-                    span.update(
-                        output={
-                            "order": chosen_order,
-                            "seasonal_order": chosen_seasonal_order,
-                            "seasonal_period": chosen_m,
-                        }
-                    )
+            chosen_order = [int(x) for x in auto_model.order]
+            full_seasonal = list(auto_model.seasonal_order)
+            if seasonal and len(full_seasonal) == 4 and full_seasonal[3] > 1:
+                chosen_seasonal_order: Optional[list[int]] = [int(x) for x in full_seasonal[:3]]
+                chosen_m: Optional[int] = int(full_seasonal[3])
+            else:
+                chosen_seasonal_order = None
+                chosen_m = None
 
             spec = {
                 "selection_method": "auto_arima",
@@ -188,37 +153,23 @@ class SarimaModel(ForecastingModel):
         else:
             seasonal_order = (0, 0, 0, 0)
 
-        with traced_span(
-            "sarima_tool.fit_model",
-            trace_context=self.trace_context,
-            input={"order": list(order), "seasonal_order": list(seasonal_order)},
-        ) as span:
-            try:
-                sm_model = SARIMAX(
-                    series,
-                    order=order,
-                    seasonal_order=seasonal_order,
-                    enforce_stationarity=False,
-                    enforce_invertibility=False,
-                )
-                with warns_module.catch_warnings():
-                    warns_module.simplefilter("ignore")
-                    sm_fit = sm_model.fit(disp=False)
-                if span is not None:
-                    span.update(
-                        output={
-                            "converged": bool(sm_fit.mle_retvals.get("converged", True)),
-                            "aic": float(sm_fit.aic),
-                        }
-                    )
-            except Exception as exc:
-                if span is not None:
-                    span.update(output={"error": str(exc)})
-                raise ForecastingToolError(
-                    "fit_failed",
-                    f"SARIMAX fit failed for order={list(order)} seasonal_order={list(seasonal_order)}: {exc}",
-                    "fit",
-                ) from exc
+        try:
+            sm_model = SARIMAX(
+                series,
+                order=order,
+                seasonal_order=seasonal_order,
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+            )
+            with warns_module.catch_warnings():
+                warns_module.simplefilter("ignore")
+                sm_fit = sm_model.fit(disp=False)
+        except Exception as exc:
+            raise ForecastingToolError(
+                "fit_failed",
+                f"SARIMAX fit failed for order={list(order)} seasonal_order={list(seasonal_order)}: {exc}",
+                "fit",
+            ) from exc
 
         nobs = int(getattr(sm_fit, "nobs", 0)) or len(getattr(sm_fit, "fittedvalues", []))
         k = int(getattr(sm_fit, "df_model", 0)) + 1
@@ -389,86 +340,3 @@ class SarimaModel(ForecastingModel):
                 }
             )
         return pd.DataFrame(rows)
-
-    def run_llm_interpretations(
-        self,
-        model_spec: dict,
-        fit_quality: dict,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-        residual_diagnostics: dict,
-        params: BaseForecastToolInput,
-        decomposition_table: pd.DataFrame | None,
-    ) -> dict:
-        """Four structured LLM calls for SARIMA results."""
-        forecast_rows = forecast_table.to_dict(orient="records")
-        interpretations: dict[str, dict] = {}
-
-        residual_payload = json.dumps(
-            {"model": model_spec, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["residual_analysis"] = self.structured_llm_call(
-            "sarima_tool.llm.residual_analysis",
-            ResidualAnalysisOutput,
-            [SystemMessage(content=RESIDUAL_ANALYSIS_SYSTEM_PROMPT), HumanMessage(content=residual_payload)],
-            {
-                "status": residual_diagnostics.get("status", "warn"),
-                "summary": "LLM interpretation failed; review the raw residual diagnostics.",
-                "caveat": "",
-            },
-        )
-
-        fit_payload = json.dumps(
-            {"model": model_spec, "fit_quality": fit_quality, "residual_diagnostics": residual_diagnostics},
-            indent=2,
-            default=str,
-        )
-        interpretations["fit_quality"] = self.structured_llm_call(
-            "sarima_tool.llm.fit_quality",
-            FitQualityOutput,
-            [SystemMessage(content=FIT_QUALITY_SYSTEM_PROMPT), HumanMessage(content=fit_payload)],
-            {"status": "warn", "summary": "LLM interpretation failed; review the raw fit-quality metrics.", "caveat": ""},
-        )
-
-        preview = forecast_rows[:24]
-        forecast_payload = json.dumps(
-            {"model": model_spec, "horizon": len(forecast_rows), "forecast_preview": preview},
-            indent=2,
-            default=str,
-        )
-        interpretations["forecast_summary"] = self.structured_llm_call(
-            "sarima_tool.llm.forecast_summary",
-            ForecastSummaryOutput,
-            [SystemMessage(content=FORECAST_SUMMARY_SYSTEM_PROMPT), HumanMessage(content=forecast_payload)],
-            {
-                "status": "warn",
-                "summary": "LLM interpretation failed; review the raw forecast values.",
-                "uncertainty": "",
-                "business_readout": "",
-            },
-        )
-
-        guidance_payload = json.dumps(
-            {
-                "model": model_spec,
-                "fit_quality": fit_quality,
-                "residual_diagnostics": residual_diagnostics,
-                "forecast_summary": {"horizon": len(forecast_rows), "forecast_preview": preview},
-            },
-            indent=2,
-            default=str,
-        )
-        interpretations["model_improvement_guidance"] = self.structured_llm_call(
-            "sarima_tool.llm.model_improvement_guidance",
-            ModelImprovementGuidanceOutput,
-            [SystemMessage(content=MODEL_IMPROVEMENT_GUIDANCE_SYSTEM_PROMPT), HumanMessage(content=guidance_payload)],
-            {
-                "summary": "LLM guidance failed; review diagnostics to decide next steps.",
-                "possible_next_steps": [],
-                "caution": "",
-            },
-        )
-        return interpretations

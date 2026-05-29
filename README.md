@@ -100,16 +100,17 @@ Guardrails include basename-only paths, allowed extensions, and blocked OS/netwo
 
 ## Forecasting tools
 
-All three tools inherit **`ForecastingModel`** (`tools/forecasting/base.py`) and share the same pipeline: validate → fit → fitted/residuals → forecast → save tables → LLM interpretation → unified JSON.
+All three tools inherit **`ForecastingModel`** (`tools/forecasting/base.py`) and share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → single LLM summary → lean JSON.
 
-- **SARIMA tool** (`sarima_tool`) — Auto/manual ARIMA order, SARIMAX fit, 95% prediction intervals, Ljung-Box/Jarque-Bera diagnostics. Strict data rules (no missing target values). Writes **forecast + fitted** CSV/XLSX at session root.
-- **Prophet tool** (`prophet_tool`) — Trend + weekly/monthly/yearly seasonality, changepoints, MAD residual checks. Tolerates missing target rows. Writes **forecast + fitted + decomposition** CSV/XLSX at session root.
-- **Holt-Winters tool** (`holt_winters_tool`) — Exponential smoothing with additive/multiplicative trend and seasonality, 95% intervals, Ljung-Box/Jarque-Bera diagnostics. Writes **forecast + fitted + decomposition** CSV/XLSX at session root.
-- **Charts** — No forecasting tool produces images. Use **`coding_tool`** on the saved forecast/fitted files (plots land under `run_<tool_call_id>/`).
+- **SARIMA tool** (`sarima_tool`) — Auto/manual ARIMA order, SARIMAX fit, 95% prediction intervals, Ljung-Box/Jarque-Bera diagnostics. Strict data rules (no missing target values).
+- **Prophet tool** (`prophet_tool`) — Trend + weekly/monthly/yearly seasonality, MAD residual checks. Tolerates missing target rows. Includes fitted/forecast decomposition.
+- **Holt-Winters tool** (`holt_winters_tool`) — Exponential smoothing with additive/multiplicative trend and seasonality, 95% intervals, Ljung-Box/Jarque-Bera diagnostics. Includes decomposition.
 
-**Unified JSON response:** `status`, `model_type`, `frequency`, `model`, `fit_quality`, `residual_diagnostics`, output file paths, previews, `llm_interpretation`, `warnings`. See each tool’s docstring for data format, arguments, and example calls.
+**`experiment_name`** (required) — unique run label; all artifacts are `{experiment_name}_fitted.csv`, `_forecast.csv`, `_decomposition.csv` (Prophet/HW only), and matching `.png` plots, written under the session directory. Tool JSON references **basenames only** (no `agent_filesystem/` paths).
 
-**Input requirements:** regular date frequency (inferred from data), basename-only file references, minimum 10 observations. Upload CSV/XLSX to the session before calling a forecasting tool.
+**Unified JSON response:** `status`, `model_type`, `experiment_name`, `frequency`, `warnings`, and `pipeline` (per-stage `description`, `status`, `output` — metrics, previews, plot basenames). LLM interpretation helper exists on the base class but is not wired into the pipeline yet. See each tool’s docstring for data format and examples.
+
+**Input requirements:** regular date frequency (inferred from data), basename-only `file_name`, minimum 10 observations. Upload CSV/XLSX to the session before calling a forecasting tool.
 
 ## Configuration
 
