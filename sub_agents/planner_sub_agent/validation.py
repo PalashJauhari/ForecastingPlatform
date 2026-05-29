@@ -31,6 +31,6 @@ class WriteTodoInput(BaseModel):
     """Arguments for ``write_todo``: full replacement list for the current user turn."""
 
     todos: list[TodoDraftInput] = Field(
-        default_factory=list,
-        description="Ordered tasks for this turn; empty when no checklist is needed.",
+        min_length=1,
+        description="Ordered tasks for this turn; at least one task required.",
     )
