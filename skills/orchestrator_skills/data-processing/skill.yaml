@@ -1,6 +1,0 @@
-id: data-processing
-name: Data processing
-description: >
-  Use when cleaning, reshaping, combining, or typing data in a defensible order—structural fixes,
-  types, missing values, joins, pivots—without changing analytical meaning unintentionally.
-tags: [etl, transforms, cleaning]

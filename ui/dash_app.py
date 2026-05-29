@@ -45,12 +45,12 @@ api = GaussianBlurrApiClient()
 
 
 def _default_store() -> dict[str, Any]:
-    """Initial Dash store: new graph session id and empty chat/files."""
+    """Initial ``ui-store`` schema: session id, chat, uploads, interrupt resume flags."""
     return {
         "session_id": str(uuid.uuid4()),
         "messages": [],
         "uploaded_files": [],
-        "awaiting_resume": False,
+        "awaiting_resume": False,  # true after planner/orchestrator ask_user interrupt
         "pending_question": "",
         "agent_thinking": False,
     }
@@ -333,13 +333,6 @@ def _build_layout() -> html.Div:
                                     ),
                                 ],
                             ),
-                        ],
-                    ),
-                    html.Div(
-                        className="gb-progress-col",
-                        children=[
-                            html.Div(className="gb-progress-head", children=[html.H3("Progress")]),
-                            html.Div(id="gb-stream-progress"),
                         ],
                     ),
                 ],

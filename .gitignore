@@ -5,6 +5,11 @@
 *.env
 .env.*
 !.env.example
+!**/.env.example
+
+# Sub-agent secrets (copy from .env.example; never commit real keys)
+#   sub_agents/planner_sub_agent/.env
+#   sub_agents/coding_sub_agent/.env
 
 # --- Python ---
 __pycache__/
@@ -39,6 +44,9 @@ htmlcov/
 *.swp
 *.swo
 .DS_Store
+
+# --- Semgrep local cache (coding sub-agent) ---
+.semgrep/
 
 # --- Generated artifacts (plots, exports; not source) ---
 artifact/

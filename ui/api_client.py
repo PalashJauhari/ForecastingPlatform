@@ -6,6 +6,9 @@ The Dash app imports this module so UI code stays free of transport details.
 
 Endpoints (must match FastAPI ``Form`` / ``File`` field names):
 
+Python client (this module): ``/upload-data``, ``/run``, ``/resume``, stream helpers.
+Browser (``assets/gb_stream_ui.js``): ``/run/stream``, ``/resume/stream`` via fetch + SSE.
+
 - ``POST /upload-data`` — ``multipart/form-data``: form field ``session_id``,
   file field ``files`` (same name the server expects for ``UploadFile``).
 - ``POST /run`` — ``application/x-www-form-urlencoded``-style body via
@@ -116,7 +119,7 @@ class GaussianBlurrApiClient:
         """
         Build a fully-qualified ``GET /artifact/...`` URL for an output file.
 
-        Accepts either a logical path produced by ``code_pipeline``
+        Accepts either a logical path produced by ``coding_tool``
         (e.g. ``"agent_filesystem/<session>/run_<run_id>/trend.png"``) or a
         bare session-relative path (e.g. ``"run_<run_id>/trend.png"``); the
         ``agent_filesystem/<session>/`` prefix is stripped if present so the

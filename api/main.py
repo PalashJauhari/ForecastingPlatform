@@ -12,12 +12,12 @@ Endpoints
 
 SSE contract (additive; Form routes unchanged): each frame follows the Server-Sent Events ``data`` line format (JSON payload, separated by blank line from the next frame).
 ``{"type":"node",...}`` — one LangGraph ``updates`` step per finished node (serial prep:
-``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``SelectPlannerSkills``, …).
+``ProfileSavedData`` → ``SummariseConversationalSummary`` → ``Planner``, …).
 ``{"type":"done",...}`` — same fields ``get_api_response`` returns for ``/run``, plus keys ``type`` and ``session_id``.
 ``{"type":"error",...}`` — stream aborted; surfaced when the generator catches an exception after ``data`` has begun.
 
-Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional
-Langfuse keys.
+Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional Langfuse keys
+(when ``LANGFUSE_TRACING_ENABLED=true``; tracing is owned by the graph layer, not this API).
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
-from langfuse import observe, propagate_attributes
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -44,11 +43,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from graph import AnalysisGraph
-from observability.langfuse_handler import (
-    build_request_metadata,
-    get_langfuse_client,
-    sse_stream_runnable_langfuse_pin,
-)
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,
@@ -64,7 +58,7 @@ ALLOWED_DATA_EXTENSIONS = {".csv", ".xlsx"}
 ARTIFACT_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".png", ".svg"}
 
 # Image extensions the API discovers under each ``run_<tool_call_id>`` folder.
-# Kept tight: only the formats ``code_pipeline``'s plot patches actually emit.
+# Kept tight: only the formats the coding tool's plot output actually emits.
 IMAGE_EXTENSIONS = {".png", ".svg"}
 
 _SSE_HEADERS = {
@@ -80,12 +74,15 @@ app = FastAPI(
     ),
 )
 analysis_graph = AnalysisGraph()
-langfuse = get_langfuse_client()
 
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://127.0.0.1:8501",
+        "http://localhost:8501",
+        "http://0.0.0.0:8501",
+        "http://[::1]:8501",
         "http://127.0.0.1:8050",
         "http://localhost:8050",
         "http://0.0.0.0:8050",
@@ -117,7 +114,7 @@ class StreamResumeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_run_id(raw: str) -> str:
+def sanitize_run_id(raw: str) -> str:
     """
     Convert a LangChain ``tool_call_id`` into the same filesystem-safe folder id the
     forecasting / coding tools use when they create ``run_<id>/`` subfolders.
@@ -165,9 +162,8 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     Walk every ``run_<sanitized_tool_call_id>/`` folder for the supplied tool calls and
     return the logical paths of any image artifacts (``.png`` / ``.svg``) inside.
 
-    Only ``code_pipeline`` writes into these folders today (its plot patches redirect
-    ``plt.savefig`` / ``Figure.savefig`` outputs there). Tools that do not emit images
-    simply contribute an empty folder (or none at all) and are skipped silently.
+    Only ``coding_tool`` writes into these folders today (PNG/SVG under run_<tool_call_id>/).
+    Tools that do not emit images simply contribute an empty folder (or none at all) and are skipped silently.
 
     Returned paths use the logical ``agent_filesystem/<session>/run_<id>/<file>`` shape
     so the Dash UI can pass them straight to the ``/artifact/{session_id}/{path:path}``
@@ -181,7 +177,7 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
 
     images: list[str] = []
     for tool_call_id in tool_call_ids:
-        run_id = _sanitize_run_id(tool_call_id)
+        run_id = sanitize_run_id(tool_call_id)
         run_dir = workspace / f"run_{run_id}"
         if not run_dir.is_dir():
             continue
@@ -211,6 +207,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     interrupts = result.get("__interrupt__") or []
     if interrupts:
+        # invoke() surfaces interrupt payload on __interrupt__; no extra get_state() needed.
         val = getattr(interrupts[0], "value", interrupts[0])
         if isinstance(val, dict):
             question = val.get("question", str(val))
@@ -341,6 +338,7 @@ def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
 
 
 # Omitted from SSE / UI progress (noisy join / bookkeeping nodes).
+# ProfileSavedData_PostTools re-profiles silently; images come from done.images.
 _SSE_SKIP_PROGRESS_NODES = frozenset({
     "ProfileSavedData_PostTools",
 })
@@ -427,17 +425,8 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
             event["todos"] = norm
             event["todo_count"] = n
 
-    elif node_name == "SelectPlannerSkills":
-        planner_skills = payload.get("active_planner_skills") or []
-        event["label"] = "Planner skills selected"
-        event["active_planner_skills"] = planner_skills
-        event["active_planner_skill_count"] = len(planner_skills)
-
-    elif node_name == "SelectOrchestratorSkills":
-        skills = payload.get("active_skills") or []
-        event["label"] = "Orchestrator skills selected"
-        event["active_skills"] = skills
-        event["active_skill_count"] = len(skills)
+    elif node_name == "TodoCompletionCheck":
+        event["label"] = "Checking todo completion"
 
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []
@@ -457,9 +446,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         event["label"] = "Rolling context compaction"
         if preview:
             event["summary_preview"] = preview + ("…" if len(summary.strip()) > 120 else "")
-
-    elif node_name == "BeginTurn":
-        event["label"] = "Turn boundary"
 
     elif node_name == "FinalAnswer":
         event["label"] = "Assistant reply finalized"
@@ -498,12 +484,11 @@ def _sse_bytes_stream_run(
     analysis: AnalysisGraph,
     session_id: str,
     query: str,
-    langfuse_pin: dict[str, str],
 ) -> Iterator[bytes]:
     yield from sse_event_lines_for_turn(
         analysis,
         session_id,
-        analysis.stream_graph(session_id, query, langfuse_pin=langfuse_pin),
+        analysis.stream_graph(session_id, query),
     )
 
 
@@ -511,12 +496,11 @@ def _sse_bytes_stream_resume(
     analysis: AnalysisGraph,
     session_id: str,
     resume_value: str,
-    langfuse_pin: dict[str, str],
 ) -> Iterator[bytes]:
     yield from sse_event_lines_for_turn(
         analysis,
         session_id,
-        analysis.stream_resume(session_id, resume_value, langfuse_pin=langfuse_pin),
+        analysis.stream_resume(session_id, resume_value),
     )
 
 
@@ -526,7 +510,6 @@ def _sse_bytes_stream_resume(
 
 
 @app.post("/run")
-@observe(name="api.run", as_type="chain")
 async def run(
     query: str = Form(...),
     session_id: str = Form("default"),
@@ -547,22 +530,12 @@ async def run(
         If the agent asks a clarifying question, ``interrupted`` is ``true``
         and ``question`` contains the text.
     """
-    with propagate_attributes(session_id=session_id, tags=["api", "run"], metadata=build_request_metadata(endpoint="/run", interface="fastapi", query=query)):
-        result = analysis_graph.run_graph(session_id, query)
-        response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-                "image_count": len(response.get("images") or []),
-            },
-        )
-        return response
+    result = analysis_graph.run_graph(session_id, query)
+    response = get_api_response(session_id, result)
+    return response
 
 
 @app.post("/resume")
-@observe(name="api.resume", as_type="chain")
 async def resume(
     resume_value: str = Form(...),
     session_id: str = Form("default"),
@@ -577,18 +550,9 @@ async def resume(
     Returns
         Same shape as ``/run``.
     """
-    with propagate_attributes(session_id=session_id, tags=["api", "resume"], metadata=build_request_metadata(endpoint="/resume", interface="fastapi", query=resume_value)):
-        result = analysis_graph.resume(session_id, resume_value)
-        response = get_api_response(session_id, result)
-        langfuse.update_current_span(
-            output=response,
-            metadata={
-                "interrupted": response["interrupted"],
-                "has_last_tool_result": response["last_tool_result"] is not None,
-                "image_count": len(response.get("images") or []),
-            },
-        )
-        return response
+    result = analysis_graph.resume(session_id, resume_value)
+    response = get_api_response(session_id, result)
+    return response
 
 
 @app.post("/run/stream")
@@ -602,9 +566,8 @@ async def run_stream(request_body: StreamRunRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     query = request_body.query
-    pin = sse_stream_runnable_langfuse_pin()
     return StreamingResponse(
-        _sse_bytes_stream_run(analysis_graph, sid, query, pin),
+        _sse_bytes_stream_run(analysis_graph, sid, query),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -618,16 +581,14 @@ async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
 
     sid = request_body.session_id
     rv = request_body.resume_value
-    pin = sse_stream_runnable_langfuse_pin()
     return StreamingResponse(
-        _sse_bytes_stream_resume(analysis_graph, sid, rv, pin),
+        _sse_bytes_stream_resume(analysis_graph, sid, rv),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
 
 
 @app.post("/upload-data")
-@observe(name="api.upload_data", as_type="tool")
 async def upload_data(
     files: list[UploadFile] = File(...),
     session_id: str = Form("default"),
@@ -660,7 +621,6 @@ async def upload_data(
             renamed.append({"original_name": name, "stored_name": stored_name})
 
     response = {"saved": saved, "count": len(saved), "renamed": renamed}
-    langfuse.update_current_span(output=response, metadata={"uploaded_count": len(saved), "session_id": session_id})
     return response
 
 
@@ -669,7 +629,7 @@ async def artifact(session_id: str, path: str):
     """
     Stream a single artifact file from the session workspace.
 
-    The Dash UI calls this for every plot path returned by ``code_pipeline`` (e.g.
+    The Dash UI calls this for every plot path returned by ``coding_tool`` (e.g.
     ``run_<run_id>/trend.png``) and for any other CSV / XLSX outputs the user wants to
     download. The endpoint is intentionally narrow: read-only, allowlisted extensions,
     and a hard symlink-resistant containment check against the session root.

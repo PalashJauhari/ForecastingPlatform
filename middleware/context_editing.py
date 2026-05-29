@@ -21,25 +21,33 @@ from langchain_core.messages import (
 )
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import (
-    extract_usage_details,
-    get_langfuse_client,
-    observation_parented_to_run,
-    serialize_message,
-)
+from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 SUMMARY_MODEL = cfg["models"].get("message_summarisation", "gpt-4o-mini")
-langfuse = get_langfuse_client()
 
 SUMMARY_SYSTEM = """\
-You are a conversation summariser. Produce a concise running summary that
-preserves all important facts, data references, file paths, column names,
-analysis results, and user preferences mentioned so far.
+# Role
+Conversation summariser for a data-analysis agent session.
 
-If a previous summary is provided, integrate the new messages into it —
-do not repeat information already captured. Focus on what is new."""
+# Goal
+Produce an updated running summary that preserves everything needed to continue the session without the evicted messages.
+
+# Must preserve
+- User goals and decisions
+- File basenames, column names, and data references
+- Analysis results, model choices, and key numbers
+- User preferences and open questions
+
+# Decision rules
+- If a previous summary is provided, **integrate** new information — do not repeat what is already captured.
+- Focus on what is new in the evicted messages.
+- Prefer concise factual statements over narrative padding.
+
+# Output
+Plain-text summary only — no markdown fences, no preamble.
+"""
 
 
 def estimate_tokens(messages: list) -> int:
@@ -48,7 +56,11 @@ def estimate_tokens(messages: list) -> int:
 
 
 def find_human_truncation_cut(messages: list, keep: int) -> int | None:
-    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut."""
+    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut.
+
+    ``AnalysisGraph`` tags each user turn with ``user_input-{uuid}`` ids so eviction
+    never splits mid-turn tool chains.
+    """
     candidate = max(0, len(messages) - keep)
     idx = candidate
     while idx < len(messages):
@@ -74,6 +86,7 @@ async def summarize_evicted(
     runnable_config: Any | None = None,
 ) -> str:
     """LLM call: merge *previous_summary* with *messages_to_evict* into an updated summary."""
+    del runnable_config
 
     llm = make_llm(model=SUMMARY_MODEL, temperature=0)
 
@@ -83,24 +96,11 @@ async def summarize_evicted(
     prompt_messages.extend(messages_to_evict)
     prompt_messages.append(HumanMessage(content="Update the running summary using the evicted messages above."))
 
-    serial_in = [serialize_message(message) for message in prompt_messages]
-    with observation_parented_to_run(
-        langfuse,
-        runnable_config,
-        name="context.summarize_evicted",
-        as_type="chain",
-    ):
-        with observation_parented_to_run(
-            langfuse,
-            runnable_config,
-            name="context.summarize_evicted.llm",
-            as_type="generation",
-            model=SUMMARY_MODEL,
-            input=serial_in,
-        ) as generation:
-            response = await llm.ainvoke(prompt_messages)
-            generation.update(output=serialize_message(response), usage_details=extract_usage_details(response))
-            return response.content
+    with traced_generation("context.summarize_evicted.llm", model=SUMMARY_MODEL) as generation:
+        response = await llm.ainvoke(prompt_messages)
+        if generation is not None:
+            update_llm_generation(generation, model=SUMMARY_MODEL, raw=response)
+        return response.content
 
 
 async def truncate_and_summarize(
@@ -116,42 +116,26 @@ async def truncate_and_summarize(
 
     Returns ``(updated_summary, kept_messages, remove_ops)``; ``remove_ops`` is empty when unchanged.
     """
-    with observation_parented_to_run(
-        langfuse,
-        runnable_config,
-        name="context.truncate_and_summarize",
-        as_type="chain",
-    ):
-        if estimate_tokens(messages) <= token_threshold or len(messages) <= keep:
-            langfuse.update_current_span(metadata={"token_estimate": estimate_tokens(messages), "token_threshold": token_threshold, "truncated": "false"})
+    del runnable_config
+
+    with traced_span("context.truncate_and_summarize", metadata={"token_threshold": token_threshold, "keep": keep}) as span:
+        token_estimate = estimate_tokens(messages)
+        if token_estimate <= token_threshold or len(messages) <= keep:
+            if span is not None:
+                span.update(metadata={"token_estimate": token_estimate, "truncated": "false"})
             return previous_summary, messages, []
 
         cut = find_human_truncation_cut(messages, keep)
         if cut is None:
-            langfuse.update_current_span(
-                metadata={
-                    "token_estimate": estimate_tokens(messages),
-                    "token_threshold": token_threshold,
-                    "truncated": "false",
-                    "truncate_skip": "no_human_boundary",
-                },
-            )
+            if span is not None:
+                span.update(metadata={"token_estimate": token_estimate, "truncated": "false", "truncate_skip": "no_human_boundary"})
             return previous_summary, messages, []
 
         to_evict = messages[:cut]
         remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
-        updated_summary = await summarize_evicted(
-            previous_summary,
-            to_evict,
-            runnable_config=runnable_config,
-        )
-        langfuse.update_current_span(
-            metadata={
-                "token_estimate": estimate_tokens(messages),
-                "token_threshold": token_threshold,
-                "truncated": "true",
-                "evicted_count": len(to_evict),
-            },
-        )
+        with traced_span("context.summarize_evicted", metadata={"evicted_count": len(to_evict)}):
+            updated_summary = await summarize_evicted(previous_summary, to_evict)
+        if span is not None:
+            span.update(metadata={"token_estimate": token_estimate, "truncated": "true", "evicted_count": len(to_evict)})
         kept_messages = messages[cut:]
         return updated_summary, kept_messages, remove_ops

@@ -1,6 +1,0 @@
-id: problem-framing
-name: Problem framing
-description: >
-  Use when the user request is vague—clarify the real question, decision context, target,
-  output grain, constraints, and simplest valid method before heavy modeling.
-tags: [requirements, scoping]
