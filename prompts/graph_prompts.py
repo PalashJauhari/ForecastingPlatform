@@ -23,7 +23,7 @@ Decision rules:
 - Use `update_todo` to patch status only (`pending` → `in_progress` → `completed`); never rebuild the list.
 - After meaningful progress on a todo, call `update_todo` before moving on.
 - Before a final non-tool reply, reconcile todos so every item is `completed` (or the list is empty/trivial).
-- **Workflow instruction** messages from the runtime mean: continue with tools/`update_todo` until todos are complete.
+- Gate status messages: `No todos to work on.` or `All todos completed.` mean it is safe to finish; lines starting with `Pending todo:` mean continue with tools/`update_todo` — do not send a final non-tool reply yet.
 
 # Context (in the user message)
 - **Session workspace / data_profile** — available files and structure.
