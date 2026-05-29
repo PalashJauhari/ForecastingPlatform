@@ -1,5 +1,5 @@
 """
-Planner sub-graph: PlannerOrchestrator ↔ RunTools (ask_user, write_todo) → END.
+Planner sub-graph: PlannerOrchestrator ↔ RunTools → END on no tool calls.
 
 Mounted on ``AnalysisGraph`` via ``get_planner_graph()`` — no local checkpointer.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Dict, List, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, add_messages
@@ -95,17 +95,6 @@ def route_after_planner(state: PlannerAgentState) -> str:
     return END
 
 
-def route_after_planner_tools(state: PlannerAgentState) -> str:
-    """End after ``write_todo``; continue only after ``ask_user`` returns with user clarification."""
-    recent_tool_messages = [m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)]
-    if not recent_tool_messages:
-        return "PlannerOrchestrator"
-    tool_name = str(getattr(recent_tool_messages[0], "name", "") or "")
-    if tool_name == "ask_user":
-        return "PlannerOrchestrator"
-    return END
-
-
 # ---------------------------------------------------------------------------
 # PlannerGraph
 # ---------------------------------------------------------------------------
@@ -130,11 +119,7 @@ class PlannerGraph:
             route_after_planner,
             {"RunTools": "RunTools", END: END},
         )
-        builder.add_conditional_edges(
-            "RunTools",
-            route_after_planner_tools,
-            {"PlannerOrchestrator": "PlannerOrchestrator", END: END},
-        )
+        builder.add_edge("RunTools", "PlannerOrchestrator")
         self.graph = builder.compile()
 
     def build_graph(self) -> Any:

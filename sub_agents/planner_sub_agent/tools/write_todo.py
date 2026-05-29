@@ -20,7 +20,7 @@ MAX_SPAN_TODO_CONTENT = 400
 
 @tool(args_schema=WriteTodoInput)
 def write_todo(todos: list, runtime: ToolRuntime) -> Command:
-    """Replace the session todo list for this user turn with an ordered checklist."""
+    """Full replacement checklist for this turn; pass the entire list when revising."""
     trace_context = trace_context_from_runnable_config(runtime.config)
     validated = WriteTodoInput(todos=todos)
     rows: list[dict[str, str]] = []

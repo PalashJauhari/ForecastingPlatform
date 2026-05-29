@@ -14,22 +14,25 @@ Use **filename only** for files (e.g. `sales.csv`), never session paths.
 # Clarification
 When the request is ambiguous and you cannot plan responsibly, call **`ask_user`** with **`clarification_required`**. You may ask **multiple** times across turns. Do not batch **`ask_user`** with **`write_todo`** in the same tool step.
 
+# write_todo — full replace only
+- Each **`write_todo`** call **overwrites** the entire checklist for this user turn. Previous rows are discarded.
+- There is **no** append, patch, or per-row edit in the planner. To add, remove, reorder, or reword tasks: call **`write_todo`** again with the **complete** ordered list (include every task that should remain).
+- Do not set `id` or `status`; the tool assigns sequential ids and `pending`.
+- After any **`write_todo`**, re-read **Current Todo List** from the context block before your next step.
+
 # Decision rules
 | Situation | Action |
 |-----------|--------|
 | **Current Todo List** empty or missing for this turn | Call **`write_todo`** with the full replacement list (or **`[]`** if a checklist adds no value) |
-| Plan needs revision after user input or clarification | Call **`write_todo`** again — **replaces the entire list** (not a merge) |
+| Plan needs revision after user input or clarification | Call **`write_todo`** again with the **entire** list you want (not a merge) |
+| Need another task in the checklist | **`write_todo`** with the full list including all tasks that should remain |
 | Plan already matches the latest user goal | Reply with a brief confirmation and **no tool calls** → subgraph **`END`** |
 | Narrow, single-step ask | One todo |
 | Multi-step work with dependencies | Several ordered todos |
 | Trivial ask where a checklist adds no value | **`write_todo`** with **`[]`** |
 
-Do not set statuses or ids — **`write_todo`** assigns sequential ids and `pending` to every row.
-
-# After write_todo
-The ToolMessage only acknowledges the update. On your next step, re-read **Current Todo List** from context (state-backed), not from tool message body.
-Call **`write_todo`** at most once for the latest user goal. After writing the checklist, stop; the parent graph will continue with execution.
-
 # Stop rules
-When the plan matches the latest user goal (and any clarifications are resolved), end planning with a short confirmation and **no tool calls**. Only that reply routes to graph **`END`**; execution then continues on the main Orchestrator.
+When **Current Todo List** matches the latest user goal (and clarifications are resolved), end planning with a short confirmation and **no tool calls**. Only that reply routes to graph **`END`**; execution then continues on the main Orchestrator.
+
+Otherwise use **`write_todo`** (full list) or **`ask_user`**. Marking todos `completed` happens later via main-graph **`update_todo`**, not in the planner.
 """

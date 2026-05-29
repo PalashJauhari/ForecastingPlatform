@@ -101,6 +101,7 @@ class AgentState(TypedDict):
     message_summary: str
     data_profile: List[Any]
     todos: Annotated[list[TodoEntry], merge_todos]
+    todo_gate_passed: NotRequired[bool]  # set by TodoGate each visit
 
 
 # ---------------------------------------------------------------------------
@@ -203,47 +204,39 @@ def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def pending_todos_message(incomplete: List[dict[str, Any]]) -> str:
-    """Deterministic workflow text: one line per item not yet completed."""
-    lines: List[str] = [
-        "## Workflow instruction",
-        "",
-    ]
-    for t in incomplete:
-        tid = t.get("id", "?")
-        content = t.get("content", "")
-        st = t.get("status", "")
-        lines.append(f"Pending todo: `{tid}` — {content} (status: {st})")
-    return "\n".join(lines)
-
-
-def todo_completion_check(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """If todos remain incomplete, inject a workflow ``AIMessage`` listing pending items."""
+def todo_gate(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Set ``todo_gate_passed`` and a short status ``AIMessage`` for the orchestrator."""
     todos_raw = state.get("todos") or []
     todos: List[dict[str, Any]] = [t for t in todos_raw if isinstance(t, dict)]
     incomplete = [t for t in todos if t.get("status") != "completed"]
     session_id = session_id_from_config(config)
     trace_context = trace_context_from_runnable_config(config)
-    if not incomplete:
-        with traced_span("TodoCompletionCheck", trace_context=trace_context, metadata={"session_id": session_id, "action": "pass"}):
-            pass
-        return {}
 
-    content = pending_todos_message(incomplete)
-    with traced_span("TodoCompletionCheck", trace_context=trace_context, metadata={"session_id": session_id, "action": "block", "incomplete_todos": len(incomplete)}) as span:
-        if span is not None:
-            span.update(output={"preview": content[:4000]})
-    return {"messages": [AIMessage(content=content)]}
-
-
-def route_after_todo_check(state: AgentState) -> str:
-    todos_raw = state.get("todos") or []
-    todos = [t for t in todos_raw if isinstance(t, dict)]
     if not todos:
-        return "FinalAnswer"
-    if all(t.get("status") == "completed" for t in todos):
-        return "FinalAnswer"
-    return "Orchestrator"
+        passed = True
+        content = "No todos to work on."
+    elif not incomplete:
+        passed = True
+        content = "All todos completed."
+    else:
+        passed = False
+        content = "\n".join(
+            f"Pending todo: {t.get('id', '?')} — {t.get('content', '')} ({t.get('status', '')})"
+            for t in incomplete
+        )
+
+    with traced_span("TodoGate", trace_context=trace_context, metadata={"session_id": session_id}) as span:
+        if span is not None:
+            span.update(output={"todo_gate_passed": passed, "content": content})
+
+    return {
+        "todo_gate_passed": passed,
+        "messages": [AIMessage(content=content)],
+    }
+
+
+def route_after_todo_gate(state: AgentState) -> str:
+    return "FinalAnswer" if state.get("todo_gate_passed") else "Orchestrator"
 
 
 def route_after_orchestrator(state: AgentState) -> str:
@@ -251,7 +244,7 @@ def route_after_orchestrator(state: AgentState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "RunTools"
-    return "TodoCompletionCheck"
+    return "TodoGate"
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +284,7 @@ class AnalysisGraph:
         builder.add_node("Planner", get_planner_graph())
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
-        builder.add_node("TodoCompletionCheck", todo_completion_check)
+        builder.add_node("TodoGate", todo_gate)
         builder.add_node("FinalAnswer", final_answer)
 
         builder.set_entry_point("ProfileSavedData")
@@ -300,11 +293,11 @@ class AnalysisGraph:
         builder.add_conditional_edges(
             "Orchestrator",
             route_after_orchestrator,
-            {"RunTools": "RunTools", "TodoCompletionCheck": "TodoCompletionCheck"},
+            {"RunTools": "RunTools", "TodoGate": "TodoGate"},
         )
         builder.add_conditional_edges(
-            "TodoCompletionCheck",
-            route_after_todo_check,
+            "TodoGate",
+            route_after_todo_gate,
             {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
         )
         builder.add_edge("RunTools", "ProfileSavedData_PostTools")

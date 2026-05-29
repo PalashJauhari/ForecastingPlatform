@@ -161,7 +161,7 @@ config.yaml          Main platform settings
 
 **Tool placement:** main-graph tools live under `tools/` and register on `graph/graph.py`. Sub-agent internal tools (planner `write_todo`, `ask_user`) live under `sub_agents/planner_sub_agent/tools/` only.
 
-**Graph classes:** `AnalysisGraph` (main), `PlannerGraph` (mounted subgraph, no checkpointer — inherits parent for interrupts), `CodingGraph` (tool-invoked pipeline). Planner may pause for clarification via `ask_user` before `write_todo`; resume with `POST /resume` on the same session.
+**Graph classes:** `AnalysisGraph` (main), `PlannerGraph` (mounted subgraph, no checkpointer — inherits parent for interrupts), `CodingGraph` (tool-invoked pipeline). Planner loops `PlannerOrchestrator` ↔ `RunTools` until a no-tool reply; `write_todo` always full-replaces `todos`. `ask_user` may interrupt — resume with `POST /resume` on the same session.
 
 ## For contributors
 
