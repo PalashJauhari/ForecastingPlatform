@@ -1,3 +1,7 @@
+# NOTE: Do NOT add ``from __future__ import annotations`` here. LangChain's
+# ``@tool`` decorator introspects function annotations to detect the
+# ``ToolRuntime`` parameter for auto-injection by LangGraph.
+
 """
 Patch one todo's status in graph state (orchestrator bookkeeping).
 
@@ -6,6 +10,8 @@ Planner assigns sequential string ids (``"1"``, ``"2"``, …). This tool updates
 (see planner ``write_todo`` for full replace).
 """
 
+from typing import Any
+
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
@@ -13,6 +19,13 @@ from langgraph.types import Command
 
 from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 from output_validation.update_todo import UpdateTodoInput
+
+
+def merge_todos(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
+    """LangGraph reducer for ``todos``: last write in a step wins (``write_todo`` / ``update_todo``)."""
+    if right is None:
+        return list(left or [])
+    return list(right)
 
 
 def normalize_todo_row(row: object) -> dict | None:
@@ -87,6 +100,6 @@ def update_todo_impl(todo_id: str, status: str, runtime: ToolRuntime) -> Command
 
 
 @tool(args_schema=UpdateTodoInput)
-def update_todo(todo_id: str, status: str, runtime: ToolRuntime) -> Command:
+def update_todo(runtime: ToolRuntime, todo_id: str, status: str) -> Command:
     """Update one todo status by planner-assigned ``todo_id`` (``\"1\"``, ``\"2\"``, …) from Current Todo List."""
     return update_todo_impl(todo_id=todo_id, status=status, runtime=runtime)

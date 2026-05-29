@@ -53,7 +53,7 @@ from tools.file_management_tools.profiling_data import profile_session_workspace
 from tools.forecasting.holt_winters_tool import holt_winters_tool
 from tools.forecasting.prophet_tool import prophet_tool
 from tools.forecasting.sarima_tool import sarima_tool
-from tools.planning.update_todo import update_todo
+from tools.planning.update_todo import merge_todos, update_todo
 
 # ---------------------------------------------------------------------------
 # Config
@@ -100,7 +100,7 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     message_summary: str
     data_profile: List[Any]
-    todos: NotRequired[list[TodoEntry]]
+    todos: Annotated[list[TodoEntry], merge_todos]
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 
 from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
+from tools.planning.update_todo import merge_todos
 from sub_agents.planner_sub_agent.config import PLANNER_MODEL
 from sub_agents.planner_sub_agent.prompts import PLANNER_SYSTEM_PROMPT
 from sub_agents.planner_sub_agent.tools.ask_user import ask_user
@@ -39,7 +40,7 @@ class PlannerAgentState(TypedDict):
 
     messages: Annotated[list, add_messages]
     data_profile: List[Any]
-    todos: List[PlannerTodoEntry]
+    todos: Annotated[List[PlannerTodoEntry], merge_todos]
 
 
 # ---------------------------------------------------------------------------
