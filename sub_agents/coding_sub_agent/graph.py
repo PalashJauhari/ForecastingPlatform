@@ -19,7 +19,7 @@ from langgraph.graph import END, StateGraph
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
 from observability.langfuse_handler import add_trace_context_to_config, current_trace_context, safe_reset_contextvar, trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
-from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL, CODING_MODEL, CODING_RECURSION_LIMIT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, IO_JUDGE_MODEL, MAX_CODEGEN_ATTEMPTS, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
+from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL, CODING_GRAPH_RECURSION_LIMIT, CODING_MODEL, CODING_MODEL_LAST_ATTEMPT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, IO_JUDGE_MODEL, MAX_CODEGEN_ATTEMPTS, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
 from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODE_JUDGE_SYSTEM_PROMPT, CODEGEN_FAILURE_SYSTEM_PROMPT, IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
 from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
 from sub_agents.coding_sub_agent.validation import CodeGenFailureOutput, CodeGenerationOutput, JudgeOutput, sanitize_run_id
@@ -70,7 +70,7 @@ class CodingAgentState(TypedDict):
     session_id: str
     tool_call_id: str
     data_profile: list[Any]  # session workspace profile from main graph (CodeGen context)
-    codegen_count: NotRequired[int]  # incremented by CodeGen; used by CodeGenLimitGate
+    codegen_count: NotRequired[int]  # 1-based attempts completed by CodeGen; CodeGenLimitGate reads before next run
     code: str
     semgrep_feedback: str  # set by SemgrepScan; cleared after a successful CodeGen
     judge_feedback: str  # set by SafetyJudge; cleared after a successful CodeGen
@@ -83,15 +83,44 @@ class CodingAgentState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# CodeGen attempt limit (authoritative retry budget)
+# ---------------------------------------------------------------------------
+
+
+def codegen_attempts_exhausted(state: CodingAgentState) -> bool:
+    """True when ``codegen_count`` from the last CodeGen run is already at the cap."""
+    return int(state.get("codegen_count") or 0) >= MAX_CODEGEN_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
 # CodeGen — structured Python generation
 # ---------------------------------------------------------------------------
 
 
 def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Generate Python from requirements; on retry, prior gate feedback is included in context."""
+    """Generate Python from requirements; on retry, prior gate feedback is included in context.
+
+    Model selection: early attempts use ``CODING_MODEL``; the last permitted attempt
+    (when this run's count equals ``MAX_CODEGEN_ATTEMPTS``) may use ``CODING_MODEL_LAST_ATTEMPT``
+    if set in ``sub_agents/coding_sub_agent/.env``.
+    """
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
-    llm = ChatOpenAI(model=CODING_MODEL, temperature=0).with_structured_output(CodeGenerationOutput, include_raw=True)
+    # Belt-and-suspenders: routing should never reach CodeGen when exhausted.
+    if codegen_attempts_exhausted(state):
+        return {
+            "semgrep_feedback": (
+                f"Code generation blocked: {MAX_CODEGEN_ATTEMPTS} codegen attempt(s) already used."
+            ),
+        }
+    # 1-based attempt index for this run (written back to state for CodeGenLimitGate).
     codegen_count = state.get("codegen_count", 0) + 1
+    # CodeGenLimitGate blocks the *next* run once count == MAX; this node still runs when
+    # state had count == MAX - 1, so the final attempt is exactly count == MAX (not >=).
+    if CODING_MODEL_LAST_ATTEMPT and codegen_count == MAX_CODEGEN_ATTEMPTS:
+        model = CODING_MODEL_LAST_ATTEMPT
+    else:
+        model = CODING_MODEL
+    llm = ChatOpenAI(model=model, temperature=0).with_structured_output(CodeGenerationOutput, include_raw=True)
 
     # Ephemeral LLM context (mirrors planner orchestrator): task, files, workspace, then gate failures.
     context_content = (
@@ -120,12 +149,12 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
         HumanMessage(content=context_content),
     ]
     try:
-        with traced_span("CodeGen", trace_context=ctx) as node_span:
-            with traced_generation("CodeGen-llm", model=CODING_MODEL, trace_context=ctx) as gen:
+        with traced_span("CodeGen", trace_context=ctx, metadata={"codegen_count": codegen_count, "model": model}) as node_span:
+            with traced_generation("CodeGen-llm", model=model, trace_context=ctx) as gen:
                 raw = llm.invoke(prompt_messages, config=config)
                 parsed, raw_msg = parse_structured_output(raw, CodeGenerationOutput)
                 if gen is not None:
-                    update_llm_generation(gen, model=CODING_MODEL, raw=raw_msg)
+                    update_llm_generation(gen, model=model, raw=raw_msg)
                 if isinstance(parsed, dict):
                     parsed = CodeGenerationOutput.model_validate(parsed)
                 code = (parsed.code or "").strip()
@@ -421,7 +450,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
 
 
 def codegen_limit_gate_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Passthrough before CodeGen; limit check in route_codegen_limit_gate."""
+    """Passthrough; ``route_codegen_limit_gate`` enforces ``MAX_CODEGEN_ATTEMPTS`` before CodeGen."""
     del state, config
     return {}
 
@@ -483,7 +512,12 @@ def codegen_failure_node(state: CodingAgentState, config: RunnableConfig) -> Dic
 
 
 def route_codegen_limit_gate(state: CodingAgentState) -> str:
-    if state.get("codegen_count", 0) >= MAX_CODEGEN_ATTEMPTS:
+    """Send to CodeGenFailure once ``codegen_count`` reaches ``MAX_CODEGEN_ATTEMPTS``.
+
+    Count is set by the previous CodeGen run (1-based after each visit). Example with MAX=3:
+    state 0,1,2 → CodeGen; state 3 → CodeGenFailure (no further LLM codegen).
+    """
+    if codegen_attempts_exhausted(state):
         return "CodeGenFailure"
     return "CodeGen"
 
@@ -632,7 +666,7 @@ class CodingGraph:
         safe_id = (tool_call_id or "unknown").replace("/", "_")
         config = {
             "configurable": {"thread_id": f"coding_sub_agent_{session_id}_{safe_id}"},
-            "recursion_limit": CODING_RECURSION_LIMIT,
+            "recursion_limit": CODING_GRAPH_RECURSION_LIMIT,
         }
         meta = {"session_id": session_id, "tool_call_id": tool_call_id}
         token = coding_trace_ctx.set(trace_context)  # nodes read via get_coding_trace_context()
@@ -649,7 +683,7 @@ class CodingGraph:
                     result = dict(snap.values) if snap and snap.values else dict(initial)
                     if not (result.get("codegen_failure_feedback") or "").strip():
                         result["codegen_failure_feedback"] = (
-                            f"Coding pipeline hit recursion limit ({CODING_RECURSION_LIMIT})."
+                            f"Coding pipeline hit recursion limit ({CODING_GRAPH_RECURSION_LIMIT})."
                         )
         finally:
             safe_reset_contextvar(coding_trace_ctx, token)

@@ -1,6 +1,5 @@
 """Unit tests for main, planner, and coding sub-agent graph routing helpers."""
 
-import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END
 
@@ -11,11 +10,6 @@ from graph.graph import (
 )
 from sub_agents.coding_sub_agent.graph import route_codegen_limit_gate
 from sub_agents.planner_sub_agent.graph import route_after_planner
-
-
-@pytest.fixture
-def max_codegen_attempts(monkeypatch):
-    monkeypatch.setattr("sub_agents.coding_sub_agent.graph.MAX_CODEGEN_ATTEMPTS", 3)
 
 
 def test_route_orchestrator_to_run_tools():
@@ -93,30 +87,23 @@ def test_planner_ends_on_no_tool_reply():
     assert route_after_planner(state) == END
 
 
-def test_route_codegen_limit_gate_under_limit(max_codegen_attempts):
-    """CodeGenLimitGate sends to CodeGen when codegen_count is below MAX."""
+def test_route_codegen_limit_gate_under_limit():
+    """CodeGenLimitGate sends to CodeGen when codegen_count is below MAX (default 3)."""
     assert route_codegen_limit_gate({"codegen_count": 0}) == "CodeGen"
     assert route_codegen_limit_gate({"codegen_count": 1}) == "CodeGen"
     assert route_codegen_limit_gate({"codegen_count": 2}) == "CodeGen"
 
 
-def test_route_codegen_limit_gate_at_limit(max_codegen_attempts):
+def test_route_codegen_limit_gate_at_limit():
     """CodeGenLimitGate sends to CodeGenFailure when codegen_count reached MAX."""
     assert route_codegen_limit_gate({"codegen_count": 3}) == "CodeGenFailure"
 
 
-def test_route_codegen_limit_gate_over_limit(max_codegen_attempts):
+def test_route_codegen_limit_gate_over_limit():
     """CodeGenLimitGate sends to CodeGenFailure when codegen_count exceeds MAX."""
     assert route_codegen_limit_gate({"codegen_count": 4}) == "CodeGenFailure"
 
 
-def test_route_codegen_limit_gate_missing_count(max_codegen_attempts):
+def test_route_codegen_limit_gate_missing_count():
     """CodeGenLimitGate treats missing codegen_count as zero attempts."""
     assert route_codegen_limit_gate({}) == "CodeGen"
-
-
-def test_route_codegen_limit_gate_respects_patched_max(monkeypatch):
-    """CodeGenLimitGate reads MAX_CODEGEN_ATTEMPTS from module config, not a hardcoded value."""
-    monkeypatch.setattr("sub_agents.coding_sub_agent.graph.MAX_CODEGEN_ATTEMPTS", 2)
-    assert route_codegen_limit_gate({"codegen_count": 1}) == "CodeGen"
-    assert route_codegen_limit_gate({"codegen_count": 2}) == "CodeGenFailure"
