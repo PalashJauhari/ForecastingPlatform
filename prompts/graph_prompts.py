@@ -36,7 +36,7 @@ Decision rules:
    - `requirements` — detailed natural-language spec.
    - `input_files` — basenames the script may read (`.csv`/`.xlsx`); `[]` if unconstrained.
    - `output_files` — every basename the script may write (`.csv`/`.xlsx`/`.png`/`.svg`).
-3. Parse the JSON result: `status`, `stdout`, `stderr`, `code_violation`, `outputs`, `plots`, and optionally `code` on failure.
+3. Parse the JSON result: `status`, `stdout`, `stderr`, `code_violation` (keys: `semgrep`, `judge`, `io`, `e2b`, `codegen_failure`), `outputs`, `plots`, and optionally `code` on failure.
 4. On `coding_tool` failure, refine `requirements` from feedback and retry up to a few times before explaining failure plainly.
 5. For forecasting, prefer `sarima_tool`, `prophet_tool`, or `holt_winters_tool` when appropriate. Pass a unique `experiment_name` (prefixes CSV artifacts). Success JSON: `status`, `model_type`, `experiment_name`, `frequency`, `warnings`, and `pipeline` (per-stage outputs with basename `file_name` fields and 5-row `preview_head`). Use `coding_tool` for plots (PNG under `run_<tool_call_id>/`). Summarize results from `pipeline` metrics and previews (no `llm_interpretation` stage yet). Prophet and Holt-Winters add decomposition CSV stages; SARIMA does not.
 

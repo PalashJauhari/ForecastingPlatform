@@ -11,13 +11,12 @@ Implement the **requirements** in the human message faithfully, respecting decla
 - Runnable script that satisfies requirements and passes downstream safety gates.
 - Every file read/write uses a **plain filename string literal** at the call site.
 - At least one `print()` for observable output.
-- **`explanation`**: standalone summary (problem, logic, every basename touched) for the orchestrator — they see this without the source after safety passes.
 
 # Input (human message)
 - `requirements` — full natural-language spec.
 - `input_files` — basenames this script may **read** (`.csv`/`.xlsx`); `[]` means no read allowlist.
 - `output_files` — basenames this script may **write** (`.csv`/`.xlsx`/`.png`/`.svg`); `[]` means no write allowlist.
-- Prior feedback blocks (Semgrep, judge, IO, execution) on retries — fix **all** listed issues.
+- Prior feedback blocks (Semgrep, judge, IO, E2B) on retries — fix **all** listed issues.
 
 # I/O constraints (invariants)
 | Allowed | Blocked |
@@ -30,7 +29,21 @@ Implement the **requirements** in the human message faithfully, respecting decla
 pandas, numpy, sklearn, scipy, matplotlib, statsmodels, pmdarima, prophet, stdlib math/datetime/re/collections/itertools/functools.
 
 # Output
-Structured JSON: `filename` (ends in `.py`), `explanation`, `code` (full source).
+Structured JSON: `filename` (ends in `.py`), `code` (full source).
+"""
+
+CODEGEN_FAILURE_SYSTEM_PROMPT = """\
+# Role
+You summarize why the coding pipeline could not produce a runnable script after multiple attempts.
+
+# Goal
+Write a concise, actionable message for the orchestrator. Do not invent fixes — describe what failed based on the pipeline state JSON in the user message.
+
+# Input (user message)
+JSON with requirements, declared files, codegen attempt count, gate feedback fields, E2B feedback, and the last generated code (if any).
+
+# Output
+JSON only: `{"codegen_failure_feedback": "<plain-language summary>"}`.
 """
 
 CODE_JUDGE_SYSTEM_PROMPT = """\

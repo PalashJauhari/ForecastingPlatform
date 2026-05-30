@@ -1,7 +1,7 @@
 """
 Load coding sub-agent settings from ``sub_agents/coding_sub_agent/.env``.
 
-Env matrix: ``CODING_MODEL``, judge models, E2B template name/key/timeouts, ``CODING_RECURSION_LIMIT``.
+Env matrix: ``CODING_MODEL``, judge models, E2B template name/key/timeouts, ``MAX_CODEGEN_ATTEMPTS``, ``CODING_RECURSION_LIMIT``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ E2B_TEMPLATE_ID = os.environ.get("E2B_TEMPLATE_ID", "").strip()
 CODING_MODEL = os.environ.get("CODING_MODEL", "gpt-4o-mini").strip()
 CODE_JUDGE_MODEL = os.environ.get("CODE_JUDGE_MODEL", CODING_MODEL).strip()
 IO_JUDGE_MODEL = os.environ.get("IO_JUDGE_MODEL", CODE_JUDGE_MODEL).strip()
-# ~6 graph steps per full pass (CodeGen through E2B retry); 24 ≈ 4 full cycles.
+MAX_CODEGEN_ATTEMPTS = int(os.environ.get("MAX_CODEGEN_ATTEMPTS", "3"))
+# LangGraph step cap — safety net only; normal give-up uses MAX_CODEGEN_ATTEMPTS + CodeGenFailure.
 CODING_RECURSION_LIMIT = int(os.environ.get("CODING_RECURSION_LIMIT", "24"))
 E2B_SANDBOX_TIMEOUT_SECONDS = int(os.environ.get("E2B_SANDBOX_TIMEOUT_SECONDS", "120"))
 E2B_EXECUTION_TIMEOUT_SECONDS = int(os.environ.get("E2B_EXECUTION_TIMEOUT_SECONDS", "120"))
