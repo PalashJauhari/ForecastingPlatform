@@ -9,6 +9,30 @@
 
 window.dash_clientside = window.dash_clientside || {};
 window.dash_clientside.gb_stream_ui = window.dash_clientside.gb_stream_ui || {};
+window.dash_clientside.gb_stream_ui._inFlight = false;
+
+function setComposerBusy(busy) {
+  var btn = document.getElementById("btn-send");
+  var input = document.getElementById("chat-input");
+  var host = document.getElementById("gb-composer-host");
+  if (btn) {
+    btn.classList.toggle("gb-composer-busy", !!busy);
+    btn.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  if (input) {
+    input.classList.toggle("gb-composer-busy", !!busy);
+    input.readOnly = !!busy;
+  }
+  if (host) host.classList.toggle("gb-composer-busy", !!busy);
+}
+
+function gbReadMessageText(messageText) {
+  var raw = (messageText || "").trim();
+  if (raw) return raw;
+  var inputEl = document.getElementById("chat-input");
+  if (inputEl && inputEl.value) return String(inputEl.value).trim();
+  return "";
+}
 
 function truncate(s, maxLen) {
   if (!s) return "";
@@ -16,7 +40,107 @@ function truncate(s, maxLen) {
   return s.slice(0, maxLen - 1) + "…";
 }
 
+function gbChatAreaScrollBottom() {
+  var chatArea = document.getElementById("chat-area");
+  if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function gbProgressScrollBottom(progressEl) {
+  if (!progressEl) return;
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+function gbEnsureThinkingPanelHost() {
+  var panel = document.getElementById("gb-thinking-panel");
+  if (panel) return panel;
+  var composer = document.getElementById("gb-composer-host");
+  if (!composer || !composer.parentElement) return null;
+  panel = document.createElement("div");
+  panel.id = "gb-thinking-panel";
+  panel.className = "gb-thinking-panel gb-thinking-panel--hidden";
+  composer.parentElement.insertBefore(panel, composer);
+  return panel;
+}
+
+/** Re-query progress container; rebuild card if Dash/React cleared the panel mid-stream. */
+function gbResolveProgressEl(fallback) {
+  var el = document.querySelector("#gb-thinking-panel .gb-inline-progress");
+  if (el && el.isConnected) return el;
+  if (fallback && fallback.isConnected) return fallback;
+  if (window.dash_clientside.gb_stream_ui._inFlight) {
+    return gbRebuildThinkingCard();
+  }
+  return fallback || null;
+}
+
+function gbBuildThinkingCardDOM() {
+  var card = document.createElement("div");
+  card.className = "gb-thinking-card";
+
+  var bar = document.createElement("button");
+  bar.type = "button";
+  bar.className = "gb-thinking-bar";
+  bar.setAttribute("aria-expanded", "true");
+
+  var spinner = document.createElement("span");
+  spinner.className = "gb-thinking-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+
+  var label = document.createElement("span");
+  label.className = "gb-thinking-label";
+  label.textContent = "Thinking";
+
+  var summary = document.createElement("span");
+  summary.className = "gb-thinking-summary";
+  summary.textContent = "Connecting…";
+
+  var chevron = document.createElement("span");
+  chevron.className = "gb-thinking-chevron";
+  chevron.textContent = "▾";
+  chevron.setAttribute("aria-hidden", "true");
+
+  bar.appendChild(spinner);
+  bar.appendChild(label);
+  bar.appendChild(summary);
+  bar.appendChild(chevron);
+
+  bar.addEventListener("click", function () {
+    var collapsed = card.classList.toggle("gb-thinking-card--collapsed");
+    bar.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  });
+
+  var body = document.createElement("div");
+  body.className = "gb-thinking-body";
+
+  var progressEl = document.createElement("div");
+  progressEl.className = "gb-inline-progress";
+
+  body.appendChild(progressEl);
+  card.appendChild(bar);
+  card.appendChild(body);
+
+  return { card: card, progressEl: progressEl };
+}
+
+function gbRebuildThinkingCard() {
+  var panel = gbEnsureThinkingPanelHost();
+  if (!panel) return null;
+  panel.className = "gb-thinking-panel";
+  panel.innerHTML = "";
+  var built = gbBuildThinkingCardDOM();
+  panel.appendChild(built.card);
+  return built.progressEl;
+}
+
+function gbUpdateThinkingSummary(boldText, restText) {
+  var summary = document.querySelector(".gb-thinking-summary");
+  if (!summary) return;
+  var text = (boldText || "") + (restText || "");
+  summary.textContent = truncate(text.trim(), 120) || "Working…";
+}
+
 function gbAppendProgressLine(progressEl, boldText, restText) {
+  progressEl = gbResolveProgressEl(progressEl);
   if (!progressEl) return;
   var row = document.createElement("div");
   row.className = "gb-progress-line";
@@ -27,16 +151,12 @@ function gbAppendProgressLine(progressEl, boldText, restText) {
   }
   if (restText) row.appendChild(document.createTextNode(restText));
   progressEl.appendChild(row);
-  progressEl.scrollTop = progressEl.scrollHeight;
-  gbChatAreaScrollBottom();
-}
-
-function gbChatAreaScrollBottom() {
-  var chatArea = document.getElementById("chat-area");
-  if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+  gbProgressScrollBottom(progressEl);
+  gbUpdateThinkingSummary(boldText, restText);
 }
 
 function gbCreateInlineUserBubble(chatArea, text) {
+  if (!chatArea) return;
   var row = document.createElement("div");
   row.className = "gb-live-turn";
   row.style.display = "flex";
@@ -48,60 +168,43 @@ function gbCreateInlineUserBubble(chatArea, text) {
   bubble.textContent = text;
   row.appendChild(bubble);
   chatArea.appendChild(row);
+  gbChatAreaScrollBottom();
 }
 
-function gbCreateInlineProgressBubble(messageText) {
+function gbOpenThinkingPanel(messageText) {
   var chatArea = document.getElementById("chat-area");
-  if (!chatArea) return null;
+  var panel = gbEnsureThinkingPanelHost();
+  if (!chatArea || !panel) return null;
 
-  var liveRows = chatArea.querySelectorAll(".gb-live-turn");
-  for (var i = 0; i < liveRows.length; i++) liveRows[i].remove();
+  gbClearStreamUI();
+
+  panel = gbEnsureThinkingPanelHost();
+  if (!panel) return null;
 
   gbCreateInlineUserBubble(chatArea, messageText);
 
-  var row = document.createElement("div");
-  row.className = "gb-live-turn";
-  row.style.display = "flex";
-  row.style.gap = "8px";
-  row.style.alignItems = "flex-start";
-  row.style.marginBottom = "10px";
+  panel.className = "gb-thinking-panel";
+  panel.innerHTML = "";
 
-  var logo = document.createElement("img");
-  logo.src = "/assets/gaussianblurr_favicon.png";
-  logo.alt = "Agentic Forecasting Platform";
-  logo.width = 32;
-  logo.height = 32;
-  logo.style.width = "32px";
-  logo.style.height = "32px";
-  logo.style.borderRadius = "8px";
-  logo.style.objectFit = "cover";
-  logo.style.flexShrink = "0";
+  var built = gbBuildThinkingCardDOM();
+  panel.appendChild(built.card);
 
-  var bubble = document.createElement("div");
-  bubble.className = "gb-live-progress-bubble";
-
-  var title = document.createElement("div");
-  title.className = "gb-live-progress-title";
-  title.textContent = "Working";
-
-  var progressEl = document.createElement("div");
-  progressEl.className = "gb-inline-progress";
-
-  bubble.appendChild(title);
-  bubble.appendChild(progressEl);
-  row.appendChild(logo);
-  row.appendChild(bubble);
-  chatArea.appendChild(row);
-  gbChatAreaScrollBottom();
-  return progressEl;
+  return built.progressEl;
 }
 
-function gbClearInlineProgress() {
+function gbClearStreamUI() {
   var liveRows = document.querySelectorAll(".gb-live-turn");
   for (var i = 0; i < liveRows.length; i++) liveRows[i].remove();
+
+  var panel = document.getElementById("gb-thinking-panel");
+  if (panel) {
+    panel.innerHTML = "";
+    panel.className = "gb-thinking-panel gb-thinking-panel--hidden";
+  }
 }
 
 function gbAppendProgressSub(progressEl, boldText, restText) {
+  progressEl = gbResolveProgressEl(progressEl);
   if (!progressEl) return;
   var row = document.createElement("div");
   row.className = "gb-progress-line gb-progress-sub";
@@ -114,8 +217,8 @@ function gbAppendProgressSub(progressEl, boldText, restText) {
     row.appendChild(document.createTextNode(restText ? " " + restText : ""));
   }
   progressEl.appendChild(row);
-  progressEl.scrollTop = progressEl.scrollHeight;
-  gbChatAreaScrollBottom();
+  gbProgressScrollBottom(progressEl);
+  if (boldText) gbUpdateThinkingSummary(boldText, restText);
 }
 
 /** Node ids not shown in the progress panel (bookkeeping; server may already omit them). */
@@ -134,10 +237,12 @@ function gbAppendOrchestratorProgress(progressEl, ev) {
   if (!tc.length && ev.had_tool_calls === false) {
     gbAppendProgressSub(progressEl, "", "(no tools)");
   }
-  progressEl.scrollTop = progressEl.scrollHeight;
+  gbProgressScrollBottom(progressEl);
 }
 
 function gbAppendTodosUnderNode(progressEl, ev) {
+  progressEl = gbResolveProgressEl(progressEl);
+  if (!progressEl) return;
   var todos = Array.isArray(ev.todos) ? ev.todos : [];
   if (!todos.length) return;
   var ul = document.createElement("ul");
@@ -152,7 +257,7 @@ function gbAppendTodosUnderNode(progressEl, ev) {
     ul.appendChild(li);
   }
   progressEl.appendChild(ul);
-  gbChatAreaScrollBottom();
+  gbProgressScrollBottom(progressEl);
 }
 
 function gbAppendRunToolsProgress(progressEl, ev) {
@@ -164,7 +269,7 @@ function gbAppendRunToolsProgress(progressEl, ev) {
     var name = (x && x.name) || "tool";
     gbAppendProgressSub(progressEl, name, "");
   }
-  progressEl.scrollTop = progressEl.scrollHeight;
+  gbProgressScrollBottom(progressEl);
 }
 
 /** Turn one SSE envelope into `{ bold, rest }` for monospace progress rows (non-special nodes). */
@@ -267,8 +372,17 @@ async function gbParseSSEStream(response, progressEl) {
   return donePayload;
 }
 
+function gbResetSubmitLock() {
+  window.dash_clientside.gb_stream_ui._inFlight = false;
+  window.gbStreamSubmitBusy = false;
+  setComposerBusy(false);
+}
+
+gbResetSubmitLock();
+
 window.dash_clientside.gb_stream_ui.clear_stream_progress = function (_uploadGen) {
-  gbClearInlineProgress();
+  gbClearStreamUI();
+  gbResetSubmitLock();
   return "";
 };
 
@@ -284,12 +398,16 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
 ) {
   var nu = window.dash_clientside.no_update;
 
-  var raw = (messageText || "").trim();
+  var raw = gbReadMessageText(messageText);
   if (!raw) return [nu, nu];
 
-  // Mutex until this handler resolves — Dash only commits ui-store afterward.
-  if (window.gbStreamSubmitBusy || !store) return [nu, nu];
+  if (window.dash_clientside.gb_stream_ui._inFlight || window.gbStreamSubmitBusy || !store) {
+    return [nu, nu];
+  }
+
+  window.dash_clientside.gb_stream_ui._inFlight = true;
   window.gbStreamSubmitBusy = true;
+  setComposerBusy(true);
 
   try {
     var chat = {};
@@ -305,7 +423,10 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
 
     var base = (apiBase || "http://127.0.0.1:8000").replace(/\/$/, "");
     var sessionId = chat.session_id;
-    var progressEl = gbCreateInlineProgressBubble(raw);
+    var progressEl = gbOpenThinkingPanel(raw);
+    if (!progressEl) {
+      throw new Error("UI thinking panel is unavailable — hard-refresh the page and try again.");
+    }
     gbAppendProgressLine(progressEl, "…", " — connecting");
 
     var endpoint = awaitingResume ? "/resume/stream" : "/run/stream";
@@ -335,7 +456,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
       var donePayload = await gbParseSSEStream(r, progressEl);
 
       if (!donePayload) {
-        gbClearInlineProgress();
+        gbClearStreamUI();
         chat.messages.push({
           role: "assistant",
           content: "Run finished without a final **done** event — check FastAPI logs or graph wiring.",
@@ -347,7 +468,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
         var q = donePayload.question || "Please clarify.";
         chat.awaiting_resume = true;
         chat.pending_question = q;
-        gbClearInlineProgress();
+        gbClearStreamUI();
         chat.messages.push({
           role: "assistant",
           content: "I need a bit more information before I proceed:\n\n**" + q + "**",
@@ -361,7 +482,7 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
       var summary = donePayload.summary || "Done.";
       var images = donePayload.images || [];
       var amsg = { role: "assistant", content: summary, output_images: images };
-      gbClearInlineProgress();
+      gbClearStreamUI();
       chat.messages.push(amsg);
       return [chat, ""];
     } catch (e) {
@@ -371,14 +492,26 @@ window.dash_clientside.gb_stream_ui.submit_message_stream = async function (
         chat.pending_question = restorePendingQuestion;
       }
       gbAppendProgressLine(progressEl, "error", " — " + truncate(err, 400));
-      gbClearInlineProgress();
+      gbClearStreamUI();
       chat.messages.push({
         role: "assistant",
         content: "Something went wrong: " + truncate(err, 800),
       });
       return [chat, ""];
     }
+  } catch (outerErr) {
+    var outerMsg = outerErr && outerErr.message ? String(outerErr.message) : String(outerErr);
+    var chatOuter = {};
+    Object.assign(chatOuter, store || {});
+    var outerMsgs = Array.isArray(chatOuter.messages) ? chatOuter.messages.slice() : [];
+    chatOuter.messages = outerMsgs;
+    gbClearStreamUI();
+    chatOuter.messages.push({
+      role: "assistant",
+      content: "Something went wrong: " + truncate(outerMsg, 800),
+    });
+    return [chatOuter, ""];
   } finally {
-    window.gbStreamSubmitBusy = false;
+    gbResetSubmitLock();
   }
 };

@@ -24,10 +24,10 @@ def sarima_tool(
     order: Optional[list[int]] = None,
     seasonal_order: Optional[list[int]] = None,
 ) -> str:
-    """Fit ARIMA/SARIMA on one univariate time series; return lean pipeline JSON with CSV/PNG basenames.
+    """Fit ARIMA/SARIMA on one univariate time series; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
-    Deterministic SARIMAX pipeline (validate → order selection → fit → residuals → forecast with 95% intervals → plots → summary).
+    Deterministic SARIMAX pipeline (validate → order selection → fit → residuals → forecast with 95% intervals → summary).
     Use instead of ``coding_tool`` when the user wants ARIMA/SARIMA specifically.
 
     ## When to use
@@ -57,9 +57,9 @@ def sarima_tool(
 
     ## Output (JSON string)
     **Success:** ``status``, ``model_type`` ``sarima``, ``experiment_name``, ``frequency``, ``warnings``,
-    ``pipeline`` (stages: data_validation, model_fit, fitted_values, forecast_values, residual_analysis,
-    fitted_plot, forecast_plot, residual_plot). File references are basenames only; plots are in-tool.
-    LLM summary stage is not emitted yet — use ``pipeline`` metrics, previews, and plots.
+    ``pipeline`` (stages: data_validation, model_fit, fitted_values, forecast_values, residual_analysis).
+    File references are basenames only. Use ``coding_tool`` for charts.
+    LLM summary stage is not emitted yet — use ``pipeline`` metrics and previews.
 
     **Error:** ``status`` ``error``; ``stage``; ``error.code`` / ``error.message``.
 

@@ -24,10 +24,10 @@ def holt_winters_tool(
     seasonal: str,
     damped_trend: bool = False,
 ) -> str:
-    """Fit Holt-Winters / exponential smoothing; return lean pipeline JSON with CSV/PNG basenames.
+    """Fit Holt-Winters / exponential smoothing; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
-    Deterministic Holt-Winters pipeline (validate → fit → residuals → forecast with 95% intervals → decomposition → plots → summary).
+    Deterministic Holt-Winters pipeline (validate → fit → residuals → forecast with 95% intervals → decomposition → summary).
     Use instead of ``coding_tool`` when the user wants Holt-Winters or additive/multiplicative exponential smoothing.
 
     ## When to use
@@ -60,7 +60,7 @@ def holt_winters_tool(
     ## Output (JSON string)
     **Success:** ``status``, ``model_type`` ``holt_winters``, ``experiment_name``, ``frequency``, ``warnings``,
     ``pipeline`` including decomposition stages. Forecast columns include ``lower_95`` / ``upper_95``.
-    Plots are included in-tool. LLM summary stage is not emitted yet — use ``pipeline`` metrics, previews, and plots.
+    Use ``coding_tool`` for charts. LLM summary stage is not emitted yet — use ``pipeline`` metrics and previews.
 
     **Error:** ``status`` ``error``; ``stage``; ``error.code`` / ``error.message``.
 

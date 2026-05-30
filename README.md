@@ -2,6 +2,29 @@
 
 Upload tabular data, ask questions in plain language, and get forecasts, analysis, and charts back in a streaming chat UI.
 
+## 30-second overview
+
+GaussianBlurr is a full-stack agentic data-analysis platform, not a notebook demo. It combines a LangGraph orchestration layer, deterministic forecasting tools, sandboxed AI-generated Python execution, session-scoped artifacts, and a streaming Dash interface into one workflow for tabular forecasting and analysis.
+
+It is designed to demonstrate judgment across product UX, AI orchestration, data tooling, safety boundaries, and operational visibility.
+
+## Engineering highlights
+
+- **Multi-agent orchestration** — A main LangGraph agent delegates planning to a planner sub-agent, executes tools, tracks todos, and resumes after human clarification interrupts.
+- **Deterministic + agentic analysis** — Standard forecasting paths use SARIMA, Prophet, or Holt-Winters; open-ended analysis routes through a controlled code-generation pipeline.
+- **Sandboxed code execution** — Generated Python is scanned, judged, and run in an isolated E2B sandbox with no internet access before artifacts are copied back.
+- **Defense-in-depth safety** — Basename-only file contracts, extension allowlists, Semgrep rules, LLM safety review, LLM IO allowlist review, and session path containment.
+- **Streaming product experience** — FastAPI streams graph progress over SSE; the Dash UI shows live planning/tool progress and inline plot artifacts.
+- **Session isolation** — Each conversation has its own upload/output workspace, with artifact serving guarded against path traversal.
+- **Observability-ready** — Optional Langfuse tracing covers graph nodes, nested sub-agent spans, forecasting pipelines, and coding-tool execution.
+
+## Example user flow
+
+1. Upload `sales.csv`.
+2. Ask: *“Forecast the next 12 months of revenue and show a trend chart.”*
+3. The planner creates the task checklist; the orchestrator chooses a forecasting tool or the sandboxed coding tool.
+4. The platform streams progress, writes forecast/fitted CSV artifacts, and renders plots inline in chat.
+
 ## Why this project
 
 - **Agentic workflow** — The platform plans tasks, runs tools, and tracks progress automatically instead of relying on a single static prompt.
@@ -27,7 +50,7 @@ Dash UI  →  FastAPI  →  LangGraph agent  →  tools (forecast / code / todos
                     artifacts in session workspace  →  plots inline in chat
 ```
 
-On each new message the agent profiles your files, summarizes long context, builds a todo list, then orchestrates tools until the task is done.
+On each new message the agent profiles your files, builds a todo list, then orchestrates tools until the task is done.
 
 ## Quickstart
 
@@ -100,7 +123,7 @@ Guardrails include basename-only paths, allowed extensions, and blocked OS/netwo
 
 ## Forecasting tools
 
-All three tools inherit **`ForecastingModel`** (`tools/forecasting/base.py`) and share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → single LLM summary → lean JSON.
+All three tools inherit **`ForecastingModel`** (`tools/forecasting/base.py`) and share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → lean JSON.
 
 - **SARIMA tool** (`sarima_tool`) — Auto/manual ARIMA order, SARIMAX fit, 95% prediction intervals, Ljung-Box/Jarque-Bera diagnostics. Strict data rules (no missing target values).
 - **Prophet tool** (`prophet_tool`) — Trend + weekly/monthly/yearly seasonality, MAD residual checks. Tolerates missing target rows. Includes fitted/forecast decomposition.

@@ -39,13 +39,14 @@ from observability.langfuse_handler import (
     add_trace_context_to_config,
     flush_langfuse,
     is_tracing_enabled,
+    serialize_messages,
     trace_context_from_runnable_config,
     traced_generation,
     traced_span,
     tracing_root,
     update_llm_generation,
 )
-from prompts.graph_prompts import SYSTEM_PROMPT
+from prompts.graph_prompts import FINAL_ANSWER_PROMPT, SYSTEM_PROMPT
 from session_paths import session_id_from_config
 from tools.coding_tools.coding_tool import coding_tool
 from sub_agents.planner_sub_agent.graph import get_planner_graph
@@ -191,12 +192,41 @@ def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 
 
 def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Terminal hook after a non-tool assistant reply."""
-    del state
+    """Synthesize the user-facing reply from session context and this turn's messages."""
+    messages = state["messages"]
+    summary = state.get("message_summary", "")
+    raw_todos = state.get("todos") or []
+    data_profile_rows = state.get("data_profile", [])
+
+    context = (
+        "## File Rules\n"
+        "Refer to every CSV/Excel by filename only (for example `sales.csv`). "
+        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
+        "## Session Workspace\n"
+        f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
+        "## Current Todo List\n"
+        f"{json.dumps(raw_todos, indent=2)}\n\n"
+        "## Conversation Summary\n"
+        f"{summary}\n\n"
+        "## Messages\n"
+        f"{json.dumps(serialize_messages(messages), indent=2, ensure_ascii=False, default=str)}\n\n"
+        "## Task\n"
+        "Write the final reply to the user's latest request using the conversation above.\n"
+    )
+    final_messages = [SystemMessage(content=FINAL_ANSWER_PROMPT), HumanMessage(content=context)]
+    model = ORCHESTRATOR_MODEL
     trace_context = trace_context_from_runnable_config(config)
-    with traced_span("FinalAnswer", trace_context=trace_context, metadata={"session_id": session_id_from_config(config)}):
-        pass
-    return {}
+
+    with traced_span("FinalAnswer", trace_context=trace_context, metadata={"session_id": session_id_from_config(config)}) as node_span:
+        with traced_generation("FinalAnswer-llm", model=model) as gen:
+            response = llm.invoke(final_messages, config=config)
+            if gen is not None:
+                update_llm_generation(gen, model=model, raw=response)
+        if node_span is not None:
+            reply = response.content if isinstance(response.content, str) else str(response.content or "")
+            node_span.update(output={"reply_preview": reply, "had_summary_context": bool(summary)})
+
+    return {"messages": [response]}
 
 
 # ---------------------------------------------------------------------------

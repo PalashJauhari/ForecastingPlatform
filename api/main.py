@@ -448,7 +448,13 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
             event["summary_preview"] = preview + ("…" if len(summary.strip()) > 120 else "")
 
     elif node_name == "FinalAnswer":
-        event["label"] = "Assistant reply finalized"
+        event["label"] = "Final reply"
+        msgs = payload.get("messages") or []
+        for msg in reversed(msgs):
+            if isinstance(msg, AIMessage) and msg.content:
+                preview = str(msg.content).strip().split("\n")[0][:120]
+                event["summary_preview"] = preview + ("…" if len(str(msg.content).strip()) > 120 else "")
+                break
 
     else:
         event["label"] = node_name.replace("_", " ").title()

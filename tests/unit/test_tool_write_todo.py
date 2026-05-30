@@ -1,4 +1,4 @@
-"""Unit tests for planner ``write_todo`` tool."""
+"""Unit tests for planner ``write_todo`` tool and ``merge_todos`` reducer."""
 
 from types import SimpleNamespace
 
@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from sub_agents.planner_sub_agent.tools.write_todo import write_todo
+from tools.planning.update_todo import merge_todos
 
 
 def make_runtime(state_todos: list | None = None) -> SimpleNamespace:
@@ -15,6 +16,26 @@ def make_runtime(state_todos: list | None = None) -> SimpleNamespace:
         config={"configurable": {"thread_id": "pytest-session-unit"}},
         tool_call_id="call-1",
     )
+
+
+def test_merge_todos_right_none_keeps_left():
+    """When right is None, keep a copy of the existing todo list."""
+    left = [{"id": "1", "content": "A", "status": "pending"}]
+    result = merge_todos(left, None)
+    assert result == left
+    assert result is not left
+
+
+def test_merge_todos_both_none():
+    """Empty state when both left and right are None."""
+    assert merge_todos(None, None) == []
+
+
+def test_merge_todos_right_replaces_left():
+    """When right is set, last write wins (full list replace)."""
+    left = [{"id": "1", "content": "Old", "status": "pending"}]
+    right = [{"id": "1", "content": "New", "status": "pending"}]
+    assert merge_todos(left, right) == right
 
 
 def test_write_todo_assigns_sequential_ids():

@@ -271,7 +271,9 @@ def _build_layout() -> html.Div:
                                     "minHeight": 0,
                                 },
                             ),
+                            html.Div(id="gb-thinking-panel", className="gb-thinking-panel gb-thinking-panel--hidden"),
                             html.Div(
+                                id="gb-composer-host",
                                 style={
                                     "flexShrink": 0,
                                     "padding": "8px 12px 14px",

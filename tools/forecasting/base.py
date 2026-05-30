@@ -454,15 +454,16 @@ class ForecastingModel(ABC):
 
                 fitted_csv = self.artifact_basename(experiment_name, "fitted", "csv")
                 forecast_csv = self.artifact_basename(experiment_name, "forecast", "csv")
-                fitted_plot = self.artifact_basename(experiment_name, "fitted", "png")
-                forecast_plot = self.artifact_basename(experiment_name, "forecast", "png")
-                residual_plot = self.artifact_basename(experiment_name, "residuals", "png")
+                # Plots disabled — use coding_tool for charts (PNG under run_<tool_call_id>/ for UI).
+                # fitted_plot = self.artifact_basename(experiment_name, "fitted", "png")
+                # forecast_plot = self.artifact_basename(experiment_name, "forecast", "png")
+                # residual_plot = self.artifact_basename(experiment_name, "residuals", "png")
 
                 self.save_table(fitted_table, self.session_id, fitted_csv, "save_fitted")
                 self.save_table(forecast_table, self.session_id, forecast_csv, "save_forecast")
-                self.save_plot(self.plot_fitted(fitted_table), self.session_id, fitted_plot, "save_fitted_plot")
-                self.save_plot(self.plot_forecast(forecast_table), self.session_id, forecast_plot, "save_forecast_plot")
-                self.save_plot(self.plot_residuals(fitted_table), self.session_id, residual_plot, "save_residual_plot")
+                # self.save_plot(self.plot_fitted(fitted_table), self.session_id, fitted_plot, "save_fitted_plot")
+                # self.save_plot(self.plot_forecast(forecast_table), self.session_id, forecast_plot, "save_forecast_plot")
+                # self.save_plot(self.plot_residuals(fitted_table), self.session_id, residual_plot, "save_residual_plot")
 
                 pipeline: dict[str, Any] = {
                     "data_validation": {
@@ -499,33 +500,18 @@ class ForecastingModel(ABC):
                         "status": residual_lean.get("status", "pass"),
                         "output": residual_lean,
                     },
-                    "fitted_plot": {
-                        "description": "Chart of actual vs fitted.",
-                        "status": "success",
-                        "output": {"file_name": fitted_plot},
-                    },
-                    "forecast_plot": {
-                        "description": "Chart of forecast.",
-                        "status": "success",
-                        "output": {"file_name": forecast_plot},
-                    },
-                    "residual_plot": {
-                        "description": "Chart of residuals over time.",
-                        "status": "success",
-                        "output": {"file_name": residual_plot},
-                    },
                 }
 
                 if decomposition_table is not None:
                     decomp_csv = self.artifact_basename(experiment_name, "decomposition", "csv")
-                    decomp_plot = self.artifact_basename(experiment_name, "decomposition", "png")
+                    # decomp_plot = self.artifact_basename(experiment_name, "decomposition", "png")
                     self.save_table(decomposition_table, self.session_id, decomp_csv, "save_decomposition")
-                    self.save_plot(
-                        self.plot_decomposition(decomposition_table),
-                        self.session_id,
-                        decomp_plot,
-                        "save_decomposition_plot",
-                    )
+                    # self.save_plot(
+                    #     self.plot_decomposition(decomposition_table),
+                    #     self.session_id,
+                    #     decomp_plot,
+                    #     "save_decomposition_plot",
+                    # )
                     fitted_decomp = decomposition_table[
                         decomposition_table["period_type"] == "fitted"
                     ]
@@ -546,11 +532,6 @@ class ForecastingModel(ABC):
                         "output": {
                             "preview_head": self.preview_head(forecast_decomp),
                         },
-                    }
-                    pipeline["decomposition_plot"] = {
-                        "description": "Decomposition chart.",
-                        "status": "success",
-                        "output": {"file_name": decomp_plot},
                     }
 
                 # Brief: LLM summary deferred; run_llm_interpretation_summary kept on base for later.
