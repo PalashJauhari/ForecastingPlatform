@@ -7,5 +7,5 @@ every middleware step is visible in the node logic.
 
 Modules
     context_editing  — token-aware truncation + running summarisation.
-    llm_rate_limit   — shared ``InMemoryRateLimiter`` for ``ChatOpenAI`` (from ``config.yaml``).
+    llm_rate_limit   — shared ``InMemoryRateLimiter`` for ``ChatOpenAI`` (from ``MAIN_RATE_LIMIT_*`` env).
 """

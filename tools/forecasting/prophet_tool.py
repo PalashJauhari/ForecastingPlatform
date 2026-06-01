@@ -23,10 +23,10 @@ def prophet_tool(
     monthly_seasonality: bool,
     yearly_seasonality: bool,
 ) -> str:
-    """Fit Facebook Prophet on one univariate time series; return lean pipeline JSON with CSV/PNG basenames.
+    """Fit Facebook Prophet on one univariate time series; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
-    Deterministic Prophet pipeline (validate → fit → residuals → forecast → decomposition → plots → summary).
+    Deterministic Prophet pipeline (validate → fit → residuals → forecast → decomposition → summary).
     Use instead of ``coding_tool`` when Prophet trend + seasonality decomposition is appropriate.
 
     ## When to use
@@ -57,9 +57,9 @@ def prophet_tool(
 
     ## Output (JSON string)
     **Success:** ``status``, ``model_type`` ``prophet``, ``experiment_name``, ``frequency``, ``warnings``,
-    ``pipeline`` including fitted/forecast decomposition previews and decomposition plot.
-    Artifacts: ``{experiment_name}_fitted.csv``, ``_forecast.csv``, ``_decomposition.csv``, and matching PNGs.
-    LLM summary stage is not emitted yet — use ``pipeline`` metrics, previews, and plots.
+    ``pipeline`` including fitted/forecast decomposition previews.
+    Artifacts: ``{experiment_name}_fitted.csv``, ``_forecast.csv``, ``_decomposition.csv``. Use ``coding_tool`` for charts.
+    LLM summary stage is not emitted yet — use ``pipeline`` metrics and previews.
 
     **Error:** ``status`` ``error``; ``stage``; ``error.code`` / ``error.message``.
 

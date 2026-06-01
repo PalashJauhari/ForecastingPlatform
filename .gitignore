@@ -7,9 +7,7 @@
 !.env.example
 !**/.env.example
 
-# Sub-agent secrets (copy from .env.example; never commit real keys)
-#   sub_agents/planner_sub_agent/.env
-#   sub_agents/coding_sub_agent/.env
+# Runtime secrets live in root .env only (never commit real keys).
 
 # --- Python ---
 __pycache__/

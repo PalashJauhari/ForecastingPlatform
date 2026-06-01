@@ -10,10 +10,9 @@ Uses ``RemoveMessage`` to work with the ``add_messages`` reducer.
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 from typing import Any
 
-import yaml
 from langchain_core.messages import (
     HumanMessage,
     RemoveMessage,
@@ -23,9 +22,12 @@ from langchain_core.messages import (
 from middleware.llm_client import make_llm
 from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-SUMMARY_MODEL = cfg["models"].get("message_summarisation", "gpt-4o-mini")
+# Prefer explicit summary model; fall back to orchestrator model when unset.
+SUMMARY_MODEL = (
+    (os.environ.get("MAIN_MODEL_MESSAGE_SUMMARISATION") or "").strip()
+    or (os.environ.get("MAIN_MODEL_ORCHESTRATOR") or "").strip()
+    or "gpt-5.4-mini"
+)
 
 SUMMARY_SYSTEM = """\
 # Role

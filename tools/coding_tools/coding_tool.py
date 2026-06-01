@@ -25,7 +25,7 @@ def coding_tool(
     output_files: list[str],
     runtime: ToolRuntime,
 ) -> str:
-    """Generate Python, scan with Semgrep and LLM judges, run in E2B sandbox. Returns JSON."""
+    """Generate Python, scan with Semgrep, run in E2B sandbox. Returns JSON."""
     validated = CodingToolInput(
         requirements=requirements,
         input_files=input_files,

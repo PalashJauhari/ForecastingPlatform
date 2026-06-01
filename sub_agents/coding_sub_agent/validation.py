@@ -81,13 +81,15 @@ class CodeGenerationOutput(BaseModel):
     """Structured response returned by the code generation model."""
 
     filename: str = Field(description="Descriptive Python filename ending in .py.")
-    explanation: str = Field(
-        description=(
-            "Concise prose for the orchestrator: problem solved, logic, and every "
-            "input/output basename touched."
-        ),
-    )
     code: str = Field(description="Full runnable Python source.")
+
+
+class CodeGenFailureOutput(BaseModel):
+    """Structured response when codegen retries are exhausted."""
+
+    codegen_failure_feedback: str = Field(
+        description="Concise summary for the orchestrator: what was tried and why coding could not succeed.",
+    )
 
 
 class JudgeOutput(BaseModel):

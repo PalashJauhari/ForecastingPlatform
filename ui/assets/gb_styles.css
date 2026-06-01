@@ -45,26 +45,119 @@ body {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
 }
 
-.gb-live-progress-bubble {
-  max-width: 640px;
-  padding: 11px 14px 10px;
-  border-radius: 14px;
-  background: #fff;
-  border: 1px solid #e8e8e6;
-  color: #1a1a1a;
-  font-size: 14px;
-  line-height: 1.5;
+/* Full-width thinking panel above composer (not chat bubbles) */
+.gb-thinking-panel {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0 12px 8px;
+  box-sizing: border-box;
 }
 
-.gb-live-progress-title {
-  margin-bottom: 6px;
+.gb-thinking-panel--hidden {
+  display: none;
+}
+
+.gb-thinking-card {
+  width: 100%;
+  border: 1px solid #e0e0dc;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
+.gb-thinking-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: #f5f5f3;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: #1a1a1a;
+  box-sizing: border-box;
+}
+
+.gb-thinking-bar:hover {
+  background: #efefec;
+}
+
+.gb-thinking-label {
   font-size: 13px;
   font-weight: 600;
   color: #333;
+  flex-shrink: 0;
+}
+
+.gb-thinking-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #6b6b68;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gb-thinking-chevron {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: #9a9a97;
+  transition: transform 0.15s ease;
+}
+
+.gb-thinking-card--collapsed .gb-thinking-chevron {
+  transform: rotate(-90deg);
+}
+
+.gb-thinking-card--collapsed .gb-thinking-body {
+  display: none;
+}
+
+.gb-thinking-body {
+  border-top: 1px solid #ecece9;
+  padding: 10px 14px 12px;
+  background: #fff;
+}
+
+.gb-thinking-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #d4d4d1;
+  border-top-color: #2c2c2a;
+  border-radius: 50%;
+  animation: gb-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes gb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+#btn-send.gb-composer-busy,
+#chat-input.gb-composer-busy {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+#btn-send.gb-composer-busy {
+  background: #6a6a67 !important;
+  pointer-events: none;
+}
+
+#chat-input.gb-composer-busy {
+  background: #f5f5f3;
 }
 
 .gb-inline-progress {
-  max-height: 220px;
+  max-height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
   font-size: 11px;

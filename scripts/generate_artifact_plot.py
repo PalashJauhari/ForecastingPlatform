@@ -52,10 +52,7 @@ def build_main_graph():
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
             return "RunTools"
-        return "TodoGate"
-
-    def route_after_todo_gate(state):  # noqa: ANN001
-        return "FinalAnswer" if state.get("todo_gate_passed") else "Orchestrator"
+        return "FinalAnswer"
 
     builder = StateGraph(MainStubState)
     for name in (
@@ -65,7 +62,6 @@ def build_main_graph():
         "Orchestrator",
         "RunTools",
         "ProfileSavedData_PostTools",
-        "TodoGate",
         "FinalAnswer",
     ):
         builder.add_node(name, noop)
@@ -77,12 +73,7 @@ def build_main_graph():
     builder.add_conditional_edges(
         "Orchestrator",
         route_after_orchestrator,
-        {"RunTools": "RunTools", "TodoGate": "TodoGate"},
-    )
-    builder.add_conditional_edges(
-        "TodoGate",
-        route_after_todo_gate,
-        {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
+        {"RunTools": "RunTools", "FinalAnswer": "FinalAnswer"},
     )
     builder.add_edge("RunTools", "ProfileSavedData_PostTools")
     builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
@@ -118,8 +109,6 @@ def build_planner_graph():
 class CodingStubState(TypedDict):
     code: str
     semgrep_feedback: NotRequired[str]
-    judge_feedback: NotRequired[str]
-    io_feedback: NotRequired[str]
     execution_feedback: NotRequired[str]
     status: NotRequired[str]
 
@@ -127,16 +116,6 @@ class CodingStubState(TypedDict):
 def build_coding_graph():
     def route_after_semgrep(state: CodingStubState) -> str:
         if (state.get("semgrep_feedback") or "").strip():
-            return "CodeGen"
-        return "SafetyJudge"
-
-    def route_after_safety_judge(state: CodingStubState) -> str:
-        if (state.get("judge_feedback") or "").strip():
-            return "CodeGen"
-        return "IOAllowlistJudge"
-
-    def route_after_io_judge(state: CodingStubState) -> str:
-        if (state.get("io_feedback") or "").strip():
             return "CodeGen"
         return "E2BExecute"
 
@@ -149,8 +128,6 @@ def build_coding_graph():
     for name in (
         "CodeGen",
         "SemgrepScan",
-        "SafetyJudge",
-        "IOAllowlistJudge",
         "E2BExecute",
     ):
         builder.add_node(name, noop)
@@ -160,16 +137,6 @@ def build_coding_graph():
     builder.add_conditional_edges(
         "SemgrepScan",
         route_after_semgrep,
-        {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "SafetyJudge",
-        route_after_safety_judge,
-        {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "IOAllowlistJudge",
-        route_after_io_judge,
         {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(

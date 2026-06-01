@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Launch Forecasting Platform: API (uvicorn) + UI (Plotly Dash).
+# Start Forecasting Platform: API (uvicorn) + UI (Plotly Dash).
 #
 # Hardened launcher:
 # - Frees stale processes on the API/UI ports before starting (prevents the
-#   "errno 48: address already in use" silent half-launch where Dash starts
+#   "errno 48: address already in use" silent half-start where Dash starts
 #   but the new uvicorn dies, leaving Dash to talk to an old backend).
 # - Aborts loudly if the API fails to bind, instead of silently starting Dash
 #   against a dead backend.
@@ -24,7 +24,7 @@ UI_PORT=8501
 API_PID=""
 UI_PID=""
 
-# Kill any process currently bound to ``port`` so a fresh launch can start.
+# Kill any process currently bound to ``port`` so a fresh start can proceed.
 free_port() {
   local port="$1"
   local pids
@@ -76,7 +76,7 @@ trap cleanup EXIT INT TERM HUP
 free_port "$API_PORT"
 free_port "$UI_PORT"
 
-# Start API in background. No --reload so the process inherits PYTHONPATH (reloader subprocess would not).
+# Start API in background. No --reload so the process inherits PYTHONPATH.
 echo "Starting API (uvicorn) on http://127.0.0.1:$API_PORT ..."
 uvicorn api.main:app --host 127.0.0.1 --port "$API_PORT" &
 API_PID=$!
@@ -99,8 +99,7 @@ if [ "$bound" != "1" ]; then
   exit 1
 fi
 
-# Start UI in background and wait on it. Closing the UI (Ctrl+C) triggers cleanup
-# via the trap, which also tears down the API.
+# Start UI in background and wait on it. Closing the UI (Ctrl+C) triggers cleanup.
 echo "Starting UI (Dash) on http://127.0.0.1:$UI_PORT ..."
 python ui/dash_app.py &
 UI_PID=$!
