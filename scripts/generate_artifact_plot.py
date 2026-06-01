@@ -109,8 +109,6 @@ def build_planner_graph():
 class CodingStubState(TypedDict):
     code: str
     semgrep_feedback: NotRequired[str]
-    judge_feedback: NotRequired[str]
-    io_feedback: NotRequired[str]
     execution_feedback: NotRequired[str]
     status: NotRequired[str]
 
@@ -118,16 +116,6 @@ class CodingStubState(TypedDict):
 def build_coding_graph():
     def route_after_semgrep(state: CodingStubState) -> str:
         if (state.get("semgrep_feedback") or "").strip():
-            return "CodeGen"
-        return "SafetyJudge"
-
-    def route_after_safety_judge(state: CodingStubState) -> str:
-        if (state.get("judge_feedback") or "").strip():
-            return "CodeGen"
-        return "IOAllowlistJudge"
-
-    def route_after_io_judge(state: CodingStubState) -> str:
-        if (state.get("io_feedback") or "").strip():
             return "CodeGen"
         return "E2BExecute"
 
@@ -140,8 +128,6 @@ def build_coding_graph():
     for name in (
         "CodeGen",
         "SemgrepScan",
-        "SafetyJudge",
-        "IOAllowlistJudge",
         "E2BExecute",
     ):
         builder.add_node(name, noop)
@@ -151,16 +137,6 @@ def build_coding_graph():
     builder.add_conditional_edges(
         "SemgrepScan",
         route_after_semgrep,
-        {"SafetyJudge": "SafetyJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "SafetyJudge",
-        route_after_safety_judge,
-        {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGen": "CodeGen"},
-    )
-    builder.add_conditional_edges(
-        "IOAllowlistJudge",
-        route_after_io_judge,
         {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
     )
     builder.add_conditional_edges(

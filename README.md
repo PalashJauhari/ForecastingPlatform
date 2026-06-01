@@ -45,7 +45,7 @@ It is built to show solid product UX, safe automation, and optional operational 
 | Plans and tracks tasks automatically instead of one long prompt | LangGraph main graph + planner and coding sub-graphs |
 | One folder per chat for uploads and outputs | Basename-only file contracts and path containment |
 | Trusted forecast models when you want structure | Shared `ForecastingModel` pipeline + three `@tool` wrappers |
-| Custom code only after scans and reviews, then E2B sandbox | Semgrep + LLM judges + optional Langfuse spans |
+| Custom code only after Semgrep scan, then E2B sandbox | Semgrep static scan + internet-off E2B + optional Langfuse spans |
 | Live progress in the UI | FastAPI SSE (`/run/stream`) + Dash client |
 
 ---
@@ -137,17 +137,24 @@ Upload a CSV in the sidebar, ask a forecasting or analysis question, and watch p
 When the orchestrator needs **custom Python** (charts, transforms, etc.), it calls the **coding tool**, which runs an internal pipeline:
 
 ```text
-Generate code → Semgrep scan → Safety judge → IO allowlist judge → Run in E2B sandbox
-         ↑______________________________________________|
+Generate code → Semgrep scan → Run in E2B sandbox (internet-off)
+         ↑________________________________|
               retry up to CODING_MAX_CODEGEN_ATTEMPTS (default 3)
 ```
 
 **In plain terms**
 
 1. The system writes Python for your task and the file names it may read or write.  
-2. Automated checks (pattern rules + AI reviewers) must pass before anything runs.  
-3. Approved scripts run in a **fresh, internet-off cloud sandbox**; outputs are copied back to your session.  
-4. If something fails (unsafe code, wrong files, runtime error), it **tries again** with feedback—up to a configured limit—then reports failure clearly.
+2. **Semgrep** static rules must pass (blocks OS APIs, network, subprocess, raw file I/O, etc.) before anything runs.  
+3. Approved scripts run in a **fresh, internet-off cloud sandbox** (`allow_internet_access=False`); outputs are copied back to your session.  
+4. If something fails (unsafe code, runtime error), it **tries again** with feedback—up to a configured limit—then reports failure clearly.
+
+**Defense in depth**
+
+| Layer | What it enforces |
+|-------|------------------|
+| Semgrep (pre-run) | No `import os`, `socket`, `subprocess`, `open()`, network clients, etc. |
+| E2B (at run time) | Sandbox has **no internet access**, even if generated code evades static checks |
 
 **Where files go**
 
@@ -161,7 +168,7 @@ Generate code → Semgrep scan → Safety judge → IO allowlist judge → Run i
 | `CODING_MODEL` | Model for code generation on attempts 1 … (MAX − 1) |
 | `CODING_MODEL_LAST_ATTEMPT` | Optional stronger model **only** on the last permitted attempt (when attempt count equals `CODING_MAX_CODEGEN_ATTEMPTS`). Leave empty to always use `CODING_MODEL`. |
 | `CODING_MAX_CODEGEN_ATTEMPTS` | How many times the pipeline may **regenerate** code after a gate or sandbox failure (default `3`) |
-| `CODING_CODE_JUDGE_MODEL` / `CODING_IO_JUDGE_MODEL` | Models for safety and file-allowlist review |
+| `CODING_CODE_JUDGE_MODEL` / `CODING_IO_JUDGE_MODEL` | Reserved for LLM judges (currently disabled; Semgrep-only pipeline) |
 
 Example: with `CODING_MAX_CODEGEN_ATTEMPTS=3`, attempts 1–2 use `CODING_MODEL`; attempt 3 can use `CODING_MODEL_LAST_ATTEMPT` (e.g. a larger model) if you set it.
 
@@ -230,7 +237,7 @@ api/                 FastAPI service and SSE streaming
 graph/               Main LangGraph agent (AnalysisGraph)
 sub_agents/
   planner_sub_agent/   PlannerGraph — todos, ask_user interrupt
-  coding_sub_agent/    CodingGraph — codegen, scans, judges, E2B
+  coding_sub_agent/    CodingGraph — codegen, Semgrep scan, E2B
     e2b/               Template build + sandbox requirements
     code_scan/         Semgrep rules + static scan
 tools/               Main-graph tools only

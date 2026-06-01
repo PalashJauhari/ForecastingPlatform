@@ -8,13 +8,26 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from sub_agents.coding_sub_agent.code_scan.safety_check import SafetyCheckResult
 
 SEMGREP_CONFIG = Path(__file__).resolve().parent / "codegen_scan_semgrep.yaml"
+
+
+def _semgrep_executable() -> str:
+    """Resolve semgrep CLI: PATH first, then active venv ``bin/`` (``sys.prefix``)."""
+    found = shutil.which("semgrep")
+    if found:
+        return found
+    candidate = Path(sys.prefix) / "bin" / "semgrep"
+    if candidate.is_file():
+        return str(candidate)
+    return "semgrep"
 
 
 def format_semgrep_issues(violations: list[dict]) -> str:
@@ -62,7 +75,7 @@ def run_semgrep_scan(code: str) -> SafetyCheckResult:
 
     try:
         result = subprocess.run(
-            ["semgrep", "--config", str(SEMGREP_CONFIG), "--json", tmp_path],
+            [_semgrep_executable(), "--config", str(SEMGREP_CONFIG), "--json", tmp_path],
             capture_output=True,
             text=True,
             timeout=30,

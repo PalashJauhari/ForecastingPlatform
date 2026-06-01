@@ -1,5 +1,7 @@
 # codegen_scan_semgrep.yaml
 # Complete semgrep rules for LLM generated code sandbox
+# REQUIRED while LLM judges are disabled: OS/network rules (block-os, block-network, etc.)
+# must stay active — they are the primary static safety gate before E2B execution.
 # Tabular I/O: only pd.read_* / df.to_* with bare .csv / .xlsx string literals
 # Plot I/O:    only plt.savefig / Figure.savefig with bare .png / .svg string literals
 # Do not use pipeline_run.py as a data/plot path (tool-managed runner)

@@ -1,5 +1,7 @@
 """
-Coding sub-graph: CodeGenLimitGate → CodeGen → SemgrepScan → SafetyJudge → IOAllowlistJudge → E2BExecute.
+Coding sub-graph: CodeGenLimitGate → CodeGen → SemgrepScan → E2BExecute.
+
+SafetyJudge and IOAllowlistJudge are temporarily disabled (Semgrep-only pipeline).
 """
 
 from __future__ import annotations
@@ -19,10 +21,13 @@ from langgraph.graph import END, StateGraph
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
 from observability.langfuse_handler import add_trace_context_to_config, current_trace_context, safe_reset_contextvar, trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
-from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL, CODING_GRAPH_RECURSION_LIMIT, CODING_MODEL, CODING_MODEL_LAST_ATTEMPT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, IO_JUDGE_MODEL, MAX_CODEGEN_ATTEMPTS, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
-from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODE_JUDGE_SYSTEM_PROMPT, CODEGEN_FAILURE_SYSTEM_PROMPT, IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
+from sub_agents.coding_sub_agent.config import CODING_GRAPH_RECURSION_LIMIT, CODING_MODEL, CODING_MODEL_LAST_ATTEMPT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, MAX_CODEGEN_ATTEMPTS, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
+# DISABLED: LLM judges — CODE_JUDGE_MODEL, IO_JUDGE_MODEL
+from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODEGEN_FAILURE_SYSTEM_PROMPT
+# DISABLED: LLM judges — CODE_JUDGE_SYSTEM_PROMPT, IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
 from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
-from sub_agents.coding_sub_agent.validation import CodeGenFailureOutput, CodeGenerationOutput, JudgeOutput, sanitize_run_id
+from sub_agents.coding_sub_agent.validation import CodeGenFailureOutput, CodeGenerationOutput, sanitize_run_id
+# DISABLED: LLM judges — JudgeOutput
 
 # Parent trace snapshot for nested invokes (coding_tool → run); LangGraph drops OTel context.
 coding_trace_ctx: ContextVar[TraceContext | None] = ContextVar("coding_trace_ctx", default=None)
@@ -133,12 +138,7 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
     semgrep_fb = (state["semgrep_feedback"] or "").strip()
     if semgrep_fb:
         context_content += f"\n\n## Semgrep\n{semgrep_fb}"
-    judge_fb = (state["judge_feedback"] or "").strip()
-    if judge_fb:
-        context_content += f"\n\n## Safety judge\n{judge_fb}"
-    io_fb = (state["io_feedback"] or "").strip()
-    if io_fb:
-        context_content += f"\n\n## IO allowlist\n{io_fb}"
+    # DISABLED: LLM judges — judge_feedback / io_feedback retry context
     e2b_fb = (state["e2b_feedback"] or "").strip()
     if e2b_fb:
         context_content += f"\n\n## E2B\n{e2b_fb}"
@@ -196,75 +196,77 @@ def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[s
 
 
 # ---------------------------------------------------------------------------
-# SafetyJudge — LLM policy review (inlined)
+# DISABLED: SafetyJudge — LLM policy review (re-enable with LLM judges)
 # ---------------------------------------------------------------------------
-
-
-def safety_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Ask the judge model to accept or reject the script for safety policy."""
-    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
-    code = (state.get("code") or "").strip()
-    llm = ChatOpenAI(model=CODE_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
-    task_spec = json.dumps(
-        {"requirements": state["requirements"], "input_files": state.get("input_files") or [], "output_files": state.get("output_files") or []},
-        ensure_ascii=False,
-        indent=2,
-    )
-    system_content = CODE_JUDGE_SYSTEM_PROMPT + "\n\n## Task\n" + task_spec.strip()
-    human_content = f"```python\n{code}\n```"
-    try:
-        with traced_span("SafetyJudge", trace_context=ctx) as node_span:
-            with traced_generation("SafetyJudge-llm", model=CODE_JUDGE_MODEL, trace_context=ctx) as gen:
-                raw = llm.invoke([SystemMessage(content=system_content), HumanMessage(content=human_content)])
-                resp, raw_msg = parse_structured_output(raw, JudgeOutput)
-                if gen is not None:
-                    update_llm_generation(gen, model=CODE_JUDGE_MODEL, raw=raw_msg)
-                if isinstance(resp, dict):
-                    resp = JudgeOutput.model_validate(resp)
-                passed = resp.passed
-                if node_span is not None:
-                    node_span.update(output={"passed": passed})
-    except Exception as exc:
-        return {"judge_feedback": f"Judge model failed to produce valid structured output: {exc}"}
-
-    if resp.passed:
-        return {"judge_feedback": ""}
-    detail = (resp.detail or "").strip() or "LLM judge rejected the code (no reason provided)."
-    return {"judge_feedback": detail}
+#
+# def safety_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+#     """Ask the judge model to accept or reject the script for safety policy."""
+#     from sub_agents.coding_sub_agent.config import CODE_JUDGE_MODEL
+#     from sub_agents.coding_sub_agent.prompts import CODE_JUDGE_SYSTEM_PROMPT
+#     from sub_agents.coding_sub_agent.validation import JudgeOutput
+#     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
+#     code = (state.get("code") or "").strip()
+#     llm = ChatOpenAI(model=CODE_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
+#     task_spec = json.dumps(
+#         {"requirements": state["requirements"], "input_files": state.get("input_files") or [], "output_files": state.get("output_files") or []},
+#         ensure_ascii=False,
+#         indent=2,
+#     )
+#     system_content = CODE_JUDGE_SYSTEM_PROMPT + "\n\n## Task\n" + task_spec.strip()
+#     human_content = f"```python\n{code}\n```"
+#     try:
+#         with traced_span("SafetyJudge", trace_context=ctx) as node_span:
+#             with traced_generation("SafetyJudge-llm", model=CODE_JUDGE_MODEL, trace_context=ctx) as gen:
+#                 raw = llm.invoke([SystemMessage(content=system_content), HumanMessage(content=human_content)])
+#                 resp, raw_msg = parse_structured_output(raw, JudgeOutput)
+#                 if gen is not None:
+#                     update_llm_generation(gen, model=CODE_JUDGE_MODEL, raw=raw_msg)
+#                 if isinstance(resp, dict):
+#                     resp = JudgeOutput.model_validate(resp)
+#                 passed = resp.passed
+#                 if node_span is not None:
+#                     node_span.update(output={"passed": passed})
+#     except Exception as exc:
+#         return {"judge_feedback": f"Judge model failed to produce valid structured output: {exc}"}
+#     if resp.passed:
+#         return {"judge_feedback": ""}
+#     detail = (resp.detail or "").strip() or "LLM judge rejected the code (no reason provided)."
+#     return {"judge_feedback": detail}
 
 
 # ---------------------------------------------------------------------------
-# IOAllowlistJudge — declared basename check (inlined)
+# DISABLED: IOAllowlistJudge — declared basename check (re-enable with LLM judges)
 # ---------------------------------------------------------------------------
-
-
-def io_allowlist_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """LLM-only check that reads/writes match declared input/output basenames."""
-    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
-    code = (state.get("code") or "").strip()
-    llm = ChatOpenAI(model=IO_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
-    spec = json.dumps({"input_files": state.get("input_files") or [], "output_files": state.get("output_files") or []}, ensure_ascii=False, indent=2)
-    system_content = IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT + "\n\n## Declared files\n" + spec
-    human_content = f"```python\n{code}\n```"
-    try:
-        with traced_span("IOAllowlistJudge", trace_context=ctx) as node_span:
-            with traced_generation("IOAllowlistJudge-llm", model=IO_JUDGE_MODEL, trace_context=ctx) as gen:
-                raw = llm.invoke([SystemMessage(content=system_content), HumanMessage(content=human_content)])
-                resp, raw_msg = parse_structured_output(raw, JudgeOutput)
-                if gen is not None:
-                    update_llm_generation(gen, model=IO_JUDGE_MODEL, raw=raw_msg)
-                if isinstance(resp, dict):
-                    resp = JudgeOutput.model_validate(resp)
-                passed = resp.passed
-                if node_span is not None:
-                    node_span.update(output={"passed": passed})
-    except Exception as exc:
-        return {"io_feedback": f"IO judge failed to produce valid structured output: {exc}"}
-
-    if resp.passed:
-        return {"io_feedback": ""}
-    detail = (resp.detail or "").strip() or "IO allowlist judge rejected the code."
-    return {"io_feedback": detail}
+#
+# def io_allowlist_judge_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+#     """LLM-only check that reads/writes match declared input/output basenames."""
+#     from sub_agents.coding_sub_agent.config import IO_JUDGE_MODEL
+#     from sub_agents.coding_sub_agent.prompts import IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT
+#     from sub_agents.coding_sub_agent.validation import JudgeOutput
+#     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
+#     code = (state.get("code") or "").strip()
+#     llm = ChatOpenAI(model=IO_JUDGE_MODEL, temperature=0).with_structured_output(JudgeOutput, include_raw=True)
+#     spec = json.dumps({"input_files": state.get("input_files") or [], "output_files": state.get("output_files") or []}, ensure_ascii=False, indent=2)
+#     system_content = IO_ALLOWLIST_JUDGE_SYSTEM_PROMPT + "\n\n## Declared files\n" + spec
+#     human_content = f"```python\n{code}\n```"
+#     try:
+#         with traced_span("IOAllowlistJudge", trace_context=ctx) as node_span:
+#             with traced_generation("IOAllowlistJudge-llm", model=IO_JUDGE_MODEL, trace_context=ctx) as gen:
+#                 raw = llm.invoke([SystemMessage(content=system_content), HumanMessage(content=human_content)])
+#                 resp, raw_msg = parse_structured_output(raw, JudgeOutput)
+#                 if gen is not None:
+#                     update_llm_generation(gen, model=IO_JUDGE_MODEL, raw=raw_msg)
+#                 if isinstance(resp, dict):
+#                     resp = JudgeOutput.model_validate(resp)
+#                 passed = resp.passed
+#                 if node_span is not None:
+#                     node_span.update(output={"passed": passed})
+#     except Exception as exc:
+#         return {"io_feedback": f"IO judge failed to produce valid structured output: {exc}"}
+#     if resp.passed:
+#         return {"io_feedback": ""}
+#     detail = (resp.detail or "").strip() or "IO allowlist judge rejected the code."
+#     return {"io_feedback": detail}
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +333,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
 
     with traced_span("E2BExecute", trace_context=ctx) as span:
         try:
+            # Internet must stay off — runtime defense even if generated code evades Semgrep.
             sandbox = Sandbox.create(
                 template=E2B_TEMPLATE_NAME,
                 api_key=E2B_API_KEY or None,
@@ -525,19 +528,21 @@ def route_codegen_limit_gate(state: CodingAgentState) -> str:
 def route_after_semgrep(state: CodingAgentState) -> str:
     if (state.get("semgrep_feedback") or "").strip():
         return "CodeGenLimitGate"
-    return "SafetyJudge"
-
-
-def route_after_safety_judge(state: CodingAgentState) -> str:
-    if (state.get("judge_feedback") or "").strip():
-        return "CodeGenLimitGate"
-    return "IOAllowlistJudge"
-
-
-def route_after_io_judge(state: CodingAgentState) -> str:
-    if (state.get("io_feedback") or "").strip():
-        return "CodeGenLimitGate"
     return "E2BExecute"
+
+
+# DISABLED: LLM judges — re-enable with SafetyJudge / IOAllowlistJudge nodes
+#
+# def route_after_safety_judge(state: CodingAgentState) -> str:
+#     if (state.get("judge_feedback") or "").strip():
+#         return "CodeGenLimitGate"
+#     return "IOAllowlistJudge"
+#
+#
+# def route_after_io_judge(state: CodingAgentState) -> str:
+#     if (state.get("io_feedback") or "").strip():
+#         return "CodeGenLimitGate"
+#     return "E2BExecute"
 
 
 def route_after_e2b(state: CodingAgentState) -> str:
@@ -557,10 +562,7 @@ def build_coding_tool_response(result: dict[str, Any]) -> dict[str, Any]:
         viol: dict[str, str] = {}
         if (result.get("semgrep_feedback") or "").strip():
             viol["semgrep"] = result["semgrep_feedback"]
-        if (result.get("judge_feedback") or "").strip():
-            viol["judge"] = result["judge_feedback"]
-        if (result.get("io_feedback") or "").strip():
-            viol["io"] = result["io_feedback"]
+        # DISABLED: LLM judges — judge / io code_violation keys
         if (result.get("e2b_feedback") or "").strip():
             viol["e2b"] = result["e2b_feedback"]
         if codegen_failure:
@@ -598,8 +600,8 @@ class CodingGraph:
         builder.add_node("CodeGenLimitGate", codegen_limit_gate_node)
         builder.add_node("CodeGen", codegen_node)
         builder.add_node("SemgrepScan", semgrep_scan_node)
-        builder.add_node("SafetyJudge", safety_judge_node)
-        builder.add_node("IOAllowlistJudge", io_allowlist_judge_node)
+        # DISABLED: LLM judges — builder.add_node("SafetyJudge", safety_judge_node)
+        # DISABLED: LLM judges — builder.add_node("IOAllowlistJudge", io_allowlist_judge_node)
         builder.add_node("E2BExecute", e2b_execute_node)
         builder.add_node("CodeGenFailure", codegen_failure_node)
 
@@ -613,18 +615,9 @@ class CodingGraph:
         builder.add_conditional_edges(
             "SemgrepScan",
             route_after_semgrep,
-            {"SafetyJudge": "SafetyJudge", "CodeGenLimitGate": "CodeGenLimitGate"},
-        )
-        builder.add_conditional_edges(
-            "SafetyJudge",
-            route_after_safety_judge,
-            {"IOAllowlistJudge": "IOAllowlistJudge", "CodeGenLimitGate": "CodeGenLimitGate"},
-        )
-        builder.add_conditional_edges(
-            "IOAllowlistJudge",
-            route_after_io_judge,
             {"E2BExecute": "E2BExecute", "CodeGenLimitGate": "CodeGenLimitGate"},
         )
+        # DISABLED: LLM judges — SafetyJudge / IOAllowlistJudge conditional edges
         builder.add_conditional_edges(
             "E2BExecute",
             route_after_e2b,
