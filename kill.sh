@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stop Forecasting Platform API (uvicorn) and UI (Dash) by freeing their listen ports.
 #
-# Matches ports used by launch.sh:
+# Matches ports used by start.sh:
 #   API  http://127.0.0.1:8000
 #   UI   http://127.0.0.1:8501
 

@@ -425,9 +425,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
             event["todos"] = norm
             event["todo_count"] = n
 
-    elif node_name == "TodoGate":
-        event["label"] = "Todo gate"
-
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []
         event["label"] = "Profiling workspace inputs"

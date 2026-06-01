@@ -15,21 +15,25 @@ On disk (under the repo)::
 
     <project>/agent_filesystem/<session-folder>/...
 
-``paths.agent_filesystem`` in ``config.yaml`` sets the folder name (default ``agent_filesystem``).
+``MAIN_PATH_AGENT_FILESYSTEM`` in root ``.env`` sets the folder name (default ``agent_filesystem``).
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 PROJECT_ROOT = Path(__file__).resolve().parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
 
-LOGICAL_AGENT_FS = str(cfg["paths"]["agent_filesystem"]).rstrip("/")
+def _env_str(name: str, default: str) -> str:
+    """Read non-empty env value; fallback when unset/blank."""
+    value = (os.environ.get(name) or "").strip()
+    return value or default
+
+
+LOGICAL_AGENT_FS = _env_str("MAIN_PATH_AGENT_FILESYSTEM", default="agent_filesystem").rstrip("/")
 LOGICAL_AGENT_PREFIX = f"{LOGICAL_AGENT_FS}/"
 SESSIONS_ROOT = (PROJECT_ROOT / LOGICAL_AGENT_FS).resolve()
 

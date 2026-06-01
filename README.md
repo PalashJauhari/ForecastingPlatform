@@ -78,7 +78,7 @@ You (browser)  →  Dash UI  →  FastAPI  →  AI agent  →  tools
 3. **Orchestrator** calls tools (forecast, code, update todo status) until work is done.  
 4. **Final answer** node writes the user-facing reply.
 
-Technical readers: main graph is `AnalysisGraph` in `graph/graph.py` — `ProfileSavedData` → `Planner` → `Orchestrator` ↔ `RunTools` → `TodoGate` → `FinalAnswer`.
+Technical readers: main graph is `AnalysisGraph` in `graph/graph.py` — `ProfileSavedData` → `Planner` → `Orchestrator` ↔ `RunTools` → `FinalAnswer`.
 
 ---
 
@@ -96,18 +96,16 @@ pip install -r requirements.txt
 
 | Location | What to set |
 |----------|-------------|
-| Repo root `.env` (from `.env.example`) | `OPENAI_API_KEY`; optional Postgres `DATABASE_URL`; optional Langfuse keys |
-| `sub_agents/planner_sub_agent/.env` | `OPENAI_API_KEY`, planner model |
-| `sub_agents/coding_sub_agent/.env` | `OPENAI_API_KEY`, `E2B_API_KEY`, `E2B_TEMPLATE_NAME`, coding/judge models, retry limits |
+| Repo root `.env` (from `.env.example`) | All runtime config: `OPENAI_API_KEY`, `MAIN_*`, `PLANNER_*`, `CODING_*`, optional `DATABASE_URL`, optional Langfuse keys |
 
-Copy each `.env.example` to `.env` in the same folder. Secrets stay in `.env` only (never commit them).
+Use one `.env` at repo root. Secrets stay in `.env` only (never commit them).
 
 For **custom Python analysis**, build the E2B sandbox template once (see [E2B template](#e2b-template-one-time-setup) below).
 
 ### 3. Run
 
 ```bash
-./launch.sh
+./start.sh
 ```
 
 - **API:** http://127.0.0.1:8000  
@@ -141,7 +139,7 @@ When the orchestrator needs **custom Python** (charts, transforms, etc.), it cal
 ```text
 Generate code → Semgrep scan → Safety judge → IO allowlist judge → Run in E2B sandbox
          ↑______________________________________________|
-              retry up to MAX_CODEGEN_ATTEMPTS (default 3)
+              retry up to CODING_MAX_CODEGEN_ATTEMPTS (default 3)
 ```
 
 **In plain terms**
@@ -156,16 +154,16 @@ Generate code → Semgrep scan → Safety judge → IO allowlist judge → Run i
 - Tables (CSV/XLSX) → session root (same folder as uploads).  
 - Plots (PNG/SVG) → `run_<tool_call_id>/` so the UI can show them inline.
 
-**Coding models and retries** (`sub_agents/coding_sub_agent/.env`)
+**Coding models and retries** (root `.env`)
 
 | Variable | Meaning |
 |----------|---------|
 | `CODING_MODEL` | Model for code generation on attempts 1 … (MAX − 1) |
-| `CODING_MODEL_LAST_ATTEMPT` | Optional stronger model **only** on the last permitted attempt (when attempt count equals `MAX_CODEGEN_ATTEMPTS`). Leave empty to always use `CODING_MODEL`. |
-| `MAX_CODEGEN_ATTEMPTS` | How many times the pipeline may **regenerate** code after a gate or sandbox failure (default `3`) |
-| `CODE_JUDGE_MODEL` / `IO_JUDGE_MODEL` | Models for safety and file-allowlist review |
+| `CODING_MODEL_LAST_ATTEMPT` | Optional stronger model **only** on the last permitted attempt (when attempt count equals `CODING_MAX_CODEGEN_ATTEMPTS`). Leave empty to always use `CODING_MODEL`. |
+| `CODING_MAX_CODEGEN_ATTEMPTS` | How many times the pipeline may **regenerate** code after a gate or sandbox failure (default `3`) |
+| `CODING_CODE_JUDGE_MODEL` / `CODING_IO_JUDGE_MODEL` | Models for safety and file-allowlist review |
 
-Example: with `MAX_CODEGEN_ATTEMPTS=3`, attempts 1–2 use `CODING_MODEL`; attempt 3 can use `CODING_MODEL_LAST_ATTEMPT` (e.g. a larger model) if you set it.
+Example: with `CODING_MAX_CODEGEN_ATTEMPTS=3`, attempts 1–2 use `CODING_MODEL`; attempt 3 can use `CODING_MODEL_LAST_ATTEMPT` (e.g. a larger model) if you set it.
 
 Guardrails include **basename-only** paths (no folder prefixes in tool args), allowed extensions, blocked dangerous patterns, and session path containment.
 
@@ -178,9 +176,9 @@ pip install 'e2b>=2.3.0'
 python sub_agents/coding_sub_agent/e2b/build_e2b_template.py --write-env
 ```
 
-Set `E2B_API_KEY` in `sub_agents/coding_sub_agent/.env` before building. After build, ensure `E2B_TEMPLATE_NAME` (and optional `E2B_TEMPLATE_ID`) are in that `.env`.
+Set `CODING_E2B_API_KEY` in root `.env` before building. After build, ensure `CODING_E2B_TEMPLATE_NAME` (and optional `CODING_E2B_TEMPLATE_ID`) are in root `.env`.
 
-Runtime defaults: `allow_internet_access=False`, sandbox timeout 120s (`E2B_SANDBOX_TIMEOUT_SECONDS`). By default `E2B_KILL_SANDBOX=false` so runs stay visible in the E2B dashboard for debugging; set `true` in production to destroy sandboxes after each run.
+Runtime defaults: `allow_internet_access=False`, sandbox timeout 120s (`CODING_E2B_SANDBOX_TIMEOUT_SECONDS`). By default `CODING_E2B_KILL_SANDBOX=false` so runs stay visible in the E2B dashboard for debugging; set `true` in production to destroy sandboxes after each run.
 
 Requires `e2b-code-interpreter>=2.7.0` (supports `lifecycle` on `Sandbox.create`).
 
@@ -206,9 +204,7 @@ All three tools share the same pipeline: validate → fit → fitted/residuals �
 
 ## Configuration
 
-**Main app** — `config.yaml` + root `.env`: orchestrator model, context limits, optional Postgres checkpoints (`checkpointer.use_neon`).
-
-**Sub-agents** — separate `.env` files per folder; see each `.env.example`.
+**Main app + sub-agents** — root `.env` only: orchestrator model, graph limits, planner/coding models, E2B keys, optional Postgres checkpointing (`MAIN_CHECKPOINTER_USE_NEON` + `DATABASE_URL`).
 
 **Runtime data** — `agent_filesystem/` (gitignored): one directory per session id.
 
@@ -245,7 +241,6 @@ ui/                  Dash chat application
 prompts/             Orchestrator system prompt
 middleware/          LLM clients, rate limiting
 session_paths.py     Session filesystem layout
-config.yaml          Main platform settings
 ```
 
 **Tool placement:** main-graph tools register on `graph/graph.py`. Planner-only tools (`write_todo`, `ask_user`) live under `sub_agents/planner_sub_agent/tools/`.

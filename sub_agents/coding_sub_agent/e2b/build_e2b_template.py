@@ -9,7 +9,7 @@ Run manually (not on app startup) from the repo root or this package directory::
     python sub_agents/coding_sub_agent/e2b/build_e2b_template.py
     python sub_agents/coding_sub_agent/e2b/build_e2b_template.py --write-env
 
-Requires ``E2B_API_KEY`` in ``sub_agents/coding_sub_agent/.env``.
+Requires ``CODING_E2B_API_KEY`` in root ``.env``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 E2B_DIR = Path(__file__).resolve().parent
 CODING_AGENT_ROOT = E2B_DIR.parent
 PROJECT_ROOT = CODING_AGENT_ROOT.parent.parent
-ENV_PATH = CODING_AGENT_ROOT / ".env"
+ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_TEMPLATE_NAME = "forecasting-platform-ds"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,7 +35,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def load_env() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
-    load_dotenv(ENV_PATH)
 
 
 def delete_template_cli(name: str) -> None:
@@ -57,8 +56,8 @@ def patch_env_file(template_name: str, template_id: str) -> None:
         lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
 
     updates = {
-        "E2B_TEMPLATE_NAME": template_name,
-        "E2B_TEMPLATE_ID": template_id,
+        "CODING_E2B_TEMPLATE_NAME": template_name,
+        "CODING_E2B_TEMPLATE_ID": template_id,
     }
     seen: set[str] = set()
     out: list[str] = []
@@ -84,22 +83,26 @@ def main() -> int:
     parser.add_argument(
         "--write-env",
         action="store_true",
-        help=f"Write E2B_TEMPLATE_NAME and E2B_TEMPLATE_ID into {ENV_PATH.name}",
+        help=f"Write CODING_E2B_TEMPLATE_NAME and CODING_E2B_TEMPLATE_ID into {ENV_PATH.name}",
     )
     parser.add_argument(
         "--name",
         default=None,
-        help=f"Template name (default: env E2B_TEMPLATE_NAME or {DEFAULT_TEMPLATE_NAME})",
+        help=f"Template name (default: env CODING_E2B_TEMPLATE_NAME or {DEFAULT_TEMPLATE_NAME})",
     )
     args = parser.parse_args()
 
     load_env()
-    api_key = os.environ.get("E2B_API_KEY", "").strip()
+    api_key = os.environ.get("CODING_E2B_API_KEY", "").strip()
     if not api_key:
-        print("E2B_API_KEY is missing. Set it in sub_agents/coding_sub_agent/.env", file=sys.stderr)
+        print("CODING_E2B_API_KEY is missing. Set it in root .env", file=sys.stderr)
         return 1
 
-    template_name = (args.name or os.environ.get("E2B_TEMPLATE_NAME") or DEFAULT_TEMPLATE_NAME).strip()
+    template_name = (
+        args.name
+        or os.environ.get("CODING_E2B_TEMPLATE_NAME")
+        or DEFAULT_TEMPLATE_NAME
+    ).strip()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", template_name):
         print(
             "Template name must be lowercase letters, numbers, dashes, underscores.",
@@ -129,10 +132,10 @@ def main() -> int:
     print("\nBuild complete.")
     print(f"  name:        {getattr(build_info, 'name', template_name)}")
     print(f"  template_id: {template_id}")
-    print("\nAdd to sub_agents/coding_sub_agent/.env:")
-    print(f"  E2B_TEMPLATE_NAME={template_name}")
+    print("\nAdd to root .env:")
+    print(f"  CODING_E2B_TEMPLATE_NAME={template_name}")
     if template_id:
-        print(f"  E2B_TEMPLATE_ID={template_id}")
+        print(f"  CODING_E2B_TEMPLATE_ID={template_id}")
 
     if args.write_env:
         patch_env_file(template_name, template_id)

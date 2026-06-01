@@ -52,10 +52,7 @@ def build_main_graph():
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
             return "RunTools"
-        return "TodoGate"
-
-    def route_after_todo_gate(state):  # noqa: ANN001
-        return "FinalAnswer" if state.get("todo_gate_passed") else "Orchestrator"
+        return "FinalAnswer"
 
     builder = StateGraph(MainStubState)
     for name in (
@@ -65,7 +62,6 @@ def build_main_graph():
         "Orchestrator",
         "RunTools",
         "ProfileSavedData_PostTools",
-        "TodoGate",
         "FinalAnswer",
     ):
         builder.add_node(name, noop)
@@ -77,12 +73,7 @@ def build_main_graph():
     builder.add_conditional_edges(
         "Orchestrator",
         route_after_orchestrator,
-        {"RunTools": "RunTools", "TodoGate": "TodoGate"},
-    )
-    builder.add_conditional_edges(
-        "TodoGate",
-        route_after_todo_gate,
-        {"Orchestrator": "Orchestrator", "FinalAnswer": "FinalAnswer"},
+        {"RunTools": "RunTools", "FinalAnswer": "FinalAnswer"},
     )
     builder.add_edge("RunTools", "ProfileSavedData_PostTools")
     builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")

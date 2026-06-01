@@ -11,7 +11,7 @@ from output_validation.write_todos import TodoStatus
 
 
 class UpdateTodoInput(BaseModel):
-    """Update one todo status by id (required for TodoGate)."""
+    """Update one todo status by id from the planner-provided list."""
 
     todo_id: str = Field(
         min_length=1,

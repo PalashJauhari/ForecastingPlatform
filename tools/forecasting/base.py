@@ -8,6 +8,7 @@ Subclasses override model-specific fit, forecast, and optional decomposition hoo
 from __future__ import annotations
 
 import json
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-import yaml
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -27,10 +27,8 @@ from output_validation.forecasting_common import BaseForecastToolInput, Interpre
 from prompts.forecasting_interpretation_prompt import FORECASTING_INTERPRETATION_SYSTEM_PROMPT
 from session_paths import ensure_session_dirs, session_id_from_config, session_root
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-cfg = yaml.safe_load(open(PROJECT_ROOT / "config.yaml"))
-
-INTERPRETATION_MODEL = cfg["models"].get("orchestrator", "gpt-4o-mini")
+# Forecasting interpretation defaults to the main orchestrator model, unless overridden.
+INTERPRETATION_MODEL = (os.environ.get("MAIN_MODEL_ORCHESTRATOR") or "").strip() or "gpt-5.4-mini"
 
 MIN_OBS = 10
 PREVIEW_HEAD_ROWS = 5

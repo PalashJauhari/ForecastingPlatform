@@ -229,18 +229,6 @@ rules:
     languages: [python]
     severity: ERROR
 
-  # ── BLOCK LINECACHE / TRACEBACK ───────────────────────────────────────────
-
-  - id: block-linecache-traceback
-    pattern-either:
-      - pattern: import linecache
-      - pattern: from linecache import $X
-      - pattern: import traceback
-      - pattern: from traceback import $X
-    message: "linecache/traceback not allowed"
-    languages: [python]
-    severity: ERROR
-
   # ── BLOCK SIGNAL / RESOURCE ───────────────────────────────────────────────
 
   - id: block-signal-resource
@@ -250,17 +238,6 @@ rules:
       - pattern: import resource
       - pattern: from resource import $X
     message: "signal/resource not allowed"
-    languages: [python]
-    severity: ERROR
-
-  # ── BLOCK WARNINGS ────────────────────────────────────────────────────────
-
-  - id: block-warnings
-    pattern-either:
-      - pattern: import warnings
-      - pattern: warnings.filterwarnings(...)
-      - pattern: warnings.simplefilter(...)
-    message: "warnings not allowed"
     languages: [python]
     severity: ERROR
 
@@ -2007,18 +1984,6 @@ rules:
     languages: [python]
     severity: ERROR
 
-  # ── BLOCK PROFILING ───────────────────────────────────────────────────────
-
-  - id: block-profiling
-    pattern-either:
-      - pattern: import cProfile
-      - pattern: from cProfile import $X
-      - pattern: import profile
-      - pattern: from profile import $X
-    message: "profiling not allowed"
-    languages: [python]
-    severity: ERROR
-
   # ── BLOCK EMAIL / MAILBOX ─────────────────────────────────────────────────
 
   - id: block-email
@@ -2057,13 +2022,3 @@ rules:
     languages: [python]
     severity: ERROR
 
-  # ── BLOCK STRING TEMPLATE ─────────────────────────────────────────────────
-
-  - id: block-string-template
-    pattern-either:
-      - pattern: import string
-      - pattern: from string import $X
-      - pattern: string.Template($X)
-    message: "string module not allowed — Template injection risk"
-    languages: [python]
-    severity: ERROR

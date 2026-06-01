@@ -102,7 +102,7 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
 
     Model selection: early attempts use ``CODING_MODEL``; the last permitted attempt
     (when this run's count equals ``MAX_CODEGEN_ATTEMPTS``) may use ``CODING_MODEL_LAST_ATTEMPT``
-    if set in ``sub_agents/coding_sub_agent/.env``.
+    if set in root ``.env``.
     """
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     # Belt-and-suspenders: routing should never reach CodeGen when exhausted.
@@ -302,8 +302,8 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     if not E2B_TEMPLATE_NAME:
         raise ValueError(
-            "E2B_TEMPLATE_NAME is not set. Run e2b/build_e2b_template.py and add it to "
-            "sub_agents/coding_sub_agent/.env"
+            "CODING_E2B_TEMPLATE_NAME is not set. Run e2b/build_e2b_template.py and add it to "
+            "root .env"
         )
 
     code = (state.get("code") or "").strip()
