@@ -20,7 +20,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from session_paths import ensure_session_dirs, session_dir_for_paths, session_root
 
-from observability.langfuse_handler import add_trace_context_to_config, current_trace_context, safe_reset_contextvar, trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import add_trace_context_to_config, current_trace_context, llm_token_counts, safe_reset_contextvar, serialize_messages, trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
 from sub_agents.coding_sub_agent.config import CODING_GRAPH_RECURSION_LIMIT, CODING_MODEL, CODING_MODEL_LAST_ATTEMPT, E2B_API_KEY, E2B_EXECUTION_TIMEOUT_SECONDS, E2B_KILL_SANDBOX, E2B_SANDBOX_TIMEOUT_SECONDS, E2B_TEMPLATE_NAME, MAX_CODEGEN_ATTEMPTS, PLOT_FILE_EXTENSIONS, TABULAR_OUTPUT_EXTENSIONS
 # DISABLED: LLM judges — CODE_JUDGE_MODEL, IO_JUDGE_MODEL
 from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT, CODEGEN_FAILURE_SYSTEM_PROMPT
@@ -153,11 +153,17 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
             with traced_generation("CodeGen-llm", model=model, trace_context=ctx) as gen:
                 raw = llm.invoke(prompt_messages, config=config)
                 parsed, raw_msg = parse_structured_output(raw, CodeGenerationOutput)
-                if gen is not None:
-                    update_llm_generation(gen, model=model, raw=raw_msg)
                 if isinstance(parsed, dict):
                     parsed = CodeGenerationOutput.model_validate(parsed)
                 code = (parsed.code or "").strip()
+                if gen is not None:
+                    in_tok, out_tok = llm_token_counts(raw_msg)
+                    gen.update(
+                        model=model,
+                        input=serialize_messages(prompt_messages),
+                        output={"filename": parsed.filename, "code": code},
+                        metadata={"input_tokens": in_tok, "output_tokens": out_tok},
+                    )
                 # New code attempt: drop stale feedback so downstream gates only see this revision.
                 result = {
                     "codegen_count": codegen_count,
@@ -181,18 +187,36 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
 def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Static Semgrep scan."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
-    code = (state.get("code") or "").strip()
-    if not code:
-        return {"semgrep_feedback": "No code to scan."}
     with traced_span("SemgrepScan", trace_context=ctx) as span:
+        code = (state.get("code") or "").strip()
+        if not code:
+            feedback = "No code to scan."
+            if span is not None:
+                span.update(
+                    output={
+                        "passed": False,
+                        "finding_count": 0,
+                        "semgrep_feedback": feedback,
+                    }
+                )
+            return {"semgrep_feedback": feedback}
+
         result = run_semgrep_scan(code)
         passed = result.passed
         detail = result.detail if not passed else ""
+        violations = result.violations or []
+        finding_count = len(violations)
         if span is not None:
-            span.update(output={"passed": passed, "finding_count": 0 if passed else 1})
-    if passed:
-        return {"semgrep_feedback": ""}
-    return {"semgrep_feedback": detail}
+            output: dict[str, Any] = {"passed": passed, "finding_count": finding_count}
+            if not passed:
+                output["semgrep_feedback"] = detail
+                if violations:
+                    output["violations"] = violations
+            span.update(output=output)
+
+        if passed:
+            return {"semgrep_feedback": ""}
+        return {"semgrep_feedback": detail}
 
 
 # ---------------------------------------------------------------------------
