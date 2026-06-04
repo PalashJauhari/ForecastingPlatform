@@ -376,29 +376,20 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
                 except Exception:
                     pass
 
+        e2b_succeeded = not error.strip() and not stderr.strip()
+        result = {
+            "code_execution_result": {
+                "stdout": stdout,
+                "stderr": stderr,
+                "copied_outputs": copied_outputs,
+                "plots": plots,
+            },
+            "e2b_feedback": error.strip() or stderr.strip(),
+            "e2b_execution_status": "success" if e2b_succeeded else "failed",
+        }
         if span is not None:
-            span.update(
-                output={
-                    "plot_count": len(plots),
-                    "copied_outputs": copied_outputs,
-                    "stderr": stderr,
-                    "sandbox_killed": E2B_KILL_SANDBOX,
-                    "error": error or None,
-                }
-            )
-
-    e2b_succeeded = not error.strip() and not stderr.strip()
-
-    return {
-        "code_execution_result": {
-            "stdout": stdout,
-            "stderr": stderr,
-            "copied_outputs": copied_outputs,
-            "plots": plots,
-        },
-        "e2b_feedback": error.strip() or stderr.strip(),
-        "e2b_execution_status": "success" if e2b_succeeded else "failed",
-    }
+            span.update(output=result)
+    return result
 
 
 # ---------------------------------------------------------------------------
