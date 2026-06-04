@@ -37,6 +37,29 @@ def _parse_max_codegen_attempts() -> int:
 
 
 MAX_CODEGEN_ATTEMPTS = _parse_max_codegen_attempts()
+
+
+def _parse_node_retry_max_attempts() -> int:
+    try:
+        raw = int((os.environ.get("CODING_NODE_RETRY_MAX_ATTEMPTS") or "").strip() or "3")
+    except ValueError:
+        raw = 3
+    if raw < 1:
+        raise ValueError(f"CODING_NODE_RETRY_MAX_ATTEMPTS must be >= 1 (got {raw})")
+    return raw
+
+
+def _parse_node_retry_float(name: str, default: float) -> float:
+    try:
+        return float((os.environ.get(name) or "").strip() or str(default))
+    except ValueError:
+        return default
+
+
+CODING_NODE_RETRY_MAX_ATTEMPTS = _parse_node_retry_max_attempts()
+CODING_NODE_RETRY_INITIAL_INTERVAL = _parse_node_retry_float("CODING_NODE_RETRY_INITIAL_INTERVAL", 1.0)
+CODING_NODE_RETRY_BACKOFF_FACTOR = _parse_node_retry_float("CODING_NODE_RETRY_BACKOFF_FACTOR", 2.0)
+
 # LangGraph backup cap only; retries stop at CodeGenLimitGate when codegen_count >= MAX.
 _CODING_STEPS_PER_ATTEMPT = 8
 CODING_GRAPH_RECURSION_LIMIT = MAX_CODEGEN_ATTEMPTS * _CODING_STEPS_PER_ATTEMPT + 4
