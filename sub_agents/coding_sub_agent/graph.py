@@ -15,7 +15,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langfuse.types import TraceContext
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.errors import NodeError
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, RetryPolicy
 from session_paths import ensure_session_dirs, logical_input_file, session_dir_for_paths, session_root
@@ -88,10 +87,12 @@ class CodingAgentState(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-def handle_node_failure(state: CodingAgentState, error: NodeError) -> Command:
+def handle_node_failure(state: CodingAgentState, error: Any) -> Command:
     """Route retry-exhausted node failures to ``PrepareResponse``."""
     del state
-    msg = f"{PIPELINE_NODE_ERROR_MESSAGE} (failed_node={error.node}; detail={error.error})"
+    failed_node = getattr(error, "node", "unknown")
+    detail = getattr(error, "error", error)
+    msg = f"{PIPELINE_NODE_ERROR_MESSAGE} (failed_node={failed_node}; detail={detail})"
     return Command(
         update={
             "pipeline_violation": {"stage": "node_error", "message": msg},
