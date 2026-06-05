@@ -84,14 +84,6 @@ class CodeGenerationOutput(BaseModel):
     code: str = Field(description="Full runnable Python source.")
 
 
-class CodeGenFailureOutput(BaseModel):
-    """Structured response when codegen retries are exhausted."""
-
-    codegen_failure_feedback: str = Field(
-        description="Concise summary for the orchestrator: what was tried and why coding could not succeed.",
-    )
-
-
 class JudgeOutput(BaseModel):
     """Structured accept/reject response from a judge model."""
 

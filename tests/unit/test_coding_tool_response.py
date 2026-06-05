@@ -1,33 +1,28 @@
-"""Unit tests for coding_tool JSON mapping (``build_coding_tool_response``)."""
+"""Unit tests for coding_tool JSON from ``prepare_response_node``."""
 
 from sub_agents.coding_sub_agent.graph import (
     PIPELINE_NODE_ERROR_MESSAGE,
-    build_coding_tool_response,
+    prepare_response_node,
 )
 
 
-def test_build_coding_tool_response_includes_code_execution_result_on_node_error() -> None:
+def test_prepare_response_node_error() -> None:
     msg = f"{PIPELINE_NODE_ERROR_MESSAGE} (failed_node=CodeGen; detail=timeout)"
-    result = {
-        "e2b_execution_status": "failed",
-        "graph_failure": {"failed_node": "CodeGen", "detail": "timeout"},
-        "code_execution_result": {
-            "stdout": "",
-            "stderr": msg,
-            "copied_outputs": [],
-            "plots": [],
-        },
+    state = {
+        "pipeline_violation": {"stage": "node_error", "message": msg},
+        "code_execution_result": {},
+        "code": "",
     }
-    body = build_coding_tool_response(result)
+    body = prepare_response_node(state, {})["tool_response"]
     assert body["status"] == "failed"
-    assert body["code_execution_result"]["stderr"] == msg
-    assert body["stderr"] == msg
-    assert body["code_violation"]["node_error"] == "CodeGen: timeout"
+    assert body["failure"]["stage"] == "node_error"
+    assert body["failure"]["message"] == msg
+    assert body["execution"]["stderr"] == ""
 
 
-def test_build_coding_tool_response_success_includes_code_execution_result() -> None:
-    result = {
-        "e2b_execution_status": "success",
+def test_prepare_response_node_success() -> None:
+    state = {
+        "pipeline_violation": {},
         "code_execution_result": {
             "stdout": "ok\n",
             "stderr": "",
@@ -35,8 +30,27 @@ def test_build_coding_tool_response_success_includes_code_execution_result() -> 
             "plots": [],
         },
     }
-    body = build_coding_tool_response(result)
+    body = prepare_response_node(state, {})["tool_response"]
     assert body["status"] == "success"
-    assert body["code_violation"] is None
-    assert body["stdout"] == "ok\n"
-    assert body["outputs"] == ["out.csv"]
+    assert body["failure"] is None
+    assert body["execution"]["stdout"] == "ok\n"
+    assert body["artifacts"]["outputs"] == ["out.csv"]
+    assert body["artifacts"]["plots"] == []
+
+
+def test_prepare_response_node_missing_inputs_failed() -> None:
+    detail = "Declared input file(s) missing from session workspace:\n\n  - sales.csv"
+    state = {"pipeline_violation": {"stage": "missing_inputs", "message": detail}}
+    body = prepare_response_node(state, {})["tool_response"]
+    assert body["status"] == "failed"
+    assert body["failure"]["stage"] == "missing_inputs"
+    assert body["failure"]["message"] == detail
+
+
+def test_prepare_response_node_io_allowlist_violation() -> None:
+    detail = "IO allowlist rejected the generated code."
+    state = {"pipeline_violation": {"stage": "io_allowlist", "message": detail}}
+    body = prepare_response_node(state, {})["tool_response"]
+    assert body["status"] == "failed"
+    assert body["failure"]["stage"] == "io_allowlist"
+    assert body["failure"]["message"] == detail
