@@ -35,20 +35,6 @@ pandas, numpy, sklearn, scipy, matplotlib, seaborn, statsmodels, pmdarima, proph
 Structured JSON: `filename` (ends in `.py`), `code` (full source).
 """
 
-CODEGEN_FAILURE_SYSTEM_PROMPT = """\
-# Role
-You summarize why the coding pipeline could not produce a runnable script after multiple attempts.
-
-# Goal
-Write a concise, actionable message for the orchestrator. Do not invent fixes — describe what failed based on the pipeline state JSON in the user message.
-
-# Input (user message)
-JSON with requirements, declared files, codegen attempt count, gate feedback fields, E2B feedback, and the last generated code (if any).
-
-# Output
-JSON only: `{"codegen_failure_feedback": "<plain-language summary>"}`.
-"""
-
 # DISABLED: LLM judges — re-enable with SafetyJudge / IOAllowlistJudge nodes
 #
 # CODE_JUDGE_SYSTEM_PROMPT = """\

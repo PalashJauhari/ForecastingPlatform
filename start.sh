@@ -81,9 +81,10 @@ echo "Starting API (uvicorn) on http://127.0.0.1:$API_PORT ..."
 uvicorn api.main:app --host 127.0.0.1 --port "$API_PORT" &
 API_PID=$!
 
-# Verify the API actually bound on the port; abort the launcher if it died early.
+# Verify the API bound on the port (Postgres checkpointer setup can take >10s on cold start).
+API_BIND_TIMEOUT_SEC=60
 bound=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for ((i = 1; i <= API_BIND_TIMEOUT_SEC; i++)); do
   sleep 1
   if lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
     bound=1
@@ -93,9 +94,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     echo "API process exited before binding port $API_PORT. Check the traceback above."
     exit 1
   fi
+  if [ "$i" -eq 15 ] || [ "$i" -eq 30 ] || [ "$i" -eq 45 ]; then
+    echo "Still waiting for API on port $API_PORT (${i}s)..."
+  fi
 done
 if [ "$bound" != "1" ]; then
-  echo "API did not bind on port $API_PORT within 10s. Aborting."
+  echo "API did not bind on port $API_PORT within ${API_BIND_TIMEOUT_SEC}s. Aborting."
   exit 1
 fi
 

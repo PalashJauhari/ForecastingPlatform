@@ -106,44 +106,89 @@ def build_planner_graph():
     return builder.compile()
 
 
+class PipelineViolationStub(TypedDict):
+    stage: str
+    message: str
+
+
 class CodingStubState(TypedDict):
     code: str
-    semgrep_feedback: NotRequired[str]
-    execution_feedback: NotRequired[str]
-    status: NotRequired[str]
+    codegen_count: NotRequired[int]
+    pipeline_violation: NotRequired[PipelineViolationStub]
 
 
 def build_coding_graph():
+    def has_violation(state: CodingStubState) -> bool:
+        v = state.get("pipeline_violation") or {}
+        return bool((v.get("message") or "").strip())
+
+    def route_codegen_limit_gate(state: CodingStubState) -> str:
+        if int(state.get("codegen_count") or 0) >= 3:
+            return "CodegenExhausted"
+        return "CodeGen"
+
     def route_after_semgrep(state: CodingStubState) -> str:
-        if (state.get("semgrep_feedback") or "").strip():
-            return "CodeGen"
+        if has_violation(state):
+            return "CodeGenLimitGate"
+        return "IOAllowlistScan"
+
+    def route_after_io(state: CodingStubState) -> str:
+        if has_violation(state):
+            return "CodeGenLimitGate"
+        return "InputFilesCheck"
+
+    def route_after_input_check(state: CodingStubState) -> str:
+        if has_violation(state):
+            return "PrepareResponse"
         return "E2BExecute"
 
     def route_after_e2b(state: CodingStubState) -> str:
-        if state.get("status") == "success":
-            return END
-        return "CodeGen"
+        if has_violation(state):
+            return "CodeGenLimitGate"
+        return "PrepareResponse"
 
     builder = StateGraph(CodingStubState)
     for name in (
+        "CodeGenLimitGate",
         "CodeGen",
         "SemgrepScan",
+        "IOAllowlistScan",
+        "InputFilesCheck",
         "E2BExecute",
+        "PrepareResponse",
+        "CodegenExhausted",
     ):
         builder.add_node(name, noop)
 
-    builder.set_entry_point("CodeGen")
+    builder.set_entry_point("CodeGenLimitGate")
+    builder.add_conditional_edges(
+        "CodeGenLimitGate",
+        route_codegen_limit_gate,
+        {"CodeGen": "CodeGen", "CodegenExhausted": "CodegenExhausted"},
+    )
     builder.add_edge("CodeGen", "SemgrepScan")
     builder.add_conditional_edges(
         "SemgrepScan",
         route_after_semgrep,
-        {"E2BExecute": "E2BExecute", "CodeGen": "CodeGen"},
+        {"IOAllowlistScan": "IOAllowlistScan", "CodeGenLimitGate": "CodeGenLimitGate"},
+    )
+    builder.add_conditional_edges(
+        "IOAllowlistScan",
+        route_after_io,
+        {"InputFilesCheck": "InputFilesCheck", "CodeGenLimitGate": "CodeGenLimitGate"},
+    )
+    builder.add_conditional_edges(
+        "InputFilesCheck",
+        route_after_input_check,
+        {"PrepareResponse": "PrepareResponse", "E2BExecute": "E2BExecute"},
     )
     builder.add_conditional_edges(
         "E2BExecute",
         route_after_e2b,
-        {END: END, "CodeGen": "CodeGen"},
+        {"PrepareResponse": "PrepareResponse", "CodeGenLimitGate": "CodeGenLimitGate"},
     )
+    builder.add_edge("CodegenExhausted", "PrepareResponse")
+    builder.add_edge("PrepareResponse", END)
     return builder.compile()
 
 
