@@ -22,11 +22,13 @@ Loads ``.env`` from the project root for ``OPENAI_API_KEY`` and optional Langfus
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, AsyncIterator, Dict, Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -65,6 +67,19 @@ _SSE_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
+# Set by ``lifespan`` at startup — ``AnalysisGraph.acreate()`` is async-only (the
+# Neon/Postgres checkpointer path awaits its connection + ``setup()``), so it cannot
+# be constructed at import time the way the old sync ``AnalysisGraph()`` was.
+analysis_graph: AnalysisGraph | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global analysis_graph
+    analysis_graph = await AnalysisGraph.acreate()
+    yield
+
+
 app = FastAPI(
     title="Agentic Forecasting Platform",
     description=(
@@ -72,8 +87,8 @@ app = FastAPI(
         "reads workspace data, may pause for **Planner** clarification (interrupt / resume), and can generate "
         "and run analysis code under guardrails. Upload CSV or Excel into the session input area first when needed."
     ),
+    lifespan=lifespan,
 )
-analysis_graph = AnalysisGraph()
 
 
 app.add_middleware(
@@ -192,7 +207,7 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     return images
 
 
-def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+async def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build the JSON body from a graph ``invoke()`` return value.
 
@@ -232,7 +247,7 @@ def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         None,
     )
     tool_call_ids = _collect_current_turn_tool_call_ids(messages)
-    images = _images_for_turn(session_id, tool_call_ids)
+    images = await asyncio.to_thread(_images_for_turn, session_id, tool_call_ids)
 
     return {
         "session_id": session_id,
@@ -322,13 +337,13 @@ def _normalize_todos_for_sse(todos_raw: Any) -> tuple[list[dict[str, Any]], int]
     return normalized, len(normalized)
 
 
-def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
+async def _snapshot_to_invoke_shape(graph: Any, session_id: str) -> Dict[str, Any]:
     """
     Recover invoke-shaped terminal dict from the compiled graph checkpoint.
 
     Copies ``interrupts`` from LangGraph snapshot state onto ``__interrupt__``, matching terminal ``invoke`` results.
     """
-    snap = graph.get_state({"configurable": {"thread_id": session_id}})
+    snap = await graph.aget_state({"configurable": {"thread_id": session_id}})
     values_payload = getattr(snap, "values", None)
     merged: Dict[str, Any] = dict(values_payload or {})
     ints = getattr(snap, "interrupts", ()) or ()
@@ -459,23 +474,23 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
     return event
 
 
-def sse_event_lines_for_turn(
+async def sse_event_lines_for_turn(
     analysis: AnalysisGraph,
     session_id: str,
-    stream_updates: Iterator[Dict[str, Any]],
-) -> Iterator[bytes]:
+    stream_updates: AsyncIterator[Dict[str, Any]],
+) -> AsyncIterator[bytes]:
     """
-    Drain one ``stream_*`` iterator, emit SSE payloads, append ``done`` via ``get_api_response``.
+    Drain one ``stream_*`` async iterator, emit SSE payloads, append ``done`` via ``get_api_response``.
 
     The generator catches failures mid-flight — clients must treat trailing ``error`` payloads as authoritative.
     """
 
     try:
-        for update in stream_updates:
+        async for update in stream_updates:
             for envelope in stream_events_from_langgraph_chunk(session_id, update):
                 yield _sse(envelope)
-        merged_state = _snapshot_to_invoke_shape(analysis.graph, session_id)
-        snapshot_body = get_api_response(session_id, merged_state)
+        merged_state = await _snapshot_to_invoke_shape(analysis.graph, session_id)
+        snapshot_body = await get_api_response(session_id, merged_state)
         terminal: Dict[str, Any] = {"type": "done", "session_id": session_id}
         terminal.update(snapshot_body)
         yield _sse(terminal)
@@ -483,28 +498,30 @@ def sse_event_lines_for_turn(
         yield _sse({"type": "error", "session_id": session_id, "error": str(exc)})
 
 
-def _sse_bytes_stream_run(
+async def _sse_bytes_stream_run(
     analysis: AnalysisGraph,
     session_id: str,
     query: str,
-) -> Iterator[bytes]:
-    yield from sse_event_lines_for_turn(
+) -> AsyncIterator[bytes]:
+    async for chunk in sse_event_lines_for_turn(
         analysis,
         session_id,
         analysis.stream_graph(session_id, query),
-    )
+    ):
+        yield chunk
 
 
-def _sse_bytes_stream_resume(
+async def _sse_bytes_stream_resume(
     analysis: AnalysisGraph,
     session_id: str,
     resume_value: str,
-) -> Iterator[bytes]:
-    yield from sse_event_lines_for_turn(
+) -> AsyncIterator[bytes]:
+    async for chunk in sse_event_lines_for_turn(
         analysis,
         session_id,
         analysis.stream_resume(session_id, resume_value),
-    )
+    ):
+        yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +550,8 @@ async def run(
         If the agent asks a clarifying question, ``interrupted`` is ``true``
         and ``question`` contains the text.
     """
-    result = analysis_graph.run_graph(session_id, query)
-    response = get_api_response(session_id, result)
+    result = await analysis_graph.run_graph(session_id, query)
+    response = await get_api_response(session_id, result)
     return response
 
 
@@ -553,8 +570,8 @@ async def resume(
     Returns
         Same shape as ``/run``.
     """
-    result = analysis_graph.resume(session_id, resume_value)
-    response = get_api_response(session_id, result)
+    result = await analysis_graph.resume(session_id, resume_value)
+    response = await get_api_response(session_id, result)
     return response
 
 
@@ -591,6 +608,16 @@ async def resume_stream(request_body: StreamResumeRequest) -> StreamingResponse:
     )
 
 
+def _save_upload_sync(session_id: str, upload_file: Any, name: str) -> tuple[str, str, bool]:
+    """Blocking helper: resolve a unique on-disk filename and copy the upload's bytes to it."""
+    stored_name, was_renamed = get_unique_upload_name(session_id, name)
+    logical_path = logical_input_file(session_id, stored_name)
+    dest = resolve_agent_path(session_id, logical_path)
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(upload_file, f)
+    return logical_path, stored_name, was_renamed
+
+
 @app.post("/upload-data")
 async def upload_data(
     files: list[UploadFile] = File(...),
@@ -598,7 +625,7 @@ async def upload_data(
 ):
     """Save uploaded CSV/Excel files to the current session workspace."""
 
-    ensure_session_dirs(session_id)
+    await asyncio.to_thread(ensure_session_dirs, session_id)
     saved: list[str] = []
     renamed: list[dict[str, str]] = []
 
@@ -614,17 +641,22 @@ async def upload_data(
                     )
                 },
             )
-        stored_name, was_renamed = get_unique_upload_name(session_id, name)
-        logical_path = logical_input_file(session_id, stored_name)
-        dest = resolve_agent_path(session_id, logical_path)
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(upload.file, f)
+        logical_path, stored_name, was_renamed = await asyncio.to_thread(
+            _save_upload_sync, session_id, upload.file, name
+        )
         saved.append(logical_path)
         if was_renamed:
             renamed.append({"original_name": name, "stored_name": stored_name})
 
     response = {"saved": saved, "count": len(saved), "renamed": renamed}
     return response
+
+
+def _resolve_artifact_paths(session_id: str, path: str) -> tuple[Path, Path]:
+    """Blocking helper: resolve symlinks for the session root and the requested target."""
+    root = session_root(session_id).resolve()
+    target = (root / path).resolve()
+    return root, target
 
 
 @app.get("/artifact/{session_id}/{path:path}")
@@ -649,8 +681,7 @@ async def artifact(session_id: str, path: str):
         403 — extension not in ``ARTIFACT_ALLOWED_EXTENSIONS``
         404 — file does not exist or is not a regular file
     """
-    root = session_root(session_id).resolve()
-    target = (root / path).resolve()
+    root, target = await asyncio.to_thread(_resolve_artifact_paths, session_id, path)
 
     # Containment check: ``relative_to`` raises if ``target`` is outside ``root``.
     # ``.resolve()`` above already followed any symlinks, so this defeats traversal.
@@ -662,7 +693,8 @@ async def artifact(session_id: str, path: str):
     if target.suffix.lower() not in ARTIFACT_ALLOWED_EXTENSIONS:
         return JSONResponse(status_code=403, content={"error": f"Extension '{target.suffix}' is not served."})
 
-    if not target.exists() or not target.is_file():
+    exists = await asyncio.to_thread(lambda: target.exists() and target.is_file())
+    if not exists:
         return JSONResponse(status_code=404, content={"error": "Artifact not found."})
 
     return FileResponse(target)

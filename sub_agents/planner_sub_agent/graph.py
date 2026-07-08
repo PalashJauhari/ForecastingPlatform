@@ -52,7 +52,7 @@ llm = ChatOpenAI(model=PLANNER_MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
 
 
-def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Dict[str, Any]:
+async def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Invoke planner LLM; latest todos from ``state.todos`` via context block."""
     profile_block = json.dumps(
         state.get("data_profile") or [],
@@ -78,7 +78,7 @@ def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig) -> Di
     trace_context = trace_context_from_runnable_config(config)
     with traced_span("PlannerOrchestrator", trace_context=trace_context) as node_span:
         with traced_generation("PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
-            response = llm_with_tools.invoke(planner_messages, config=config)
+            response = await llm_with_tools.ainvoke(planner_messages, config=config)
             if gen is not None:
                 update_llm_generation(gen, model=PLANNER_MODEL, raw=response)
         tool_calls = response.tool_calls or []

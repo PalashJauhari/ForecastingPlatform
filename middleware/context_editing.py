@@ -2,8 +2,10 @@
 Context editing: token-aware truncation and running summarisation.
 
 When the estimated token count of ``state["messages"]`` exceeds the
-configured threshold, old messages are evicted at a **HumanMessage** boundary
-and summarised into a running summary.
+configured threshold, old turns are evicted — keeping only the last N
+**human turns** (a human turn is a ``HumanMessage`` plus every AI/Tool
+message that follows it, up to the next ``HumanMessage``) — and summarised
+into a running summary.
 
 Uses ``RemoveMessage`` to work with the ``add_messages`` reducer.
 """
@@ -57,27 +59,33 @@ def estimate_tokens(messages: list) -> int:
     return sum(len(str(getattr(m, "content", "") or "")) for m in messages) // 4
 
 
-def find_human_truncation_cut(messages: list, keep: int) -> int | None:
-    """Cut index at ``user_input`` / ``user_input-{uuid}`` Human if possible, else first Human ahead of naive cut.
+def count_human_messages(messages: list) -> int:
+    """Count ``HumanMessage`` instances, i.e. the number of human turns in *messages*."""
+    return sum(1 for m in messages if isinstance(m, HumanMessage))
 
-    ``AnalysisGraph`` tags each user turn with ``user_input-{uuid}`` ids so eviction
-    never splits mid-turn tool chains.
+
+def find_human_turn_cut(messages: list, keep_recent_human_messages: int) -> int | None:
+    """Cut index that keeps the last *keep_recent_human_messages* human turns intact.
+
+    Walks backward over *messages* counting ``HumanMessage`` instances. Once the
+    Nth-from-last human message is reached, returns its index — everything from
+    that index onward (the human message and every AI/Tool message that follows
+    it) is kept; everything before it is evicted.
+
+    Returns ``None`` when there are ``<= keep_recent_human_messages`` human turns
+    in total (nothing safe to evict).
     """
-    candidate = max(0, len(messages) - keep)
-    idx = candidate
-    while idx < len(messages):
-        m = messages[idx]
-        if isinstance(m, HumanMessage):
-            mid = getattr(m, "id", None)
-            s = "" if mid is None else str(mid)
-            if s == "user_input" or s.startswith("user_input-"):
-                return idx
-        idx += 1
-    idx = candidate
-    while idx < len(messages):
+    if keep_recent_human_messages <= 0:
+        return None
+    if count_human_messages(messages) <= keep_recent_human_messages:
+        return None
+
+    seen = 0
+    for idx in range(len(messages) - 1, -1, -1):
         if isinstance(messages[idx], HumanMessage):
-            return idx
-        idx += 1
+            seen += 1
+            if seen == keep_recent_human_messages:
+                return idx
     return None
 
 
@@ -116,21 +124,32 @@ async def truncate_and_summarize(
     """
     Truncate *messages* and update the running summary if token budget is exceeded.
 
+    ``keep`` is a count of **human turns** (not raw messages): the last ``keep``
+    ``HumanMessage``s and everything that follows each of them are always retained.
+
     Returns ``(updated_summary, kept_messages, remove_ops)``; ``remove_ops`` is empty when unchanged.
     """
     del runnable_config
 
     with traced_span("context.truncate_and_summarize", metadata={"token_threshold": token_threshold, "keep": keep}) as span:
         token_estimate = estimate_tokens(messages)
-        if token_estimate <= token_threshold or len(messages) <= keep:
+        human_count = count_human_messages(messages)
+        if token_estimate <= token_threshold or human_count <= keep:
             if span is not None:
-                span.update(metadata={"token_estimate": token_estimate, "truncated": "false"})
+                span.update(metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "false"})
             return previous_summary, messages, []
 
-        cut = find_human_truncation_cut(messages, keep)
+        cut = find_human_turn_cut(messages, keep)
         if cut is None:
             if span is not None:
-                span.update(metadata={"token_estimate": token_estimate, "truncated": "false", "truncate_skip": "no_human_boundary"})
+                span.update(
+                    metadata={
+                        "token_estimate": token_estimate,
+                        "human_count": human_count,
+                        "truncated": "false",
+                        "truncate_skip": "not_enough_human_turns",
+                    }
+                )
             return previous_summary, messages, []
 
         to_evict = messages[:cut]
@@ -138,6 +157,6 @@ async def truncate_and_summarize(
         with traced_span("context.summarize_evicted", metadata={"evicted_count": len(to_evict)}):
             updated_summary = await summarize_evicted(previous_summary, to_evict)
         if span is not None:
-            span.update(metadata={"token_estimate": token_estimate, "truncated": "true", "evicted_count": len(to_evict)})
+            span.update(metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "true", "evicted_count": len(to_evict)})
         kept_messages = messages[cut:]
         return updated_summary, kept_messages, remove_ops
