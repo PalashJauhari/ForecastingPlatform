@@ -45,19 +45,19 @@ print(df.shape)
 """
 
 
-async def test_semgrep_blocks_import_os():
-    result = await run_semgrep_scan(IMPORT_OS_SCRIPT)
+def test_semgrep_blocks_import_os():
+    result = run_semgrep_scan(IMPORT_OS_SCRIPT)
     assert not result.passed
     assert result.source == "semgrep"
 
 
-async def test_semgrep_blocks_import_socket():
-    result = await run_semgrep_scan(IMPORT_SOCKET_SCRIPT)
+def test_semgrep_blocks_import_socket():
+    result = run_semgrep_scan(IMPORT_SOCKET_SCRIPT)
     assert not result.passed
     assert result.source == "semgrep"
 
 
-async def test_semgrep_allows_basename_pandas_io():
-    result = await run_semgrep_scan(VALID_PANDAS_SCRIPT)
+def test_semgrep_allows_basename_pandas_io():
+    result = run_semgrep_scan(VALID_PANDAS_SCRIPT)
     assert result.passed
     assert result.source == "semgrep"

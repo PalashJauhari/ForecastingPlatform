@@ -5,15 +5,12 @@ Main-graph LangChain tool: validate args, invoke coding sub-agent, return JSON.
 from the parent graph; return value is JSON string for the orchestrator ToolMessage.
 
 Stays a plain sync ``def`` (like the forecasting tools) rather than ``async def``:
-LangChain's ``ToolNode.ainvoke()`` automatically offloads sync tool functions to a
-worker thread, so the parent graph's event loop is never blocked here. Internally it
-bridges into the now-async ``CodingGraph`` via ``asyncio.run(coding_graph.arun(...))`` —
-safe specifically because this call always executes inside that offloaded worker
-thread (never on the main event loop thread), so starting a fresh event loop here
-cannot collide with one already running.
+LangChain's ``ToolNode.ainvoke()`` offloads sync tool functions to a worker thread,
+so the parent graph's event loop is never blocked. The coding subgraph is fully sync
+(``CodingGraph.run()`` + ``graph.invoke()``) — no ``asyncio.run`` and no second
+event loop.
 """
 
-import asyncio
 import json
 
 from langchain.tools import ToolRuntime
@@ -46,15 +43,13 @@ def coding_tool(
     data_profile = state.get("data_profile") or []
     trace_context = trace_context_for_nested_invoke() or trace_context_from_runnable_config(runtime.config)
 
-    body = asyncio.run(
-        coding_graph.arun(
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            requirements=validated.requirements,
-            input_files=list(validated.input_files),
-            output_files=list(validated.output_files),
-            data_profile=list(data_profile),
-            trace_context=trace_context,
-        )
+    body = coding_graph.run(
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        requirements=validated.requirements,
+        input_files=list(validated.input_files),
+        output_files=list(validated.output_files),
+        data_profile=list(data_profile),
+        trace_context=trace_context,
     )
     return json.dumps(body, default=str)

@@ -6,10 +6,10 @@ Fail-closed when semgrep is missing or errors; rules live in ``codegen_scan_semg
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -76,35 +76,32 @@ def _write_tmp_source(code: str) -> str:
         return tmp.name
 
 
-async def run_semgrep_scan(code: str) -> SafetyCheckResult:
+def run_semgrep_scan(code: str) -> SafetyCheckResult:
     """Run semgrep on generated code; returns :class:`SafetyCheckResult`."""
-    tmp_path = await asyncio.to_thread(_write_tmp_source, code)
+    tmp_path = _write_tmp_source(code)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            _semgrep_executable(),
-            "--config",
-            str(SEMGREP_CONFIG),
-            "--json",
-            tmp_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=SEMGREP_SUBPROCESS_TIMEOUT_SECONDS
+            completed = subprocess.run(
+                [
+                    _semgrep_executable(),
+                    "--config",
+                    str(SEMGREP_CONFIG),
+                    "--json",
+                    tmp_path,
+                ],
+                capture_output=True,
+                timeout=SEMGREP_SUBPROCESS_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except subprocess.TimeoutExpired:
             return synthetic_failure(
                 "semgrep-timeout",
                 f"semgrep scan timed out after {SEMGREP_SUBPROCESS_TIMEOUT_SECONDS} seconds",
             )
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
-        returncode = proc.returncode
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        returncode = completed.returncode
 
         if returncode not in {0, 1}:
             return synthetic_failure(
@@ -164,4 +161,4 @@ async def run_semgrep_scan(code: str) -> SafetyCheckResult:
             "semgrep not installed — run: pip install semgrep",
         )
     finally:
-        await asyncio.to_thread(os.unlink, tmp_path)
+        os.unlink(tmp_path)

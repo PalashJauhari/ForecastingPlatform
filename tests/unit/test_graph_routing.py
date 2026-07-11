@@ -1,9 +1,9 @@
 """Unit tests for main, planner, and coding sub-agent graph routing helpers."""
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END
 
-from graph.graph import route_after_orchestrator
+from graph.graph import route_after_orchestrator, route_after_planning_gate
 from sub_agents.coding_sub_agent.graph import (
     route_after_e2b,
     route_after_input_check,
@@ -11,7 +11,7 @@ from sub_agents.coding_sub_agent.graph import (
     route_after_semgrep,
     route_codegen_limit_gate,
 )
-from sub_agents.planner_sub_agent.graph import route_after_planner
+from sub_agents.planner_sub_agent.graph import route_after_planner, route_after_planner_tools
 
 
 def test_route_orchestrator_to_run_tools():
@@ -44,6 +44,36 @@ def test_planner_ends_on_no_tool_reply():
     """Planner subgraph ends when the orchestrator replies with no tool_calls."""
     state = {"messages": [AIMessage(content="Plan is ready.")]}
     assert route_after_planner(state) == END
+
+
+def test_route_after_planning_gate_orchestrator():
+    state = {"todos": [{"id": "1", "content": "task", "status": "pending"}]}
+    assert route_after_planning_gate(state) == "Orchestrator"
+
+
+def test_route_after_planning_gate_planner():
+    state = {"todos": []}
+    assert route_after_planning_gate(state) == "Planner"
+
+
+def test_route_after_planner_tools_ends_on_write_todo():
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[{"name": "write_todo", "args": {}, "id": "c1"}]),
+            ToolMessage(content="Todos updated.", tool_call_id="c1"),
+        ],
+    }
+    assert route_after_planner_tools(state) == END
+
+
+def test_route_after_planner_tools_loops_on_ask_user():
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[{"name": "ask_user", "args": {}, "id": "c1"}]),
+            ToolMessage(content="user reply", tool_call_id="c1"),
+        ],
+    }
+    assert route_after_planner_tools(state) == "PlannerOrchestrator"
 
 
 def test_route_codegen_limit_gate_under_limit():

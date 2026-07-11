@@ -5,7 +5,6 @@ Coding sub-graph: CodeGenLimitGate → CodeGen → SemgrepScan → IOAllowlistSc
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextvars import ContextVar
 from pathlib import Path
@@ -109,7 +108,7 @@ def handle_node_failure(state: CodingAgentState, error: Any) -> Command:
 # ---------------------------------------------------------------------------
 
 
-async def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Generate Python from requirements; on retry, include ``pipeline_violation`` in context."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     codegen_count = state.get("codegen_count", 0) + 1
@@ -143,7 +142,7 @@ async def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[
     ]
     with traced_span("CodeGen", trace_context=ctx, metadata={"codegen_count": codegen_count, "model": model}) as node_span:
         with traced_generation("CodeGen-llm", model=model, trace_context=ctx) as gen:
-            parsed: CodeGenerationOutput = await llm.ainvoke(prompt_messages, config=config)
+            parsed: CodeGenerationOutput = llm.invoke(prompt_messages, config=config)
             code = (parsed.code or "").strip()
             if gen is not None:
                 gen.update(
@@ -157,7 +156,7 @@ async def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[
     return result
 
 
-async def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Static Semgrep scan."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     with traced_span("SemgrepScan", trace_context=ctx) as span:
@@ -168,7 +167,7 @@ async def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> 
                 span.update(output={"passed": False, "pipeline_violation": {"stage": "semgrep", "message": detail}})
             return {"pipeline_violation": {"stage": "semgrep", "message": detail}}
 
-        result = await run_semgrep_scan(code)
+        result = run_semgrep_scan(code)
         if result.passed:
             if span is not None:
                 span.update(output={"passed": True, "pipeline_violation": {}})
@@ -180,7 +179,7 @@ async def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> 
         return {"pipeline_violation": {"stage": "semgrep", "message": detail}}
 
 
-async def io_allowlist_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def io_allowlist_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Static IO allowlist scan: declared basenames must match code reads/writes."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     with traced_span("IOAllowlistScan", trace_context=ctx) as span:
@@ -217,7 +216,7 @@ def _find_missing_input_files(session_id: str, input_files: list[str]) -> list[s
     return missing
 
 
-async def input_files_check_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def input_files_check_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Verify declared input_files exist under the session workspace before E2B."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     session_id = state["session_id"]
@@ -228,7 +227,7 @@ async def input_files_check_node(state: CodingAgentState, config: RunnableConfig
                 span.update(output={"passed": True, "pipeline_violation": {}})
             return {"pipeline_violation": {}}
 
-        missing = await asyncio.to_thread(_find_missing_input_files, session_id, input_files)
+        missing = _find_missing_input_files(session_id, input_files)
 
         if missing:
             lines = [
@@ -254,9 +253,9 @@ async def input_files_check_node(state: CodingAgentState, config: RunnableConfig
 # ---------------------------------------------------------------------------
 
 
-async def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Run generated_code.py in E2B; failures set ``pipeline_violation`` stage ``e2b``."""
-    from e2b_code_interpreter import AsyncSandbox
+    from e2b_code_interpreter import Sandbox
 
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     if not E2B_TEMPLATE_NAME:
@@ -270,11 +269,11 @@ async def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> D
     input_files = state.get("input_files") or []
     output_files = state.get("output_files") or []
 
-    await asyncio.to_thread(ensure_session_dirs, session_id)
+    ensure_session_dirs(session_id)
     local_root = session_root(session_id)
     run_id = sanitize_run_id(tool_call_id)
     run_workspace = local_root / f"run_{run_id}"
-    await asyncio.to_thread(run_workspace.mkdir, parents=True, exist_ok=True)
+    run_workspace.mkdir(parents=True, exist_ok=True)
 
     workspace_dir = "/home/user/workspace"
     sandbox = None
@@ -286,48 +285,48 @@ async def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> D
 
     with traced_span("E2BExecute", trace_context=ctx) as span:
         try:
-            sandbox = await AsyncSandbox.create(
+            sandbox = Sandbox.create(
                 template=E2B_TEMPLATE_NAME,
                 api_key=E2B_API_KEY or None,
                 timeout=E2B_SANDBOX_TIMEOUT_SECONDS,
                 allow_internet_access=False,
                 lifecycle={"on_timeout": "pause"},
             )
-            await sandbox.commands.run(f"mkdir -p {workspace_dir}")
+            sandbox.commands.run(f"mkdir -p {workspace_dir}")
 
             for basename in input_files:
                 local_path = local_root / basename
                 remote_path = f"{workspace_dir}/{basename}"
-                data = await asyncio.to_thread(local_path.read_bytes)
-                await sandbox.files.write(remote_path, data)
+                data = local_path.read_bytes()
+                sandbox.files.write(remote_path, data)
 
             script_path = f"{workspace_dir}/generated_code.py"
-            await sandbox.files.write(script_path, code)
+            sandbox.files.write(script_path, code)
 
             cmd = f"cd {workspace_dir} && python generated_code.py"
-            run_result = await sandbox.commands.run(cmd, timeout=E2B_EXECUTION_TIMEOUT_SECONDS)
+            run_result = sandbox.commands.run(cmd, timeout=E2B_EXECUTION_TIMEOUT_SECONDS)
             stdout = getattr(run_result, "stdout", "") or ""
             stderr = getattr(run_result, "stderr", "") or ""
 
             for basename in output_files:
                 remote_path = f"{workspace_dir}/{basename}"
                 ext = Path(basename).suffix.lower()
-                data = await sandbox.files.read(remote_path, format="bytes")
+                data = sandbox.files.read(remote_path, format="bytes")
                 if ext in PLOT_FILE_EXTENSIONS:
                     dest = run_workspace / basename
-                    await asyncio.to_thread(dest.write_bytes, data)
+                    dest.write_bytes(data)
                     sid = session_dir_for_paths(session_id)
                     plots.append(f"agent_filesystem/{sid}/run_{run_id}/{basename}")
                 else:
                     dest = local_root / basename
-                    await asyncio.to_thread(dest.write_bytes, data)
+                    dest.write_bytes(data)
                 copied_outputs.append(basename)
         except Exception as exc:
             error = str(exc)
         finally:
             if sandbox is not None and E2B_KILL_SANDBOX:
                 try:
-                    await sandbox.kill()
+                    sandbox.kill()
                 except Exception:
                     pass
 
@@ -358,13 +357,13 @@ async def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> D
 # ---------------------------------------------------------------------------
 
 
-async def codegen_limit_gate_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def codegen_limit_gate_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Passthrough; ``route_codegen_limit_gate`` enforces ``MAX_CODEGEN_ATTEMPTS`` before CodeGen."""
     del state, config
     return {}
 
 
-async def codegen_exhausted_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def codegen_exhausted_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Set ``pipeline_violation`` when codegen retries are exhausted (no LLM)."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     result = {
@@ -376,7 +375,7 @@ async def codegen_exhausted_node(state: CodingAgentState, config: RunnableConfig
     return result
 
 
-async def prepare_response_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def prepare_response_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Build ``tool_response`` from state before END."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     violation = state.get("pipeline_violation") or {}
@@ -491,7 +490,7 @@ class CodingGraph:
         builder.add_edge("PrepareResponse", END)
         return builder.compile(checkpointer=self.checkpointer)
 
-    async def arun(
+    def run(
         self,
         *,
         session_id: str,
@@ -523,7 +522,7 @@ class CodingGraph:
         try:
             with traced_span("coding_pipeline", trace_context=trace_context, metadata=meta):
                 config = add_trace_context_to_config(config, current_trace_context())
-                result = await self.graph.ainvoke(initial, config=config)
+                result = self.graph.invoke(initial, config=config)
         finally:
             safe_reset_contextvar(coding_trace_ctx, token)
 

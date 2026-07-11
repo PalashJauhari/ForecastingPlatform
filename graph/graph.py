@@ -2,7 +2,7 @@
 LangGraph entrypoint for the data-analysis agent: prep, Planner sub-agent,
 Orchestrator, tools, final synthesis, checkpointing.
 
-Prep path: **ProfileSavedData** → **SummariseConversationalSummary** → **Planner** → **Orchestrator** → …
+Prep path: **ProfileSavedData** → **SummariseConversationalSummary** → **IsPlanningRequired** → **Planner** (if plan) or **Orchestrator** (if skip) → …
 
 After **RunTools**: **ProfileSavedData_PostTools** → **Orchestrator**.
 """
@@ -44,7 +44,8 @@ from observability.langfuse_handler import (
     tracing_root,
     update_llm_generation,
 )
-from prompts.graph_prompts import FINAL_ANSWER_PROMPT, SYSTEM_PROMPT
+from output_validation.planning_gate import PlanningGateOutput
+from prompts.graph_prompts import FINAL_ANSWER_PROMPT, PLANNING_GATE_SYSTEM_PROMPT, SYSTEM_PROMPT
 from session_paths import session_id_from_config
 from tools.coding_tools.coding_tool import coding_tool
 from sub_agents.planner_sub_agent.graph import get_planner_graph
@@ -93,6 +94,7 @@ _USE_NEON = _env_bool("MAIN_CHECKPOINTER_USE_NEON", default=False)
 GRAPH_RECURSION_LIMIT = _env_int("MAIN_GRAPH_RECURSION_LIMIT", default=100)
 GRAPH_MAX_CONCURRENCY = _env_int("MAIN_GRAPH_MAX_CONCURRENCY", default=2)
 ORCHESTRATOR_MODEL = _env_str("MAIN_MODEL_ORCHESTRATOR", default="gpt-5.4-mini")
+PLANNING_GATE_MODEL = _env_str("MAIN_MODEL_PLANNING_GATE", default="gpt-4o-mini")
 CONTEXT_KEEP_RECENT_HUMAN_MESSAGES = _env_int("MAIN_CONTEXT_KEEP_RECENT_HUMAN_MESSAGES", default=10)
 CONTEXT_SUMMARY_TOKEN_THRESHOLD = _env_int("MAIN_SUMMARY_TOKEN_THRESHOLD", default=100000)
 
@@ -121,7 +123,7 @@ class AgentState(TypedDict):
         todos           — session task list; Planner replaces on each new user turn.
 
     Shared with ``PlannerAgentState`` for mounted subgraph: ``messages``,
-    ``data_profile``, ``todos`` (LangGraph merges channels on the parent thread).
+    ``message_summary``, ``data_profile``, ``todos`` (LangGraph merges channels on the parent thread).
     """
 
     messages: Annotated[list, add_messages]
@@ -144,6 +146,12 @@ TOOLS = [
 
 llm = make_llm(model=ORCHESTRATOR_MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
+planning_gate_llm = make_llm(
+    model=PLANNING_GATE_MODEL,
+    temperature=0,
+    output_schema=PlanningGateOutput,
+    include_raw=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +204,62 @@ async def summarise_conversational_summary(state: AgentState, config: RunnableCo
     if not remove_ops:
         return {}
     return {"messages": remove_ops, "message_summary": updated_summary}
+
+
+async def is_planning_required(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Classify whether Planner is needed; on skip, write a single todo from the latest user message."""
+    session_id = session_id_from_config(config)
+    trace_context = trace_context_from_runnable_config(config)
+    messages = state.get("messages") or []
+    summary = state.get("message_summary", "")
+    data_profile_rows = state.get("data_profile") or []
+
+    latest_human_text = ""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                latest_human_text = content.strip()
+                break
+
+    context = (
+        "## Session Workspace\n"
+        f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
+        "## Conversation Summary\n"
+        f"{summary}\n\n"
+        "## Latest user message\n"
+        f"{latest_human_text}\n"
+    )
+    gate_messages = [
+        SystemMessage(content=PLANNING_GATE_SYSTEM_PROMPT),
+        HumanMessage(content=context),
+    ]
+    model = PLANNING_GATE_MODEL
+
+    with traced_span("IsPlanningRequired", trace_context=trace_context, metadata={"session_id": session_id}) as node_span:
+        with traced_generation("IsPlanningRequired-llm", model=model) as gen:
+            result = await planning_gate_llm.ainvoke(gate_messages, config=config)
+            parsed = result["parsed"] if isinstance(result, dict) else result
+            raw = result.get("raw") if isinstance(result, dict) else None
+            if gen is not None:
+                update_llm_generation(gen, model=model, raw=raw)
+        decision = parsed.decision if parsed is not None else "plan"
+        reason = parsed.reason if parsed is not None else ""
+        if node_span is not None:
+            node_span.update(output={"decision": decision, "reason": reason})
+
+    if decision == "skip" and latest_human_text:
+        return {
+            "todos": [{"id": "1", "content": latest_human_text, "status": "pending"}],
+        }
+    return {}
+
+
+def route_after_planning_gate(state: AgentState) -> str:
+    """Route to Orchestrator when skip path wrote todos; else Planner."""
+    if state.get("todos"):
+        return "Orchestrator"
+    return "Planner"
 
 
 async def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -289,7 +353,7 @@ class AnalysisGraph:
 
     Notes
         * **Tools** — ``coding_tool``, ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``, ``update_todo``.
-        * **Prep** — **ProfileSavedData** → **SummariseConversationalSummary** → **Planner** → **Orchestrator**.
+        * **Prep** — **ProfileSavedData** → **SummariseConversationalSummary** → **IsPlanningRequired** → **Planner** or **Orchestrator**.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield ``stream_mode="updates"`` chunks.
         * **Construction** — plain ``AnalysisGraph()`` only supports the in-memory
           checkpointer. When ``MAIN_CHECKPOINTER_USE_NEON=true``, build via the async
@@ -316,6 +380,7 @@ class AnalysisGraph:
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
         builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
+        builder.add_node("IsPlanningRequired", is_planning_required)
         builder.add_node("Planner", get_planner_graph())
         builder.add_node("Orchestrator", orchestrator)
         builder.add_node("RunTools", tool_node)
@@ -323,7 +388,12 @@ class AnalysisGraph:
 
         builder.set_entry_point("ProfileSavedData")
         builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-        builder.add_edge("SummariseConversationalSummary", "Planner")
+        builder.add_edge("SummariseConversationalSummary", "IsPlanningRequired")
+        builder.add_conditional_edges(
+            "IsPlanningRequired",
+            route_after_planning_gate,
+            {"Planner": "Planner", "Orchestrator": "Orchestrator"},
+        )
         builder.add_edge("Planner", "Orchestrator")
         builder.add_conditional_edges(
             "Orchestrator",
