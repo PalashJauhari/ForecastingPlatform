@@ -55,3 +55,10 @@ agent_filesystem/
 # --- Logs ---
 *.log
 logs/
+
+# --- Local scratch / notes (not source) ---
+INTERVIEW_PREP.md
+Untitled
+
+# --- Local sample data for manual forecasting tests (not source) ---
+sample_data/

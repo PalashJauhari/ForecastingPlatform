@@ -206,6 +206,16 @@ def io_allowlist_scan_node(state: CodingAgentState, config: RunnableConfig) -> D
         return {"pipeline_violation": {"stage": "io_allowlist", "message": detail}}
 
 
+def _find_missing_input_files(session_id: str, input_files: list[str]) -> list[str]:
+    """Blocking helper: return the basenames in *input_files* not present on disk."""
+    missing: list[str] = []
+    for basename in input_files:
+        name = Path(basename).name
+        if not (session_root(session_id) / name).is_file():
+            missing.append(name)
+    return missing
+
+
 def input_files_check_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Verify declared input_files exist under the session workspace before E2B."""
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
@@ -217,11 +227,7 @@ def input_files_check_node(state: CodingAgentState, config: RunnableConfig) -> D
                 span.update(output={"passed": True, "pipeline_violation": {}})
             return {"pipeline_violation": {}}
 
-        missing: list[str] = []
-        for basename in input_files:
-            name = Path(basename).name
-            if not (session_root(session_id) / name).is_file():
-                missing.append(name)
+        missing = _find_missing_input_files(session_id, input_files)
 
         if missing:
             lines = [
@@ -291,8 +297,8 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
             for basename in input_files:
                 local_path = local_root / basename
                 remote_path = f"{workspace_dir}/{basename}"
-                with open(local_path, "rb") as handle:
-                    sandbox.files.write(remote_path, handle.read())
+                data = local_path.read_bytes()
+                sandbox.files.write(remote_path, data)
 
             script_path = f"{workspace_dir}/generated_code.py"
             sandbox.files.write(script_path, code)

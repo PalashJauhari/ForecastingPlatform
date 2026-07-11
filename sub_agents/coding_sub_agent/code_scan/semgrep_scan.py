@@ -16,6 +16,8 @@ from pathlib import Path
 
 from sub_agents.coding_sub_agent.code_scan.safety_check import SafetyCheckResult
 
+SEMGREP_SUBPROCESS_TIMEOUT_SECONDS = 30
+
 SEMGREP_CONFIG = Path(__file__).resolve().parent / "codegen_scan_semgrep.yaml"
 
 
@@ -67,40 +69,61 @@ def synthetic_failure(
     )
 
 
-def run_semgrep_scan(code: str) -> SafetyCheckResult:
-    """Run semgrep on generated code; returns :class:`SafetyCheckResult`."""
+def _write_tmp_source(code: str) -> str:
+    """Blocking helper: write *code* to a temp ``.py`` file, return its path."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
         tmp.write(code)
-        tmp_path = tmp.name
+        return tmp.name
+
+
+def run_semgrep_scan(code: str) -> SafetyCheckResult:
+    """Run semgrep on generated code; returns :class:`SafetyCheckResult`."""
+    tmp_path = _write_tmp_source(code)
 
     try:
-        result = subprocess.run(
-            [_semgrep_executable(), "--config", str(SEMGREP_CONFIG), "--json", tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode not in {0, 1}:
+        try:
+            completed = subprocess.run(
+                [
+                    _semgrep_executable(),
+                    "--config",
+                    str(SEMGREP_CONFIG),
+                    "--json",
+                    tmp_path,
+                ],
+                capture_output=True,
+                timeout=SEMGREP_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return synthetic_failure(
+                "semgrep-timeout",
+                f"semgrep scan timed out after {SEMGREP_SUBPROCESS_TIMEOUT_SECONDS} seconds",
+            )
+
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        returncode = completed.returncode
+
+        if returncode not in {0, 1}:
             return synthetic_failure(
                 "semgrep-execution-failed",
-                f"semgrep exited with status {result.returncode}",
-                stdout=result.stdout,
-                stderr=result.stderr,
+                f"semgrep exited with status {returncode}",
+                stdout=stdout,
+                stderr=stderr,
             )
-        if not result.stdout.strip():
+        if not stdout.strip():
             return synthetic_failure(
                 "semgrep-empty-output",
                 "semgrep produced no JSON output",
-                stderr=result.stderr,
+                stderr=stderr,
             )
         try:
-            output = json.loads(result.stdout) if result.stdout else {}
+            output = json.loads(stdout) if stdout else {}
         except json.JSONDecodeError:
             return synthetic_failure(
                 "semgrep-invalid-output",
                 "semgrep returned invalid JSON output",
-                stdout=result.stdout,
-                stderr=result.stderr,
+                stdout=stdout,
+                stderr=stderr,
             )
         semgrep_errors = output.get("errors") or []
         if semgrep_errors:
@@ -110,7 +133,7 @@ def run_semgrep_scan(code: str) -> SafetyCheckResult:
             return synthetic_failure(
                 "semgrep-reported-errors",
                 f"semgrep reported scanner/configuration errors: {error_summary}",
-                stderr=result.stderr,
+                stderr=stderr,
             )
         findings = output.get("results", [])
         violations: list[dict] = []
@@ -136,11 +159,6 @@ def run_semgrep_scan(code: str) -> SafetyCheckResult:
         return synthetic_failure(
             "semgrep-not-found",
             "semgrep not installed — run: pip install semgrep",
-        )
-    except subprocess.TimeoutExpired:
-        return synthetic_failure(
-            "semgrep-timeout",
-            "semgrep scan timed out after 30 seconds",
         )
     finally:
         os.unlink(tmp_path)

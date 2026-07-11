@@ -3,6 +3,12 @@ Main-graph LangChain tool: validate args, invoke coding sub-agent, return JSON.
 
 ``ToolRuntime`` supplies ``session_id``, ``tool_call_id``, and ``data_profile``
 from the parent graph; return value is JSON string for the orchestrator ToolMessage.
+
+Stays a plain sync ``def`` (like the forecasting tools) rather than ``async def``:
+LangChain's ``ToolNode.ainvoke()`` offloads sync tool functions to a worker thread,
+so the parent graph's event loop is never blocked. The coding subgraph is fully sync
+(``CodingGraph.run()`` + ``graph.invoke()``) — no ``asyncio.run`` and no second
+event loop.
 """
 
 import json
