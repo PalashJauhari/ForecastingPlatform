@@ -1,5 +1,5 @@
 """
-SARIMA/ARIMA forecasting model — inherits the shared ``ForecastingModel`` pipeline.
+SARIMA/ARIMA forecasting model — inherits the shared ``ForecastingUnivariateModel`` pipeline.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from output_validation.forecasting_common import BaseForecastToolInput
 from output_validation.sarima_tool import SarimaToolInput
-from tools.forecasting.base import ForecastingModel, ForecastingToolError
+from tools.forecasting.base import ForecastingToolError, ForecastingUnivariateModel
 
 DEFAULT_ALPHA = 0.05
 
 
-class SarimaModel(ForecastingModel):
+class SarimaModel(ForecastingUnivariateModel):
     """SARIMA backend for ``sarima_tool``."""
 
     @property
@@ -32,14 +32,10 @@ class SarimaModel(ForecastingModel):
     def allow_missing_target(self) -> bool:
         return False
 
-    def build_series(self, df: pd.DataFrame, freq: str, target_column: str) -> pd.Series:
+    def build_series(self, df: pd.DataFrame, freq: str) -> pd.Series:
         """Build a regular DatetimeIndex series from normalized ``ds``/``y``."""
         date_idx = pd.DatetimeIndex(df["ds"].values, freq=freq)
-        return pd.Series(
-            df["y"].values,
-            index=date_idx,
-            name=target_column,
-        )
+        return pd.Series(df["y"].values, index=date_idx, name="y")
 
     def select_or_prepare_model_order(
         self,
@@ -135,15 +131,11 @@ class SarimaModel(ForecastingModel):
     def fit(
         self,
         df: pd.DataFrame,
-        freq: str,
-        file_name: str,
-        date_column: str,
-        target_column: str,
         params: BaseForecastToolInput,
-    ) -> tuple[Any, dict, dict, list[dict], dict]:
+    ) -> tuple[Any, dict, dict, list[dict]]:
         """Select order, fit SARIMAX, and summarise fit-quality metrics."""
         sarima_params = SarimaToolInput.model_validate(params.model_dump())
-        series = self.build_series(df, freq, target_column)
+        series = self.build_series(df, self.inferred_freq)
         spec, warnings_out = self.select_or_prepare_model_order(series, sarima_params)
 
         order = tuple(spec["order"])
@@ -202,19 +194,12 @@ class SarimaModel(ForecastingModel):
         }
 
         model_spec = {"model_type": "sarima", **spec}
+        return sm_fit, model_spec, fit_quality, warnings_out
 
-        return sm_fit, model_spec, fit_quality, warnings_out, {"spec": spec, "series": series}
-
-    def analyze_residuals(
-        self,
-        fitted_table: pd.DataFrame,
-        model_spec: dict,
-        fit_extras: dict,
-    ) -> dict:
+    def analyze_residuals(self, residual_table: pd.DataFrame) -> dict:
         """Ljung-Box and Jarque-Bera diagnostics on in-sample residuals."""
-        spec = fit_extras.get("spec") or {}
-        seasonal_period = spec.get("seasonal_period")
-        resid = pd.to_numeric(fitted_table["residual"], errors="coerce").dropna()
+        seasonal_period = self.fitted_model_spec.get("seasonal_period")
+        resid = pd.to_numeric(residual_table["residual"], errors="coerce").dropna()
         n = int(len(resid))
 
         if n < 5:
@@ -283,52 +268,32 @@ class SarimaModel(ForecastingModel):
             },
         }
 
-    def build_fitted_table(
-        self,
-        df: pd.DataFrame,
-        target_column: str,
-        model: Any,
-        fit_extras: dict,
-    ) -> pd.DataFrame:
-        """In-sample actual, fitted, and residual from the SARIMAX fit."""
-        sm_fit = model
-        series: pd.Series = fit_extras["series"]
-        fitted_vals = sm_fit.fittedvalues.reindex(series.index)
-        fitted_table = pd.DataFrame(
+    def build_fitted_table(self, df: pd.DataFrame, model: Any) -> pd.DataFrame:
+        """In-sample fitted values from the SARIMAX fit."""
+        series = self.build_series(df, self.inferred_freq)
+        fitted_vals = model.fittedvalues.reindex(series.index)
+        return pd.DataFrame(
             {
                 "calendar_date": [pd.Timestamp(ts).date().isoformat() for ts in series.index],
-                "actual": series.values,
                 "fitted": fitted_vals.values,
             }
         )
-        fitted_table["residual"] = fitted_table["actual"] - fitted_table["fitted"]
-        return fitted_table
 
-    def generate_forecast(
-        self,
-        df: pd.DataFrame,
-        freq: str,
-        model: Any,
-        fit_extras: dict,
-        params: BaseForecastToolInput,
-    ) -> pd.DataFrame:
+    def build_forecast_table(self, model: Any, horizon: int, freq: str) -> pd.DataFrame:
         """Out-of-sample point forecasts with 95% prediction intervals."""
-        sm_fit = model
-        series: pd.Series = fit_extras["series"]
-        horizon = int(params.horizon)
-
         try:
-            pred = sm_fit.get_forecast(steps=horizon)
+            pred = model.get_forecast(steps=horizon)
             mean = pred.predicted_mean
             conf = pred.conf_int(alpha=DEFAULT_ALPHA)
         except Exception as exc:
             raise ForecastingToolError(
                 "forecast_failed",
                 f"Failed to generate forecast: {exc}",
-                "generate_forecast",
+                "build_forecast_table",
             ) from exc
 
-        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=freq)[1:]
+        last_index = model.fittedvalues.index[-1]
+        future_dates = pd.date_range(start=last_index, periods=horizon + 1, freq=freq)[1:]
         rows: list[dict] = []
         for ts, m, lo, hi in zip(future_dates, mean.values, conf.iloc[:, 0].values, conf.iloc[:, 1].values):
             rows.append(

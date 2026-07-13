@@ -1,6 +1,6 @@
 """Time-series forecasting tools (SARIMA, Prophet, Holt-Winters)."""
 
-from .base import ForecastingModel, ForecastingToolError
+from .base import ForecastingToolError, ForecastingUnivariateModel
 from .holt_winters_model import HoltWintersModel
 from .holt_winters_tool import holt_winters_tool
 from .prophet_model import ProphetModel
@@ -9,7 +9,7 @@ from .sarima_model import SarimaModel
 from .sarima_tool import sarima_tool
 
 __all__ = [
-    "ForecastingModel",
+    "ForecastingUnivariateModel",
     "ForecastingToolError",
     "HoltWintersModel",
     "ProphetModel",

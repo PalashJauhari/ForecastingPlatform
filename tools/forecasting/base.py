@@ -1,39 +1,27 @@
 """
 Base forecasting pipeline for session tabular time-series tools.
 
-``ForecastingModel`` owns validate → fit → fitted → residuals → forecast → save tables/plots → interpret → lean JSON.
+``ForecastingUnivariateModel`` owns validate → fit → fitted → residuals → forecast → save tables → lean JSON.
 Subclasses override model-specific fit, forecast, and optional decomposition hooks.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 from langchain.tools import ToolRuntime
-from langchain_core.messages import HumanMessage, SystemMessage
 
-from middleware.llm_client import make_llm
 from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
-from output_validation.forecasting_common import BaseForecastToolInput, InterpretationSummaryOutput
-from prompts.forecasting_interpretation_prompt import FORECASTING_INTERPRETATION_SYSTEM_PROMPT
+from output_validation.forecasting_common import BaseForecastToolInput
 from session_paths import ensure_session_dirs, session_id_from_config, session_root
-
-# Forecasting interpretation defaults to the main orchestrator model, unless overridden.
-INTERPRETATION_MODEL = (os.environ.get("MAIN_MODEL_ORCHESTRATOR") or "").strip() or "gpt-5.4-mini"
 
 MIN_OBS = 10
 PREVIEW_HEAD_ROWS = 5
 ALLOWED_TABLE_EXTS = {".csv", ".xlsx"}
-ALLOWED_PLOT_EXTS = {".png"}
 
 
 class ForecastingToolError(Exception):
@@ -46,11 +34,13 @@ class ForecastingToolError(Exception):
         self.stage = stage
 
 
-class ForecastingModel(ABC):
-    """Template-method base for forecasting tools."""
+class ForecastingUnivariateModel(ABC):
+    """Template-method base for univariate forecasting tools."""
 
     session_id: str = ""
     trace_context: Any = None
+    inferred_freq: str = ""
+    fitted_model_spec: dict = {}
 
     @property
     @abstractmethod
@@ -66,54 +56,35 @@ class ForecastingModel(ABC):
     def fit(
         self,
         df: pd.DataFrame,
-        freq: str,
-        file_name: str,
-        date_column: str,
-        target_column: str,
         params: BaseForecastToolInput,
-    ) -> tuple[Any, dict, dict, list[dict], dict]:
-        """Return (model, model_spec, fit_quality, fit_warnings, fit_extras)."""
+    ) -> tuple[Any, dict, dict, list[dict]]:
+        """Return (model, model_spec, fit_quality, fit_warnings)."""
 
     @abstractmethod
-    def analyze_residuals(
-        self,
-        fitted_table: pd.DataFrame,
-        model_spec: dict,
-        fit_extras: dict,
-    ) -> dict:
+    def analyze_residuals(self, residual_table: pd.DataFrame) -> dict:
         """Return residual diagnostics (may include definitions; stripped before JSON)."""
 
     @abstractmethod
-    def generate_forecast(
-        self,
-        df: pd.DataFrame,
-        freq: str,
-        model: Any,
-        fit_extras: dict,
-        params: BaseForecastToolInput,
-    ) -> pd.DataFrame:
-        """Return forecast table with calendar_date and forecast (+ intervals when available)."""
+    def build_fitted_table(self, df: pd.DataFrame, model: Any) -> pd.DataFrame:
+        """Return in-sample table: calendar_date, fitted."""
 
     @abstractmethod
-    def build_fitted_table(
-        self,
-        df: pd.DataFrame,
-        target_column: str,
-        model: Any,
-        fit_extras: dict,
-    ) -> pd.DataFrame:
-        """Return in-sample table: calendar_date, actual, fitted, residual."""
+    def build_forecast_table(self, model: Any, horizon: int, freq: str) -> pd.DataFrame:
+        """Return forecast table with calendar_date and forecast (+ intervals when available)."""
 
-    def build_decomposition(
-        self,
-        df: pd.DataFrame,
-        model: Any,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        """Optional combined decomposition with period_type column; default none."""
+    def build_fitted_decomposition(self, df: pd.DataFrame, model: Any) -> pd.DataFrame | None:
+        """Optional in-sample decomposition; default none."""
         return None
+
+    def build_forecast_decomposition(self, model: Any, horizon: int, freq: str) -> pd.DataFrame | None:
+        """Optional forecast-period decomposition; default none."""
+        return None
+
+    def build_residual_table(self, fitted_table: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame:
+        """Merge fitted values with actuals on calendar_date; compute residual."""
+        merged = fitted_table.merge(actuals, on="calendar_date", how="inner")
+        merged["residual"] = merged["actual"] - merged["fitted"]
+        return merged[["calendar_date", "actual", "fitted", "residual"]]
 
     # ---------------------------------------------------------------------------
     # Artifact names and persistence
@@ -146,80 +117,6 @@ class ForecastingModel(ABC):
         else:
             table.to_excel(out_path, index=False)
         return name
-
-    def save_plot(self, fig: plt.Figure, session_id: str, basename: str, stage: str) -> str:
-        """Save matplotlib figure as PNG; return basename only."""
-        name = Path(basename).name
-        if Path(name).suffix.lower() not in ALLOWED_PLOT_EXTS:
-            raise ForecastingToolError(
-                "invalid_output_file",
-                f"{stage} plot must end with .png.",
-                stage,
-            )
-        ensure_session_dirs(session_id)
-        out_path = session_root(session_id) / name
-        fig.savefig(out_path, dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        return name
-
-    # ---------------------------------------------------------------------------
-    # Default plots
-    # ---------------------------------------------------------------------------
-
-    def plot_fitted(self, fitted_table: pd.DataFrame) -> plt.Figure:
-        """Actual vs fitted line chart."""
-        fig, ax = plt.subplots(figsize=(8, 4))
-        dates = pd.to_datetime(fitted_table["calendar_date"])
-        ax.plot(dates, fitted_table["actual"], label="actual", marker="o", markersize=3)
-        ax.plot(dates, fitted_table["fitted"], label="fitted", marker="o", markersize=3)
-        ax.legend()
-        ax.set_title("In-sample fit")
-        fig.autofmt_xdate()
-        return fig
-
-    def plot_forecast(self, forecast_table: pd.DataFrame) -> plt.Figure:
-        """Forecast line with optional 95% interval band."""
-        fig, ax = plt.subplots(figsize=(8, 4))
-        dates = pd.to_datetime(forecast_table["calendar_date"])
-        ax.plot(dates, forecast_table["forecast"], label="forecast", marker="o", markersize=3)
-        if "lower_95" in forecast_table.columns and "upper_95" in forecast_table.columns:
-            ax.fill_between(
-                dates,
-                forecast_table["lower_95"],
-                forecast_table["upper_95"],
-                alpha=0.2,
-                label="95% interval",
-            )
-        ax.legend()
-        ax.set_title("Forecast")
-        fig.autofmt_xdate()
-        return fig
-
-    def plot_residuals(self, fitted_table: pd.DataFrame) -> plt.Figure:
-        """Residuals over time."""
-        fig, ax = plt.subplots(figsize=(8, 4))
-        dates = pd.to_datetime(fitted_table["calendar_date"])
-        ax.axhline(0, color="gray", linewidth=0.8)
-        ax.plot(dates, fitted_table["residual"], marker="o", markersize=3)
-        ax.set_title("Residuals")
-        fig.autofmt_xdate()
-        return fig
-
-    def plot_decomposition(self, decomposition_table: pd.DataFrame) -> plt.Figure:
-        """Plot main level/trend/seasonal or forecast series from decomposition."""
-        fig, ax = plt.subplots(figsize=(8, 4))
-        dates = pd.to_datetime(decomposition_table["calendar_date"])
-        value_col = "forecast" if "forecast" in decomposition_table.columns else "fitted"
-        if "trend" in decomposition_table.columns:
-            ax.plot(dates, decomposition_table["trend"], label="trend")
-        elif value_col in decomposition_table.columns:
-            ax.plot(dates, decomposition_table[value_col], label=value_col)
-        if "seasonal" in decomposition_table.columns:
-            ax.plot(dates, decomposition_table["seasonal"], label="seasonal", alpha=0.8)
-        ax.legend()
-        ax.set_title("Decomposition")
-        fig.autofmt_xdate()
-        return fig
 
     # ---------------------------------------------------------------------------
     # JSON helpers
@@ -260,52 +157,6 @@ class ForecastingModel(ABC):
                 messages.append(str(w))
         return messages
 
-    def interpretation_llm_invoke(self, messages: list) -> dict:
-        """Single structured interpretation call (no Langfuse generation span)."""
-        llm = make_llm(model=INTERPRETATION_MODEL, temperature=0, output_schema=InterpretationSummaryOutput)
-        try:
-            raw = llm.invoke(messages)
-            if isinstance(raw, dict) and "parsed" in raw:
-                parsed = raw["parsed"]
-            else:
-                parsed = raw
-            return parsed.model_dump()
-        except Exception:
-            return {"summary": "Interpretation unavailable; review pipeline metrics and previews."}
-
-    def run_llm_interpretation_summary(
-        self,
-        experiment_name: str,
-        freq: str,
-        model_spec: dict,
-        fit_quality: dict,
-        residual_lean: dict,
-        forecast_table: pd.DataFrame,
-        warnings_out: list,
-    ) -> str:
-        """One LLM call returning a short user-facing summary."""
-        payload = json.dumps(
-            {
-                "model_type": self.model_type,
-                "experiment_name": experiment_name,
-                "frequency": freq,
-                "hyperparameters": self.hyperparameters_from_spec(model_spec),
-                "metrics": self.lean_metrics(fit_quality),
-                "residual_analysis": residual_lean,
-                "forecast_preview": self.preview_head(forecast_table),
-                "warnings": self.warning_messages(warnings_out),
-            },
-            indent=2,
-            default=str,
-        )
-        result = self.interpretation_llm_invoke(
-            [
-                SystemMessage(content=FORECASTING_INTERPRETATION_SYSTEM_PROMPT),
-                HumanMessage(content=payload),
-            ]
-        )
-        return str(result.get("summary", ""))
-
     # ---------------------------------------------------------------------------
     # Data validation
     # ---------------------------------------------------------------------------
@@ -316,8 +167,8 @@ class ForecastingModel(ABC):
         file_name: str,
         date_column: str,
         target_column: str,
-    ) -> tuple[pd.DataFrame, str, str, str, str]:
-        """Load session file, normalize to ds/y, infer frequency."""
+    ) -> tuple[pd.DataFrame, str]:
+        """Load session file, normalize to ds/y, infer frequency; return df and freq."""
         name = Path(file_name).name
         path = session_root(session_id) / name
         if not path.exists() or not path.is_file():
@@ -390,7 +241,7 @@ class ForecastingModel(ABC):
                     "data_validation",
                 )
 
-        return df, freq, name, date_column, target_column
+        return df, freq
 
     def error_dict(self, exc: ForecastingToolError) -> dict:
         return {
@@ -426,42 +277,40 @@ class ForecastingModel(ABC):
         ) as tool_span:
             warnings_out: list = []
             try:
-                df, freq, file_name, date_column, target_column = self.validate_data(
+                df, freq = self.validate_data(
                     self.session_id,
                     params.file_name,
                     params.date_column,
                     params.target_column,
                 )
+                self.inferred_freq = freq
                 n_obs = int(len(df))
 
-                model, model_spec, fit_quality, fit_warnings, fit_extras = self.fit(
-                    df, freq, file_name, date_column, target_column, params
-                )
+                model, model_spec, fit_quality, fit_warnings = self.fit(df, params)
+                self.fitted_model_spec = model_spec
                 warnings_out.extend(fit_warnings)
 
-                fitted_table = self.build_fitted_table(df, target_column, model, fit_extras)
-                residual_raw = self.analyze_residuals(fitted_table, model_spec, fit_extras)
+                fitted_table = self.build_fitted_table(df, model)
+                actuals = df[["ds", "y"]].copy()
+                actuals = actuals.rename(columns={"ds": "calendar_date", "y": "actual"})
+                actuals["calendar_date"] = actuals["calendar_date"].dt.date.astype(str)
+                residual_table = self.build_residual_table(fitted_table, actuals)
+
+                residual_raw = self.analyze_residuals(residual_table)
                 residual_lean = self.lean_residual_output(residual_raw)
                 for w in residual_raw.get("warnings", []) or []:
                     warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
-                forecast_table = self.generate_forecast(df, freq, model, fit_extras, params)
-                decomposition_table = self.build_decomposition(
-                    df, model, fit_extras, fitted_table, forecast_table
-                )
+                horizon = int(params.horizon)
+                forecast_table = self.build_forecast_table(model, horizon, freq)
+                fitted_decomp = self.build_fitted_decomposition(df, model)
+                forecast_decomp = self.build_forecast_decomposition(model, horizon, freq)
 
                 fitted_csv = self.artifact_basename(experiment_name, "fitted", "csv")
                 forecast_csv = self.artifact_basename(experiment_name, "forecast", "csv")
-                # Plots disabled — use coding_tool for charts (PNG under run_<tool_call_id>/ for UI).
-                # fitted_plot = self.artifact_basename(experiment_name, "fitted", "png")
-                # forecast_plot = self.artifact_basename(experiment_name, "forecast", "png")
-                # residual_plot = self.artifact_basename(experiment_name, "residuals", "png")
 
-                self.save_table(fitted_table, self.session_id, fitted_csv, "save_fitted")
+                self.save_table(residual_table, self.session_id, fitted_csv, "save_fitted")
                 self.save_table(forecast_table, self.session_id, forecast_csv, "save_forecast")
-                # self.save_plot(self.plot_fitted(fitted_table), self.session_id, fitted_plot, "save_fitted_plot")
-                # self.save_plot(self.plot_forecast(forecast_table), self.session_id, forecast_plot, "save_forecast_plot")
-                # self.save_plot(self.plot_residuals(fitted_table), self.session_id, residual_plot, "save_residual_plot")
 
                 pipeline: dict[str, Any] = {
                     "data_validation": {
@@ -482,7 +331,7 @@ class ForecastingModel(ABC):
                         "status": "success",
                         "output": {
                             "file_name": fitted_csv,
-                            "preview_head": self.preview_head(fitted_table),
+                            "preview_head": self.preview_head(residual_table),
                         },
                     },
                     "forecast_values": {
@@ -500,39 +349,31 @@ class ForecastingModel(ABC):
                     },
                 }
 
-                if decomposition_table is not None:
-                    decomp_csv = self.artifact_basename(experiment_name, "decomposition", "csv")
-                    # decomp_plot = self.artifact_basename(experiment_name, "decomposition", "png")
-                    self.save_table(decomposition_table, self.session_id, decomp_csv, "save_decomposition")
-                    # self.save_plot(
-                    #     self.plot_decomposition(decomposition_table),
-                    #     self.session_id,
-                    #     decomp_plot,
-                    #     "save_decomposition_plot",
-                    # )
-                    fitted_decomp = decomposition_table[
-                        decomposition_table["period_type"] == "fitted"
-                    ]
-                    forecast_decomp = decomposition_table[
-                        decomposition_table["period_type"] == "forecast"
-                    ]
+                if fitted_decomp is not None:
+                    fitted_decomp_csv = self.artifact_basename(experiment_name, "fitted_decomposition", "csv")
+                    self.save_table(fitted_decomp, self.session_id, fitted_decomp_csv, "save_fitted_decomposition")
                     pipeline["fitted_decomposition"] = {
                         "description": "In-sample level/trend/seasonal breakdown.",
                         "status": "success",
                         "output": {
-                            "file_name": decomp_csv,
+                            "file_name": fitted_decomp_csv,
                             "preview_head": self.preview_head(fitted_decomp),
                         },
                     }
+
+                if forecast_decomp is not None:
+                    forecast_decomp_csv = self.artifact_basename(experiment_name, "forecast_decomposition", "csv")
+                    self.save_table(
+                        forecast_decomp, self.session_id, forecast_decomp_csv, "save_forecast_decomposition"
+                    )
                     pipeline["forecast_decomposition"] = {
                         "description": "Forecast-period decomposition (components may be null).",
                         "status": "success",
                         "output": {
+                            "file_name": forecast_decomp_csv,
                             "preview_head": self.preview_head(forecast_decomp),
                         },
                     }
-
-                # Brief: LLM summary deferred; run_llm_interpretation_summary kept on base for later.
 
                 warn_msgs = self.warning_messages(warnings_out)
                 response: dict[str, Any] = {
