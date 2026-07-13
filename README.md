@@ -44,7 +44,7 @@ It is built to show solid product UX, safe automation, and optional operational 
 |--------------|--------------|
 | Plans and tracks tasks automatically instead of one long prompt | LangGraph main graph + planner and coding sub-graphs |
 | One folder per chat for uploads and outputs | Basename-only file contracts and path containment |
-| Trusted forecast models when you want structure | Shared `ForecastingModel` pipeline + three `@tool` wrappers |
+| Trusted forecast models when you want structure | Shared `ForecastingUnivariateModel` pipeline + three `@tool` wrappers |
 | Custom code only after Semgrep scan, then E2B sandbox | Semgrep static scan + internet-off E2B + optional Langfuse spans |
 | Live progress in the UI | FastAPI SSE (`/run/stream`) + Dash client |
 
@@ -55,7 +55,8 @@ It is built to show solid product UX, safe automation, and optional operational 
 - Natural-language Q&A over uploaded CSV/XLSX
 - Automatic **data profiling** (columns, samples, basic stats) at the start of each turn—and again after tools run
 - **Todo planning** at the start of each user message
-- Custom Python analysis and charts via the **coding tool**
+- Custom Python analysis and charts via the **coding tool** (entry precheck for declared inputs; clearer JSON with `report` / `artifacts`)
+- **`read_file_tool`** — row preview from session CSV/XLSX (capped by `READ_FILE_MAX_ROWS`)
 - SARIMA / Prophet / Holt-Winters forecasting with structured JSON for the orchestrator
 - FastAPI backend with SSE streaming; Plotly Dash frontend
 
@@ -193,7 +194,7 @@ Requires `e2b-code-interpreter>=2.7.0` (supports `lifecycle` on `Sandbox.create`
 
 ## Forecasting tools
 
-All three tools share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → lean JSON (`ForecastingModel` in `tools/forecasting/base.py`).
+All three tools share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → lean JSON (`ForecastingUnivariateModel` in `tools/forecasting/base.py`).
 
 | Tool | Best for |
 |------|----------|
@@ -203,7 +204,7 @@ All three tools share the same pipeline: validate → fit → fitted/residuals �
 
 **`experiment_name`** (required) — unique label for one run. Artifacts look like `{experiment_name}_fitted.csv`, `_forecast.csv`, optional `_decomposition.csv`, plus PNG plots. JSON returned to the agent uses **filenames only**, not full disk paths.
 
-**Response shape:** `status`, `model_type`, `experiment_name`, `frequency`, `warnings`, and `pipeline` (per-stage status, metrics, previews, plot basenames). An LLM interpretation helper exists on the base class but is not wired into the live pipeline yet.
+**Response shape:** `status`, `model_type`, `experiment_name`, `frequency`, `warnings`, and `pipeline` (per-stage status, metrics, previews, plot basenames).
 
 **Data expectations:** regular date frequency (inferred), basename-only `file_name`, at least 10 rows. Upload data to the session before calling a tool.
 
@@ -241,7 +242,8 @@ sub_agents/
     e2b/               Template build + sandbox requirements
     code_scan/         Semgrep rules + static scan
 tools/               Main-graph tools only
-  coding_tools/      coding_tool → CodingGraph
+  coding_tools/      coding_tool → CodingGraph (precheck at tool entry)
+  file_management_tools/  read_file_tool
   planning/          update_todo (orchestrator)
   forecasting/       SARIMA / Prophet / Holt-Winters models + tools
 ui/                  Dash chat application
@@ -273,6 +275,7 @@ session_paths.py     Session filesystem layout
 ## For contributors
 
 - **Prompts** (`prompts/`, `sub_agents/*/prompts.py`) hold LLM instructions; **code comments** explain graph wiring—invariants, not duplicated prompt text.
-- **Forecasting** — inherit `ForecastingModel`; snake_case public methods; tool docstrings are the orchestrator contract.
+- **Forecasting** — inherit `ForecastingUnivariateModel`; snake_case public methods; tool docstrings are the orchestrator contract.
+- **Planner** — never names orchestrator tools in todo text; outcomes only (`write_todo` / `ask_user`).
 - **Entry points** — main graph: `graph/graph.py`; sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`.
 - **Diagrams** — `python scripts/generate_artifact_plot.py` → `artifact/*.png`.

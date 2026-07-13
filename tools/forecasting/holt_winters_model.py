@@ -1,5 +1,5 @@
 """
-Holt-Winters / exponential smoothing model — inherits ``ForecastingModel``.
+Holt-Winters / exponential smoothing model — inherits ``ForecastingUnivariateModel``.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 from output_validation.forecasting_common import BaseForecastToolInput
 from output_validation.holt_winters_tool import HoltWintersToolInput
-from tools.forecasting.base import ForecastingModel, ForecastingToolError
+from tools.forecasting.base import ForecastingToolError, ForecastingUnivariateModel
 
 DEFAULT_ALPHA = 0.05
 INITIALIZATION_METHOD = "estimated"
 SIMULATION_REPETITIONS = 500
 
 
-class HoltWintersModel(ForecastingModel):
+class HoltWintersModel(ForecastingUnivariateModel):
     """Holt-Winters backend for ``holt_winters_tool``."""
 
     @property
@@ -39,10 +39,10 @@ class HoltWintersModel(ForecastingModel):
             return None
         return value
 
-    def build_series(self, df: pd.DataFrame, freq: str, target_column: str) -> pd.Series:
+    def build_series(self, df: pd.DataFrame, freq: str) -> pd.Series:
         """Build a regular-frequency series from normalized ``ds``/``y``."""
         date_idx = pd.DatetimeIndex(df["ds"].values, freq=freq)
-        return pd.Series(df["y"].values, index=date_idx, name=target_column)
+        return pd.Series(df["y"].values, index=date_idx, name="y")
 
     def validate_holt_winters_config(self, hw_params: HoltWintersToolInput, n_obs: int) -> None:
         """Pre-fit checks for trend/seasonal/period combinations."""
@@ -65,15 +65,11 @@ class HoltWintersModel(ForecastingModel):
     def fit(
         self,
         df: pd.DataFrame,
-        freq: str,
-        file_name: str,
-        date_column: str,
-        target_column: str,
         params: BaseForecastToolInput,
-    ) -> tuple[Any, dict, dict, list[dict], dict]:
+    ) -> tuple[Any, dict, dict, list[dict]]:
         """Fit exponential smoothing / Holt-Winters and compute in-sample fit quality."""
         hw_params = HoltWintersToolInput.model_validate(params.model_dump())
-        series = self.build_series(df, freq, target_column)
+        series = self.build_series(df, self.inferred_freq)
         self.validate_holt_winters_config(hw_params, int(len(series)))
 
         trend_sm = self.map_component(hw_params.trend)
@@ -140,44 +136,29 @@ class HoltWintersModel(ForecastingModel):
             "initialization_method": INITIALIZATION_METHOD,
         }
 
-        return es_fit, model_spec, fit_quality, [], {
-            "series": series,
-            "trend_enabled": trend_sm is not None,
-            "seasonal_enabled": seasonal_sm is not None,
-        }
+        return es_fit, model_spec, fit_quality, []
 
-    def component_arrays(
-        self,
-        es_fit: Any,
-        fit_extras: dict,
-    ) -> dict[str, Optional[np.ndarray]]:
+    def component_arrays(self, es_fit: Any) -> dict[str, Optional[np.ndarray]]:
         """Extract level/trend/seasonal state arrays from the statsmodels fit."""
         components: dict[str, Optional[np.ndarray]] = {"level": None, "trend": None, "seasonal": None}
         try:
             components["level"] = np.asarray(es_fit.level, dtype=float)
         except Exception:
             pass
-        if fit_extras.get("trend_enabled"):
-            try:
-                components["trend"] = np.asarray(es_fit.trend, dtype=float)
-            except Exception:
-                pass
-        if fit_extras.get("seasonal_enabled"):
-            try:
-                components["seasonal"] = np.asarray(es_fit.season, dtype=float)
-            except Exception:
-                pass
+        try:
+            components["trend"] = np.asarray(es_fit.trend, dtype=float)
+        except Exception:
+            pass
+        try:
+            components["seasonal"] = np.asarray(es_fit.season, dtype=float)
+        except Exception:
+            pass
         return components
 
-    def analyze_residuals(
-        self,
-        fitted_table: pd.DataFrame,
-        model_spec: dict,
-        fit_extras: dict,
-    ) -> dict:
+    def analyze_residuals(self, residual_table: pd.DataFrame) -> dict:
         """Ljung-Box and Jarque-Bera diagnostics on in-sample residuals."""
-        seasonal_period = model_spec.get("seasonal_period")
-        resid = pd.to_numeric(fitted_table["residual"], errors="coerce").dropna()
+        seasonal_period = self.fitted_model_spec.get("seasonal_period")
+        resid = pd.to_numeric(residual_table["residual"], errors="coerce").dropna()
         n = int(len(resid))
 
         if n < 5:
@@ -246,44 +227,23 @@ class HoltWintersModel(ForecastingModel):
             },
         }
 
-    def build_fitted_table(
-        self,
-        df: pd.DataFrame,
-        target_column: str,
-        model: Any,
-        fit_extras: dict,
-    ) -> pd.DataFrame:
-        """In-sample actual, fitted, and residual."""
-        es_fit = model
-        series: pd.Series = fit_extras["series"]
-        fitted_vals = es_fit.fittedvalues.reindex(series.index)
-        fitted_table = pd.DataFrame(
+    def build_fitted_table(self, df: pd.DataFrame, model: Any) -> pd.DataFrame:
+        """In-sample fitted values."""
+        series = self.build_series(df, self.inferred_freq)
+        fitted_vals = model.fittedvalues.reindex(series.index)
+        return pd.DataFrame(
             {
                 "calendar_date": [pd.Timestamp(ts).date().isoformat() for ts in series.index],
-                "actual": series.values,
                 "fitted": fitted_vals.values,
             }
         )
-        fitted_table["residual"] = fitted_table["actual"] - fitted_table["fitted"]
-        return fitted_table
 
-    def generate_forecast(
-        self,
-        df: pd.DataFrame,
-        freq: str,
-        model: Any,
-        fit_extras: dict,
-        params: BaseForecastToolInput,
-    ) -> pd.DataFrame:
+    def build_forecast_table(self, model: Any, horizon: int, freq: str) -> pd.DataFrame:
         """Out-of-sample forecasts with 95% prediction intervals."""
-        es_fit = model
-        series: pd.Series = fit_extras["series"]
-        horizon = int(params.horizon)
-
         try:
-            mean = es_fit.forecast(steps=horizon)
+            mean = model.forecast(steps=horizon)
             mean_arr = np.asarray(mean, dtype=float).reshape(-1)
-            sim = es_fit.simulate(
+            sim = model.simulate(
                 nsimulations=horizon,
                 anchor="end",
                 repetitions=SIMULATION_REPETITIONS,
@@ -299,10 +259,11 @@ class HoltWintersModel(ForecastingModel):
             raise ForecastingToolError(
                 "forecast_failed",
                 f"Failed to generate forecast: {exc}",
-                "generate_forecast",
+                "build_forecast_table",
             ) from exc
 
-        future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=freq)[1:]
+        last_index = model.fittedvalues.index[-1]
+        future_dates = pd.date_range(start=last_index, periods=horizon + 1, freq=freq)[1:]
         rows: list[dict] = []
         for ts, m, lo, hi in zip(future_dates, mean_arr, lower, upper):
             rows.append(
@@ -315,39 +276,49 @@ class HoltWintersModel(ForecastingModel):
             )
         return pd.DataFrame(rows)
 
-    def build_decomposition(
-        self,
-        df: pd.DataFrame,
-        model: Any,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        """Combined fitted + forecast decomposition with level/trend/seasonal where available."""
-        es_fit = model
-        components = self.component_arrays(es_fit, fit_extras)
-
-        fitted_part = fitted_table.copy()
-        fitted_part["period_type"] = "fitted"
-        fitted_part = fitted_part.rename(columns={"fitted": "forecast"})
-
+    def build_fitted_decomposition(self, df: pd.DataFrame, model: Any) -> pd.DataFrame | None:
+        """In-sample level/trend/seasonal breakdown where available."""
+        series = self.build_series(df, self.inferred_freq)
+        fitted_vals = model.fittedvalues.reindex(series.index)
+        fitted_part = pd.DataFrame(
+            {
+                "calendar_date": [pd.Timestamp(ts).date().isoformat() for ts in series.index],
+                "fitted": fitted_vals.values,
+            }
+        )
+        components = self.component_arrays(model)
+        has_components = False
         if components["level"] is not None and len(components["level"]) == len(fitted_part):
             fitted_part["level"] = components["level"]
+            has_components = True
         if components["trend"] is not None and len(components["trend"]) == len(fitted_part):
             fitted_part["trend"] = components["trend"]
+            has_components = True
         if components["seasonal"] is not None and len(components["seasonal"]) == len(fitted_part):
             fitted_part["seasonal"] = components["seasonal"]
+            has_components = True
+        return fitted_part if has_components else None
 
-        forecast_part = forecast_table.copy()
-        forecast_part["period_type"] = "forecast"
-        forecast_part["actual"] = np.nan
-        forecast_part["residual"] = np.nan
+    def build_forecast_decomposition(self, model: Any, horizon: int, freq: str) -> pd.DataFrame | None:
+        """Forecast-period decomposition with null component columns."""
+        try:
+            mean = model.forecast(steps=horizon)
+            mean_arr = np.asarray(mean, dtype=float).reshape(-1)
+        except Exception as exc:
+            raise ForecastingToolError(
+                "forecast_failed",
+                f"Failed to generate forecast decomposition: {exc}",
+                "build_forecast_decomposition",
+            ) from exc
+
+        last_index = model.fittedvalues.index[-1]
+        future_dates = pd.date_range(start=last_index, periods=horizon + 1, freq=freq)[1:]
+        forecast_part = pd.DataFrame(
+            {
+                "calendar_date": [pd.Timestamp(ts).date().isoformat() for ts in future_dates],
+                "forecast": mean_arr,
+            }
+        )
         for col in ("level", "trend", "seasonal"):
-            if col in fitted_part.columns:
-                forecast_part[col] = np.nan
-
-        base_cols = ["calendar_date", "period_type", "actual", "forecast", "residual"]
-        extra_cols = [c for c in ("level", "trend", "seasonal") if c in fitted_part.columns]
-        decomposition_table = pd.concat([fitted_part, forecast_part], ignore_index=True)
-        decomposition_table = decomposition_table.reindex(columns=base_cols + extra_cols)
-        return decomposition_table
+            forecast_part[col] = np.nan
+        return forecast_part

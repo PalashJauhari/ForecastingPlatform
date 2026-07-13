@@ -69,11 +69,6 @@ def logical_input_file(session_id: str, filename: str) -> str:
     return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/{name}"
 
 
-def logical_pipeline_run_path(session_id: str) -> str:
-    """Logical path for the generated ``pipeline_run.py`` (session root)."""
-    return f"{LOGICAL_AGENT_PREFIX}{session_dir_for_paths(session_id)}/pipeline_run.py"
-
-
 def resolve_agent_path(session_id: str, logical_path: str) -> Path:
     """
     Map ``agent_filesystem/<session-folder>/...`` to a path under this session's
@@ -111,12 +106,3 @@ def resolve_agent_path(session_id: str, logical_path: str) -> Path:
     except ValueError as exc:
         raise ValueError("Path must stay inside the current session workspace.") from exc
     return target
-
-
-def to_agent_path(session_id: str, physical_path: str | Path) -> str:
-    """Physical path under the session root → logical ``agent_filesystem/<session>/...``."""
-    root = session_root(session_id).resolve()
-    target = Path(physical_path).resolve()
-    rel = target.relative_to(root)
-    sid = session_dir_for_paths(session_id)
-    return f"{LOGICAL_AGENT_FS}/{sid}/{rel.as_posix()}"

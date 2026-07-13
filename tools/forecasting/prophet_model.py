@@ -1,5 +1,5 @@
 """
-Prophet forecasting model — inherits the shared ``ForecastingModel`` pipeline.
+Prophet forecasting model — inherits the shared ``ForecastingUnivariateModel`` pipeline.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from prophet import Prophet
 
 from output_validation.forecasting_common import BaseForecastToolInput
 from output_validation.prophet_tool import ProphetToolInput
-from tools.forecasting.base import ForecastingModel, ForecastingToolError
+from tools.forecasting.base import ForecastingToolError, ForecastingUnivariateModel
 
 # Fixed Prophet parameters kept off the tool surface.
 CHANGEPOINT_RANGE = 0.8
@@ -28,7 +28,7 @@ logging.getLogger("prophet").setLevel(logging.ERROR)
 logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
 
 
-class ProphetModel(ForecastingModel):
+class ProphetModel(ForecastingUnivariateModel):
     """Prophet backend for ``prophet_tool``."""
 
     @property
@@ -42,13 +42,9 @@ class ProphetModel(ForecastingModel):
     def fit(
         self,
         df: pd.DataFrame,
-        freq: str,
-        file_name: str,
-        date_column: str,
-        target_column: str,
         params: BaseForecastToolInput,
-    ) -> tuple[Any, dict, dict, list[dict], dict]:
-        """Configure Prophet, fit on ``ds``/``y``, and compute in-sample predictions."""
+    ) -> tuple[Any, dict, dict, list[dict]]:
+        """Configure Prophet and fit on ``ds``/``y``."""
         prophet_params = ProphetToolInput.model_validate(params.model_dump())
 
         try:
@@ -67,8 +63,6 @@ class ProphetModel(ForecastingModel):
             with warns_module.catch_warnings():
                 warns_module.simplefilter("ignore")
                 model.fit(df)
-
-            in_sample = model.predict(df[["ds"]])
         except Exception as exc:
             raise ForecastingToolError(
                 "fit_failed",
@@ -76,7 +70,7 @@ class ProphetModel(ForecastingModel):
                 "fit",
             ) from exc
 
-        # Fit-quality metrics on rows where actual y is present.
+        in_sample = model.predict(df[["ds"]])
         actuals = df["y"].to_numpy()
         fitted_vals = in_sample["yhat"].to_numpy()
         mask = ~np.isnan(actuals) & ~np.isnan(fitted_vals)
@@ -120,12 +114,10 @@ class ProphetModel(ForecastingModel):
             "yearly_seasonality": bool(prophet_params.yearly_seasonality),
             "monthly_fourier_order": MONTHLY_FOURIER_ORDER if prophet_params.monthly_seasonality else None,
             "daily_seasonality": DAILY_SEASONALITY,
+            **changepoints,
         }
 
-        return model, model_spec, fit_quality, [], {
-            "in_sample": in_sample,
-            "changepoints": changepoints,
-        }
+        return model, model_spec, fit_quality, []
 
     def extract_changepoints(self, model: Any) -> dict:
         """Summarise Prophet changepoint dates and top deltas."""
@@ -152,24 +144,20 @@ class ProphetModel(ForecastingModel):
         except Exception:
             pass
         return {
-            "changepoint_range": CHANGEPOINT_RANGE,
             "changepoint_dates": changepoint_dates,
             "largest_delta_changepoints": largest_delta_changepoints,
         }
 
-    def analyze_residuals(
-        self,
-        fitted_table: pd.DataFrame,
-        model_spec: dict,
-        fit_extras: dict,
-    ) -> dict:
-        """MAD-based residual outlier diagnostics on the fitted table."""
-        actuals = pd.to_numeric(fitted_table["actual"], errors="coerce").to_numpy()
-        fitted_vals = pd.to_numeric(fitted_table["fitted"], errors="coerce").to_numpy()
-        dates = pd.to_datetime(fitted_table["calendar_date"], errors="coerce")
-        mask = ~np.isnan(actuals) & ~np.isnan(fitted_vals)
+    def analyze_residuals(self, residual_table: pd.DataFrame) -> dict:
+        """MAD-based residual outlier diagnostics on the residual table."""
+        actuals = pd.to_numeric(residual_table["actual"], errors="coerce").to_numpy()
+        fitted_vals = pd.to_numeric(residual_table["fitted"], errors="coerce").to_numpy()
+        residuals = pd.to_numeric(residual_table["residual"], errors="coerce").to_numpy()
+        dates = pd.to_datetime(residual_table["calendar_date"], errors="coerce")
+        mask = ~np.isnan(actuals) & ~np.isnan(fitted_vals) & ~np.isnan(residuals)
         actuals_v = actuals[mask]
         fitted_v = fitted_vals[mask]
+        residuals_v = residuals[mask]
         dates_v = dates.to_numpy()[mask]
         n = int(len(actuals_v))
 
@@ -177,20 +165,19 @@ class ProphetModel(ForecastingModel):
             residual_median = residual_mad = robust_sigma = lower_bound = upper_bound = float("nan")
             outlier_points: list[dict] = []
         else:
-            residuals = actuals_v - fitted_v
-            residual_median = float(np.median(residuals))
-            absolute_deviation = np.abs(residuals - residual_median)
+            residual_median = float(np.median(residuals_v))
+            absolute_deviation = np.abs(residuals_v - residual_median)
             residual_mad = float(np.median(absolute_deviation))
             robust_sigma = float(1.4826 * residual_mad)
             lower_bound = float(residual_median - 3.0 * robust_sigma)
             upper_bound = float(residual_median + 3.0 * robust_sigma)
-            outlier_mask = (residuals < lower_bound) | (residuals > upper_bound)
+            outlier_mask = (residuals_v < lower_bound) | (residuals_v > upper_bound)
             outlier_points = [
                 {
                     "calendar_date": pd.Timestamp(dates_v[idx]).date().isoformat(),
                     "actual": None if np.isnan(actuals_v[idx]) else round(float(actuals_v[idx]), 6),
                     "fitted": None if np.isnan(fitted_v[idx]) else round(float(fitted_v[idx]), 6),
-                    "residual": round(float(residuals[idx]), 6),
+                    "residual": round(float(residuals_v[idx]), 6),
                 }
                 for idx in np.where(outlier_mask)[0]
             ]
@@ -228,99 +215,62 @@ class ProphetModel(ForecastingModel):
             },
         }
 
-    def generate_forecast(
-        self,
-        df: pd.DataFrame,
-        freq: str,
-        model: Any,
-        fit_extras: dict,
-        params: BaseForecastToolInput,
-    ) -> pd.DataFrame:
+    def build_fitted_table(self, df: pd.DataFrame, model: Any) -> pd.DataFrame:
+        """In-sample fitted values from Prophet predict."""
+        in_sample = model.predict(df[["ds"]])
+        fitted_table = in_sample[["ds", "yhat"]].copy()
+        fitted_table = fitted_table.rename(columns={"ds": "calendar_date", "yhat": "fitted"})
+        fitted_table["calendar_date"] = pd.to_datetime(fitted_table["calendar_date"]).dt.date.astype(str)
+        return fitted_table[["calendar_date", "fitted"]]
+
+    def build_forecast_table(self, model: Any, horizon: int, freq: str) -> pd.DataFrame:
         """Future-only Prophet forecast at the inferred frequency."""
         try:
-            future = model.make_future_dataframe(
-                periods=int(params.horizon),
-                freq=freq,
-                include_history=False,
-            )
+            future = model.make_future_dataframe(periods=horizon, freq=freq, include_history=False)
             forecast_future = model.predict(future)
         except Exception as exc:
             raise ForecastingToolError(
                 "forecast_failed",
                 f"Failed to generate forecast: {exc}",
-                "generate_forecast",
+                "build_forecast_table",
             ) from exc
 
-        in_sample = fit_extras["in_sample"]
-        fitted_components = [c for c in COMPONENT_COLS if c in in_sample.columns]
-        forecast_components = [c for c in COMPONENT_COLS if c in forecast_future.columns]
-        component_cols = forecast_components or fitted_components
-
-        forecast_table = forecast_future[["ds", "yhat"] + component_cols].copy()
-        forecast_table = forecast_table.rename(columns={"ds": "calendar_date", "yhat": "forecast"})
+        forecast_table = forecast_future[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+        forecast_table = forecast_table.rename(
+            columns={"ds": "calendar_date", "yhat": "forecast", "yhat_lower": "lower_95", "yhat_upper": "upper_95"}
+        )
         forecast_table["calendar_date"] = pd.to_datetime(forecast_table["calendar_date"]).dt.date.astype(str)
-        fit_extras["forecast_components"] = component_cols
-        fit_extras["fitted_components"] = fitted_components
-        fit_extras["forecast_future"] = forecast_future
         return forecast_table
 
-    def build_fitted_table(
-        self,
-        df: pd.DataFrame,
-        target_column: str,
-        model: Any,
-        fit_extras: dict,
-    ) -> pd.DataFrame:
-        """In-sample actual, fitted, residual, and component columns."""
-        in_sample = fit_extras["in_sample"]
-        fitted_components = [c for c in COMPONENT_COLS if c in in_sample.columns]
-        fit_extras["fitted_components"] = fitted_components
-
-        fitted_table = pd.merge(
-            df[["ds", "y"]],
-            in_sample[["ds", "yhat"] + fitted_components],
-            on="ds",
-            how="left",
-        )
-        fitted_table["residual"] = fitted_table["y"] - fitted_table["yhat"]
-        fitted_table = fitted_table.rename(columns={"ds": "calendar_date", "y": "actual", "yhat": "fitted"})
-        fitted_table = fitted_table[["calendar_date", "actual", "fitted", "residual"] + fitted_components]
-        fitted_table["calendar_date"] = pd.to_datetime(fitted_table["calendar_date"]).dt.date.astype(str)
-        return fitted_table
-
-    def build_decomposition(
-        self,
-        df: pd.DataFrame,
-        model: Any,
-        fit_extras: dict,
-        fitted_table: pd.DataFrame,
-        forecast_table: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        """Combined fitted + forecast decomposition table."""
-        in_sample = fit_extras["in_sample"]
-        forecast_future = fit_extras.get("forecast_future")
-        if forecast_future is None:
+    def build_fitted_decomposition(self, df: pd.DataFrame, model: Any) -> pd.DataFrame | None:
+        """In-sample Prophet component breakdown."""
+        in_sample = model.predict(df[["ds"]])
+        component_cols = [c for c in COMPONENT_COLS if c in in_sample.columns]
+        if not component_cols:
             return None
 
-        fitted_components = fit_extras.get("fitted_components") or []
-        forecast_components = fit_extras.get("forecast_components") or []
-        all_components = [c for c in COMPONENT_COLS if c in fitted_components or c in forecast_components]
+        decomposition = in_sample[["ds", "yhat"] + component_cols].copy()
+        decomposition = decomposition.rename(columns={"ds": "calendar_date", "yhat": "fitted"})
+        decomposition["calendar_date"] = pd.to_datetime(decomposition["calendar_date"]).dt.date.astype(str)
+        return decomposition
 
-        decomposition_fit = pd.merge(
-            df[["ds", "y"]],
-            in_sample[["ds", "yhat"] + fitted_components],
-            on="ds",
-            how="left",
-        )
-        decomposition_fit = decomposition_fit.rename(columns={"y": "actual"})
-        decomposition_fit["period_type"] = "fitted"
+    def build_forecast_decomposition(self, model: Any, horizon: int, freq: str) -> pd.DataFrame | None:
+        """Forecast-period Prophet component breakdown."""
+        try:
+            future = model.make_future_dataframe(periods=horizon, freq=freq, include_history=False)
+            forecast_future = model.predict(future)
+        except Exception as exc:
+            raise ForecastingToolError(
+                "forecast_failed",
+                f"Failed to generate forecast decomposition: {exc}",
+                "build_forecast_decomposition",
+            ) from exc
 
-        decomposition_fcst = forecast_future[["ds", "yhat"] + forecast_components].copy()
-        decomposition_fcst["actual"] = np.nan
-        decomposition_fcst["period_type"] = "forecast"
+        component_cols = [c for c in COMPONENT_COLS if c in forecast_future.columns]
+        if not component_cols:
+            return None
 
-        decomposition_table = pd.concat([decomposition_fit, decomposition_fcst], ignore_index=True)
-        decomposition_table = decomposition_table.reindex(columns=["ds", "period_type", "actual", "yhat"] + all_components)
-        decomposition_table = decomposition_table.rename(columns={"ds": "calendar_date"})
-        decomposition_table["calendar_date"] = pd.to_datetime(decomposition_table["calendar_date"]).dt.date.astype(str)
-        return decomposition_table
+        decomposition = forecast_future[["ds", "yhat"] + component_cols].copy()
+        decomposition = decomposition.rename(columns={"ds": "calendar_date", "yhat": "forecast"})
+        decomposition["calendar_date"] = pd.to_datetime(decomposition["calendar_date"]).dt.date.astype(str)
+        return decomposition

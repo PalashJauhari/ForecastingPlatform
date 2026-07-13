@@ -66,7 +66,7 @@ async def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig)
     context_content = (
         f"## Conversation Summary\n{summary}\n\n"
         f"## Session workspace (data_profile)\n{profile_block}\n\n"
-        f"## Available execution tools (Orchestrator only — for planning, do NOT call)\n"
+        f"## Available execution tools (orchestrator-only — do not name these in todos)\n"
         f"{TOOL_CATALOG_TEXT}"
     )
     planner_messages = [
