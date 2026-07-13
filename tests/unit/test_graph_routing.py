@@ -6,7 +6,6 @@ from langgraph.graph import END
 from graph.graph import route_after_orchestrator, route_after_planning_gate
 from sub_agents.coding_sub_agent.graph import (
     route_after_e2b,
-    route_after_input_check,
     route_after_io,
     route_after_semgrep,
     route_codegen_limit_gate,
@@ -106,20 +105,12 @@ def test_route_after_semgrep_to_gate_on_failure() -> None:
     assert route_after_semgrep({"pipeline_violation": {"stage": "semgrep", "message": "blocked"}}) == "CodeGenLimitGate"
 
 
-def test_route_after_io_to_input_check_when_clean() -> None:
-    assert route_after_io({"pipeline_violation": {}}) == "InputFilesCheck"
+def test_route_after_io_to_e2b_when_clean() -> None:
+    assert route_after_io({"pipeline_violation": {}}) == "E2BExecute"
 
 
 def test_route_after_io_to_gate_on_failure() -> None:
     assert route_after_io({"pipeline_violation": {"stage": "io_allowlist", "message": "undeclared read"}}) == "CodeGenLimitGate"
-
-
-def test_route_after_input_check_to_e2b_when_present() -> None:
-    assert route_after_input_check({"pipeline_violation": {}}) == "E2BExecute"
-
-
-def test_route_after_input_check_to_prepare_response_when_missing() -> None:
-    assert route_after_input_check({"pipeline_violation": {"stage": "missing_inputs", "message": "missing sales.csv"}}) == "PrepareResponse"
 
 
 def test_route_after_e2b_to_prepare_response_on_success() -> None:
@@ -128,3 +119,10 @@ def test_route_after_e2b_to_prepare_response_on_success() -> None:
 
 def test_route_after_e2b_to_gate_on_failure() -> None:
     assert route_after_e2b({"pipeline_violation": {"stage": "e2b", "message": "stderr"}}) == "CodeGenLimitGate"
+
+
+def test_graph_tools_includes_read_file():
+    from graph.graph import TOOLS
+
+    names = {tool.name for tool in TOOLS}
+    assert "read_file_tool" in names

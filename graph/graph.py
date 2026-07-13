@@ -48,6 +48,7 @@ from output_validation.planning_gate import PlanningGateOutput
 from prompts.graph_prompts import FINAL_ANSWER_PROMPT, PLANNING_GATE_SYSTEM_PROMPT, SYSTEM_PROMPT
 from session_paths import session_id_from_config
 from tools.coding_tools.coding_tool import coding_tool
+from tools.file_management_tools.read_file_tool import read_file_tool
 from sub_agents.planner_sub_agent.graph import get_planner_graph
 from tools.file_management_tools.profiling_data import profile_session_workspace
 from tools.forecasting.holt_winters_tool import holt_winters_tool
@@ -138,6 +139,7 @@ class AgentState(TypedDict):
 
 TOOLS = [
     coding_tool,
+    read_file_tool,
     sarima_tool,
     prophet_tool,
     holt_winters_tool,
@@ -271,8 +273,9 @@ async def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, A
 
     context = (
         "## File Rules\n"
-        "Refer to every CSV/Excel by filename only (for example `sales.csv`) in messages and tool arguments. "
-        "Do not write `agent_filesystem/`, session ids, or path prefixes.\n\n"
+        "Use only `file` basenames from data_profile in todos and reasoning. "
+        "Use column names from column_profiles[].name. "
+        "Never write folder paths or session prefixes.\n\n"
         "## Session Workspace\n"
         f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
         "## Current Todo List\n"
@@ -352,7 +355,7 @@ class AnalysisGraph:
     Wrapper around the compiled LangGraph ``StateGraph``.
 
     Notes
-        * **Tools** — ``coding_tool``, ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``, ``update_todo``.
+        * **Tools** — ``coding_tool``, ``read_file_tool``, ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``, ``update_todo``.
         * **Prep** — **ProfileSavedData** → **SummariseConversationalSummary** → **IsPlanningRequired** → **Planner** or **Orchestrator**.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield ``stream_mode="updates"`` chunks.
         * **Construction** — plain ``AnalysisGraph()`` only supports the in-memory

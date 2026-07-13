@@ -135,11 +135,6 @@ def build_coding_graph():
     def route_after_io(state: CodingStubState) -> str:
         if has_violation(state):
             return "CodeGenLimitGate"
-        return "InputFilesCheck"
-
-    def route_after_input_check(state: CodingStubState) -> str:
-        if has_violation(state):
-            return "PrepareResponse"
         return "E2BExecute"
 
     def route_after_e2b(state: CodingStubState) -> str:
@@ -153,7 +148,6 @@ def build_coding_graph():
         "CodeGen",
         "SemgrepScan",
         "IOAllowlistScan",
-        "InputFilesCheck",
         "E2BExecute",
         "PrepareResponse",
         "CodegenExhausted",
@@ -175,12 +169,7 @@ def build_coding_graph():
     builder.add_conditional_edges(
         "IOAllowlistScan",
         route_after_io,
-        {"InputFilesCheck": "InputFilesCheck", "CodeGenLimitGate": "CodeGenLimitGate"},
-    )
-    builder.add_conditional_edges(
-        "InputFilesCheck",
-        route_after_input_check,
-        {"PrepareResponse": "PrepareResponse", "E2BExecute": "E2BExecute"},
+        {"E2BExecute": "E2BExecute", "CodeGenLimitGate": "CodeGenLimitGate"},
     )
     builder.add_conditional_edges(
         "E2BExecute",

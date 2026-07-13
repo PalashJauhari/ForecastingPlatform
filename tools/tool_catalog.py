@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 
 from tools.coding_tools.coding_tool import coding_tool
+from tools.file_management_tools.read_file_tool import read_file_tool
 from tools.forecasting.holt_winters_tool import holt_winters_tool
 from tools.forecasting.prophet_tool import prophet_tool
 from tools.forecasting.sarima_tool import sarima_tool
 
 ORCHESTRATOR_EXECUTION_TOOLS = [
     coding_tool,
+    read_file_tool,
     sarima_tool,
     prophet_tool,
     holt_winters_tool,

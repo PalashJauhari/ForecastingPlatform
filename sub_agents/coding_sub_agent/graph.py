@@ -1,5 +1,5 @@
 """
-Coding sub-graph: CodeGenLimitGate → CodeGen → SemgrepScan → IOAllowlistScan → InputFilesCheck
+Coding sub-graph: CodeGenLimitGate → CodeGen → SemgrepScan → IOAllowlistScan
 → E2BExecute; all terminal paths → PrepareResponse → END.
 """
 
@@ -17,7 +17,7 @@ from langfuse.types import TraceContext
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, RetryPolicy
-from session_paths import ensure_session_dirs, logical_input_file, session_dir_for_paths, session_root
+from session_paths import ensure_session_dirs, session_root
 
 from observability.langfuse_handler import (
     add_trace_context_to_config,
@@ -46,7 +46,7 @@ from sub_agents.coding_sub_agent.config import (
 from sub_agents.coding_sub_agent.prompts import CODE_GENERATION_SYSTEM_PROMPT
 from sub_agents.coding_sub_agent.code_scan.io_allowlist_scan import run_io_allowlist_scan
 from sub_agents.coding_sub_agent.code_scan.semgrep_scan import run_semgrep_scan
-from sub_agents.coding_sub_agent.validation import CodeGenerationOutput, sanitize_run_id
+from sub_agents.coding_sub_agent.validation import CodeGenerationOutput, build_coding_tool_response, sanitize_run_id
 
 coding_trace_ctx: ContextVar[TraceContext | None] = ContextVar("coding_trace_ctx", default=None)
 
@@ -206,48 +206,6 @@ def io_allowlist_scan_node(state: CodingAgentState, config: RunnableConfig) -> D
         return {"pipeline_violation": {"stage": "io_allowlist", "message": detail}}
 
 
-def _find_missing_input_files(session_id: str, input_files: list[str]) -> list[str]:
-    """Blocking helper: return the basenames in *input_files* not present on disk."""
-    missing: list[str] = []
-    for basename in input_files:
-        name = Path(basename).name
-        if not (session_root(session_id) / name).is_file():
-            missing.append(name)
-    return missing
-
-
-def input_files_check_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    """Verify declared input_files exist under the session workspace before E2B."""
-    ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
-    session_id = state["session_id"]
-    input_files = state.get("input_files") or []
-    with traced_span("InputFilesCheck", trace_context=ctx) as span:
-        if not input_files:
-            if span is not None:
-                span.update(output={"passed": True, "pipeline_violation": {}})
-            return {"pipeline_violation": {}}
-
-        missing = _find_missing_input_files(session_id, input_files)
-
-        if missing:
-            lines = [
-                "Declared input file(s) missing from session workspace:",
-                "",
-            ]
-            for name in missing:
-                lines.append(f"  - {name} (expected at {logical_input_file(session_id, name)})")
-            lines.append("")
-            lines.append("Upload the file(s) or fix input_files before calling coding_tool again.")
-            detail = "\n".join(lines)
-            if span is not None:
-                span.update(output={"passed": False, "missing": missing})
-            return {"pipeline_violation": {"stage": "missing_inputs", "message": detail}}
-
-        if span is not None:
-            span.update(output={"passed": True, "pipeline_violation": {}})
-        return {"pipeline_violation": {}}
-
-
 # ---------------------------------------------------------------------------
 # E2BExecute
 # ---------------------------------------------------------------------------
@@ -315,8 +273,7 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
                 if ext in PLOT_FILE_EXTENSIONS:
                     dest = run_workspace / basename
                     dest.write_bytes(data)
-                    sid = session_dir_for_paths(session_id)
-                    plots.append(f"agent_filesystem/{sid}/run_{run_id}/{basename}")
+                    plots.append(basename)
                 else:
                     dest = local_root / basename
                     dest.write_bytes(data)
@@ -380,19 +337,11 @@ def prepare_response_node(state: CodingAgentState, config: RunnableConfig) -> Di
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     violation = state.get("pipeline_violation") or {}
     exec_result = state.get("code_execution_result") or {}
-    tool_response = {
-        "status": "success" if not violation else "failed",
-        "failure": violation or None,
-        "execution": {
-            "stdout": exec_result.get("stdout", ""),
-            "stderr": exec_result.get("stderr", ""),
-        },
-        "artifacts": {
-            "outputs": exec_result.get("copied_outputs", []),
-            "plots": exec_result.get("plots", []),
-        },
-        "code": state.get("code"),
-    }
+    tool_response = build_coding_tool_response(
+        violation=violation,
+        exec_result=exec_result,
+        code=state.get("code"),
+    )
     result = {"tool_response": tool_response}
     with traced_span("PrepareResponse", trace_context=ctx) as span:
         if span is not None:
@@ -420,12 +369,6 @@ def route_after_semgrep(state: CodingAgentState) -> str:
 def route_after_io(state: CodingAgentState) -> str:
     if (state.get("pipeline_violation") or {}).get("message", "").strip():
         return "CodeGenLimitGate"
-    return "InputFilesCheck"
-
-
-def route_after_input_check(state: CodingAgentState) -> str:
-    if (state.get("pipeline_violation") or {}).get("message", "").strip():
-        return "PrepareResponse"
     return "E2BExecute"
 
 
@@ -454,7 +397,6 @@ class CodingGraph:
         builder.add_node("CodeGen", codegen_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("SemgrepScan", semgrep_scan_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("IOAllowlistScan", io_allowlist_scan_node, retry_policy=node_retry, error_handler=handle_node_failure)
-        builder.add_node("InputFilesCheck", input_files_check_node)
         builder.add_node("E2BExecute", e2b_execute_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("PrepareResponse", prepare_response_node)
         builder.add_node("CodegenExhausted", codegen_exhausted_node)
@@ -474,12 +416,7 @@ class CodingGraph:
         builder.add_conditional_edges(
             "IOAllowlistScan",
             route_after_io,
-            {"InputFilesCheck": "InputFilesCheck", "CodeGenLimitGate": "CodeGenLimitGate"},
-        )
-        builder.add_conditional_edges(
-            "InputFilesCheck",
-            route_after_input_check,
-            {"PrepareResponse": "PrepareResponse", "E2BExecute": "E2BExecute"},
+            {"E2BExecute": "E2BExecute", "CodeGenLimitGate": "CodeGenLimitGate"},
         )
         builder.add_conditional_edges(
             "E2BExecute",

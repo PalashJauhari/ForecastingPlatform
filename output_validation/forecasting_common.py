@@ -56,10 +56,3 @@ class BaseForecastToolInput(BaseModel):
             )
         return name
 
-
-class InterpretationSummaryOutput(BaseModel):
-    """Single business-readable summary for the forecasting tool response."""
-
-    summary: str = Field(
-        description="2-4 sentences for the user: fit quality, residual concerns, forecast direction, and caveats.",
-    )
