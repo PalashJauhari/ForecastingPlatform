@@ -216,26 +216,16 @@ async def is_planning_required(state: AgentState, config: RunnableConfig) -> Dic
     summary = state.get("message_summary", "")
     data_profile_rows = state.get("data_profile") or []
 
-    latest_human_text = ""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            content = msg.content
-            if isinstance(content, str) and content.strip():
-                latest_human_text = content.strip()
-                break
-
     context = (
         "## Session Workspace\n"
         f"{json.dumps(data_profile_rows, indent=2, ensure_ascii=False, default=str)}\n\n"
         "## Conversation Summary\n"
-        f"{summary}\n\n"
-        "## Latest user message\n"
-        f"{latest_human_text}\n"
+        f"{summary}\n"
     )
     gate_messages = [
         SystemMessage(content=PLANNING_GATE_SYSTEM_PROMPT),
         HumanMessage(content=context),
-    ]
+    ] + list(messages)
     model = PLANNING_GATE_MODEL
 
     with traced_span("IsPlanningRequired", trace_context=trace_context, metadata={"session_id": session_id}) as node_span:
@@ -250,10 +240,18 @@ async def is_planning_required(state: AgentState, config: RunnableConfig) -> Dic
         if node_span is not None:
             node_span.update(output={"decision": decision, "reason": reason})
 
-    if decision == "skip" and latest_human_text:
-        return {
-            "todos": [{"id": "1", "content": latest_human_text, "status": "pending"}],
-        }
+    if decision == "skip":
+        latest_human_text = ""
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                content = msg.content
+                if isinstance(content, str) and content.strip():
+                    latest_human_text = content.strip()
+                    break
+        if latest_human_text:
+            return {
+                "todos": [{"id": "1", "content": latest_human_text, "status": "pending"}],
+            }
     return {}
 
 

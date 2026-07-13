@@ -3,6 +3,7 @@
 PLANNING_GATE_SYSTEM_PROMPT = """\
 # Role
 You decide whether the latest user request needs multi-step planning before execution.
+Read the full conversation messages after the session context block.
 
 # skip
 Choose **skip** for single-step tasks: one clear action, one tool, or one direct answer
