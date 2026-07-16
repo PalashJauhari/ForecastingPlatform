@@ -25,8 +25,9 @@ from langfuse import propagate_attributes
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, StateGraph, add_messages
+from langgraph.errors import NodeError
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command
+from langgraph.types import Command, RetryPolicy
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from typing_extensions import TypedDict
@@ -44,6 +45,7 @@ from observability.langfuse_handler import (
     tracing_root,
     update_llm_generation,
 )
+from output_validation.error_answer import ErrorAnswerOutput
 from output_validation.planning_gate import PlanningGateOutput
 from prompts.graph_prompts import FINAL_ANSWER_PROMPT, PLANNING_GATE_SYSTEM_PROMPT, SYSTEM_PROMPT
 from session_paths import session_id_from_config
@@ -94,6 +96,9 @@ def _env_str(name: str, default: str) -> str:
 _USE_NEON = _env_bool("MAIN_CHECKPOINTER_USE_NEON", default=False)
 GRAPH_RECURSION_LIMIT = _env_int("MAIN_GRAPH_RECURSION_LIMIT", default=100)
 GRAPH_MAX_CONCURRENCY = _env_int("MAIN_GRAPH_MAX_CONCURRENCY", default=2)
+GRAPH_NODE_RETRY_MAX_ATTEMPTS = _env_int("GRAPH_NODE_RETRY_MAX_ATTEMPTS", default=3)
+GRAPH_NODE_RETRY_INITIAL_INTERVAL = float(_env_int("GRAPH_NODE_RETRY_INITIAL_INTERVAL", default=1))
+GRAPH_NODE_RETRY_BACKOFF_FACTOR = float(_env_int("GRAPH_NODE_RETRY_BACKOFF_FACTOR", default=2))
 ORCHESTRATOR_MODEL = _env_str("MAIN_MODEL_ORCHESTRATOR", default="gpt-5.4-mini")
 PLANNING_GATE_MODEL = _env_str("MAIN_MODEL_PLANNING_GATE", default="gpt-4o-mini")
 CONTEXT_KEEP_RECENT_HUMAN_MESSAGES = _env_int("MAIN_CONTEXT_KEEP_RECENT_HUMAN_MESSAGES", default=10)
@@ -131,6 +136,68 @@ class AgentState(TypedDict):
     message_summary: str
     data_profile: List[Any]
     todos: Annotated[list[TodoEntry], merge_todos]
+    graph_failure: dict[str, Any]
+
+
+ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
+ERROR_ANSWER_NODE_NAME = "error_answer_node"
+
+
+def build_error_answer_message(
+    *,
+    payload: dict[str, Any] | None = None,
+) -> AIMessage:
+    """Build an AIMessage storing ErrorAnswer JSON for API/UI parsing."""
+    body = payload or ErrorAnswerOutput(
+        answer=ERROR_ANSWER_USER_MESSAGE,
+        sources=[],
+        confidence="low",
+    ).model_dump()
+    return AIMessage(
+        content=json.dumps(body, ensure_ascii=False),
+        name=ERROR_ANSWER_NODE_NAME,
+        additional_kwargs={"node": ERROR_ANSWER_NODE_NAME},
+    )
+
+
+def handle_node_failure(state: AgentState, error: NodeError) -> Command:
+    """Route retry-exhausted main-graph node failures to ``error_answer``."""
+    del state
+    failed_node = getattr(error, "node", "unknown")
+    detail = getattr(error, "error", error)
+    return Command(
+        update={"graph_failure": {"failed_node": failed_node, "detail": str(detail)}},
+        goto="error_answer",
+    )
+
+
+async def error_answer_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Emit deterministic user-facing fallback after main-graph LLM retries are exhausted."""
+    trace_context = trace_context_from_runnable_config(config)
+    payload = ErrorAnswerOutput(
+        answer=ERROR_ANSWER_USER_MESSAGE,
+        sources=[],
+        confidence="low",
+    ).model_dump()
+    result = {"messages": [build_error_answer_message(payload=payload)]}
+    with traced_span("error_answer", trace_context=trace_context) as span:
+        if span is not None:
+            span.update(
+                output={
+                    "answer_preview": payload["answer"][:200],
+                    "graph_failure": state.get("graph_failure") or {},
+                }
+            )
+    return result
+
+
+def fresh_turn_invoke_input(user_query: str) -> Dict[str, Any]:
+    """Input for a new user turn; clears per-turn failure state."""
+    return {
+        "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+        "todos": [],
+        "graph_failure": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +422,7 @@ class AnalysisGraph:
     Notes
         * **Tools** — ``coding_tool``, ``read_file_tool``, ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``, ``update_todo``.
         * **Prep** — **ProfileSavedData** → **SummariseConversationalSummary** → **IsPlanningRequired** → **Planner** or **Orchestrator**.
+        * **LLM node retries** — ``RetryPolicy`` on prep/orchestrator/final nodes; exhaustion routes to ``error_answer`` → END.
         * **Streaming** — :meth:`stream_graph` / :meth:`stream_resume` yield ``stream_mode="updates"`` chunks.
         * **Construction** — plain ``AnalysisGraph()`` only supports the in-memory
           checkpointer. When ``MAIN_CHECKPOINTER_USE_NEON=true``, build via the async
@@ -377,15 +445,41 @@ class AnalysisGraph:
 
         builder = StateGraph(AgentState)
         tool_node = ToolNode(TOOLS)
+        node_retry = RetryPolicy(
+            max_attempts=GRAPH_NODE_RETRY_MAX_ATTEMPTS,
+            initial_interval=GRAPH_NODE_RETRY_INITIAL_INTERVAL,
+            backoff_factor=GRAPH_NODE_RETRY_BACKOFF_FACTOR,
+        )
 
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
-        builder.add_node("SummariseConversationalSummary", summarise_conversational_summary)
-        builder.add_node("IsPlanningRequired", is_planning_required)
+        builder.add_node(
+            "SummariseConversationalSummary",
+            summarise_conversational_summary,
+            retry_policy=node_retry,
+            error_handler=handle_node_failure,
+        )
+        builder.add_node(
+            "IsPlanningRequired",
+            is_planning_required,
+            retry_policy=node_retry,
+            error_handler=handle_node_failure,
+        )
         builder.add_node("Planner", get_planner_graph())
-        builder.add_node("Orchestrator", orchestrator)
+        builder.add_node(
+            "Orchestrator",
+            orchestrator,
+            retry_policy=node_retry,
+            error_handler=handle_node_failure,
+        )
         builder.add_node("RunTools", tool_node)
-        builder.add_node("FinalAnswer", final_answer)
+        builder.add_node(
+            "FinalAnswer",
+            final_answer,
+            retry_policy=node_retry,
+            error_handler=handle_node_failure,
+        )
+        builder.add_node("error_answer", error_answer_node)
 
         builder.set_entry_point("ProfileSavedData")
         builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
@@ -404,6 +498,7 @@ class AnalysisGraph:
         builder.add_edge("RunTools", "ProfileSavedData_PostTools")
         builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
         builder.add_edge("FinalAnswer", END)
+        builder.add_edge("error_answer", END)
 
         self.graph = builder.compile(checkpointer=self.checkpointer)
 
@@ -442,10 +537,7 @@ class AnalysisGraph:
 
     async def stream_graph(self, session_id: str, user_query: str) -> AsyncIterator[Dict[str, Any]]:
         """Yield graph progress as ``updates`` payloads."""
-        invoke_input = {
-            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
-            "todos": [],
-        }
+        invoke_input = fresh_turn_invoke_input(user_query)
         if not is_tracing_enabled():
             async for update in self.graph.astream(invoke_input, config=self.thread_config(session_id), stream_mode="updates"):
                 yield update
@@ -473,10 +565,7 @@ class AnalysisGraph:
             flush_langfuse()
 
     async def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
-        invoke_input = {
-            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
-            "todos": [],
-        }
+        invoke_input = fresh_turn_invoke_input(user_query)
         if not is_tracing_enabled():
             return await self.graph.ainvoke(invoke_input, config=self.thread_config(session_id))
         try:
