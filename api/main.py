@@ -44,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from graph import AnalysisGraph
+from graph.graph import ERROR_ANSWER_NODE_NAME, AnalysisGraph
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,
@@ -207,6 +207,38 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     return images
 
 
+def _message_name(message: Any) -> str | None:
+    name = getattr(message, "name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    additional = getattr(message, "additional_kwargs", None) or {}
+    if isinstance(additional, dict):
+        node = additional.get("node")
+        if isinstance(node, str) and node.strip():
+            return node.strip()
+    return None
+
+
+def user_facing_answer_from_messages(messages: list[Any]) -> str:
+    """Prefer ``error_answer_node`` JSON; otherwise last AI message text."""
+    for message in reversed(messages or []):
+        if not isinstance(message, AIMessage):
+            continue
+        content = message.content
+        if not content:
+            continue
+        text = content if isinstance(content, str) else str(content)
+        if _message_name(message) == ERROR_ANSWER_NODE_NAME or text.lstrip().startswith("{"):
+            try:
+                payload = json.loads(text)
+                if isinstance(payload, dict) and payload.get("answer"):
+                    return str(payload["answer"])
+            except json.JSONDecodeError:
+                pass
+        return text
+    return ""
+
+
 async def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build the JSON body from a graph ``invoke()`` return value.
@@ -238,10 +270,7 @@ async def get_api_response(session_id: str, result: Dict[str, Any]) -> Dict[str,
         }
 
     messages = result.get("messages", [])
-    last_ai = next(
-        (m.content for m in reversed(messages) if isinstance(m, AIMessage) and m.content),
-        None,
-    )
+    last_ai = user_facing_answer_from_messages(list(messages))
     last_tool_result = next(
         (m.content for m in reversed(messages) if getattr(m, "type", "") == "tool"),
         None,
@@ -464,9 +493,20 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
         msgs = payload.get("messages") or []
         for msg in reversed(msgs):
             if isinstance(msg, AIMessage) and msg.content:
-                preview = str(msg.content).strip().split("\n")[0][:120]
-                event["summary_preview"] = preview + ("…" if len(str(msg.content).strip()) > 120 else "")
+                preview = user_facing_answer_from_messages([msg]).strip().split("\n")[0][:120]
+                event["summary_preview"] = preview + ("…" if len(preview) == 120 else "")
                 break
+
+    elif node_name == "error_answer":
+        event["label"] = "Error — try again"
+        msgs = payload.get("messages") or []
+        answer = user_facing_answer_from_messages(list(msgs))
+        if answer:
+            preview = answer.strip().split("\n")[0][:120]
+            event["summary_preview"] = preview + ("…" if len(preview) == 120 else "")
+        failure = payload.get("graph_failure") or {}
+        if failure:
+            event["graph_failure"] = failure
 
     else:
         event["label"] = node_name.replace("_", " ").title()

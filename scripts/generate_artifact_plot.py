@@ -58,17 +58,20 @@ def build_main_graph():
     for name in (
         "ProfileSavedData",
         "SummariseConversationalSummary",
+        "IsPlanningRequired",
         "Planner",
         "Orchestrator",
         "RunTools",
         "ProfileSavedData_PostTools",
         "FinalAnswer",
+        "error_answer",
     ):
         builder.add_node(name, noop)
 
     builder.set_entry_point("ProfileSavedData")
     builder.add_edge("ProfileSavedData", "SummariseConversationalSummary")
-    builder.add_edge("SummariseConversationalSummary", "Planner")
+    builder.add_edge("SummariseConversationalSummary", "IsPlanningRequired")
+    builder.add_edge("IsPlanningRequired", "Planner")
     builder.add_edge("Planner", "Orchestrator")
     builder.add_conditional_edges(
         "Orchestrator",
@@ -78,6 +81,7 @@ def build_main_graph():
     builder.add_edge("RunTools", "ProfileSavedData_PostTools")
     builder.add_edge("ProfileSavedData_PostTools", "Orchestrator")
     builder.add_edge("FinalAnswer", END)
+    builder.add_edge("error_answer", END)
     return builder.compile()
 
 

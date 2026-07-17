@@ -9,6 +9,6 @@ Example::
     state  = await g.get_state(session_id="abc")
 """
 
-from .graph import AgentState, AnalysisGraph
+from graph.graph import AgentState, AnalysisGraph
 
 __all__ = ["AgentState", "AnalysisGraph"]

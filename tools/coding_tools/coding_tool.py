@@ -53,10 +53,17 @@ def coding_tool(
       compute (read_file returns rows only; coding_tool runs arbitrary analysis).
     - **Custom modeling or logic** — any analysis the built-in forecast tools do not cover.
 
-    ## When NOT to use
-    - Standard univariate forecast → ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``.
-    - Simple row preview from a file → ``read_file_tool``.
+    ## When NOT to use (prefer dedicated tools first)
+    **First preference:** use the dedicated tool when it fits. Only reach for ``coding_tool``
+    when those tools cannot solve the task, or session data is not in the format they need —
+    then use ``coding_tool`` as a **bridge** to clean, reshape, or align files so forecast or
+    read tools can run next.
+
+    - Standard univariate forecast → try ``sarima_tool``, ``prophet_tool``, ``holt_winters_tool``
+      first; use ``coding_tool`` only to prepare data if columns, frequency, or layout block them.
+    - Simple row preview from a file → ``read_file_tool`` first.
     - Answer already in ``data_profile`` (filenames, dtypes, 5-row head, column stats).
+    - Do not default to ``coding_tool`` when a dedicated tool already applies with current data.
 
     ## How to call
     1. Read ``data_profile`` first — pick ``file`` basenames and ``column_profiles[].name``.
