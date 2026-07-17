@@ -75,31 +75,52 @@ You (browser)  →  Dash UI  →  FastAPI  →  AI agent  →  tools
 **Each new message**
 
 1. Profile files in the session workspace.  
-2. **Planner** replaces the todo list for this turn (and may **ask you** a question—execution pauses until you resume).  
-3. **Orchestrator** calls tools (forecast, code, update todo status) until work is done.  
-4. **Final answer** node writes the user-facing reply.
+2. Summarize older conversation context when needed.  
+3. A **planning gate** decides whether to plan this turn or go straight to the orchestrator.  
+4. **Planner** (when required) replaces the todo list (and may **ask you** a question—execution pauses until you resume).  
+5. **Orchestrator** calls tools until work is done; after tools, data is re-profiled.  
+6. **Final answer** writes the user-facing reply (transient node failures route to `error_answer`).
 
-Technical readers: main graph is `AnalysisGraph` in `graph/graph.py` — `ProfileSavedData` → `Planner` → `Orchestrator` ↔ `RunTools` → `FinalAnswer`.
+Technical readers: main graph is `AnalysisGraph` in `graph/graph.py`:
+
+```text
+ProfileSavedData
+  → SummariseConversationalSummary
+  → IsPlanningRequired → Planner? → Orchestrator
+                              ↘─────────────┘
+  Orchestrator ↔ RunTools → ProfileSavedData_PostTools → Orchestrator
+  Orchestrator → FinalAnswer | error_answer → END
+```
 
 ---
 
 ## Quickstart
 
+**Requires Python 3.10+** (3.12 recommended). LangChain 1.x / Langfuse 4.x need 3.10+.
+
 ### 1. Clone and install
 
 ```bash
+git clone https://github.com/PalashJauhari/ForecastingPlatform.git
+cd ForecastingPlatform
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Or: `make install`.
+
 ### 2. Configure environment
+
+```bash
+cp .env.example .env
+```
 
 | Location | What to set |
 |----------|-------------|
-| Repo root `.env` (from `.env.example`) | All runtime config: `OPENAI_API_KEY`, `MAIN_*`, `PLANNER_*`, `CODING_*`, optional `DATABASE_URL`, optional Langfuse keys |
+| Repo root `.env` | `OPENAI_API_KEY`, `MAIN_*`, `PLANNER_*`, `CODING_*`, optional `DATABASE_URL`, optional Langfuse keys |
 
-Use one `.env` at repo root. Secrets stay in `.env` only (never commit them).
+Full knob list: [`.env.example`](.env.example). Secrets stay in `.env` only (never commit them).
 
 For **custom Python analysis**, build the E2B sandbox template once (see [E2B template](#e2b-template-one-time-setup) below).
 
@@ -107,6 +128,7 @@ For **custom Python analysis**, build the E2B sandbox template once (see [E2B te
 
 ```bash
 ./start.sh
+# stop: ./kill.sh   (or: make kill)
 ```
 
 - **API:** http://127.0.0.1:8000  
@@ -115,6 +137,15 @@ For **custom Python analysis**, build the E2B sandbox template once (see [E2B te
 ### 4. Use it
 
 Upload a CSV in the sidebar, ask a forecasting or analysis question, and watch progress in the chat.
+
+### 5. Tests
+
+```bash
+make test
+# or: pytest
+```
+
+CI runs the same suite on push/PR (see `.github/workflows/ci.yml`).
 
 ---
 
@@ -234,22 +265,27 @@ The chat UI does not expose trace IDs—tracing is for operators and developers.
 ## Project structure
 
 ```text
-api/                 FastAPI service and SSE streaming
-graph/               Main LangGraph agent (AnalysisGraph)
+api/                   FastAPI service and SSE streaming
+graph/                 Main LangGraph agent (AnalysisGraph)
 sub_agents/
-  planner_sub_agent/   PlannerGraph — todos, ask_user interrupt
-  coding_sub_agent/    CodingGraph — codegen, Semgrep scan, E2B
-    e2b/               Template build + sandbox requirements
-    code_scan/         Semgrep rules + static scan
-tools/               Main-graph tools only
-  coding_tools/      coding_tool → CodingGraph (precheck at tool entry)
-  file_management_tools/  read_file_tool
-  planning/          update_todo (orchestrator)
-  forecasting/       SARIMA / Prophet / Holt-Winters models + tools
-ui/                  Dash chat application
-prompts/             Orchestrator system prompt
-middleware/          LLM clients, rate limiting
-session_paths.py     Session filesystem layout
+  planner_sub_agent/     PlannerGraph — todos, ask_user interrupt
+  coding_sub_agent/      CodingGraph — codegen, Semgrep scan, E2B
+    e2b/                 Template build + sandbox requirements
+    code_scan/           Semgrep rules + static scan
+tools/                 Main-graph tools only
+  coding_tools/          coding_tool → CodingGraph
+  file_management_tools/ read_file_tool, profiling
+  planning/              update_todo (orchestrator)
+  forecasting/           SARIMA / Prophet / Holt-Winters
+output_validation/     Pydantic schemas for tool / gate inputs
+observability/         Langfuse helpers
+ui/                    Dash chat application
+prompts/               Orchestrator system prompt
+middleware/            LLM clients, rate limiting, context editing
+tests/unit/            Pytest suite
+scripts/               Dev helpers (e.g. graph diagrams)
+session_paths.py       Session filesystem layout
+start.sh / kill.sh     Local run / stop
 ```
 
 **Tool placement:** main-graph tools register on `graph/graph.py`. Planner-only tools (`write_todo`, `ask_user`) live under `sub_agents/planner_sub_agent/tools/`.
@@ -274,8 +310,14 @@ session_paths.py     Session filesystem layout
 
 ## For contributors
 
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short notes:
+
 - **Prompts** (`prompts/`, `sub_agents/*/prompts.py`) hold LLM instructions; **code comments** explain graph wiring—invariants, not duplicated prompt text.
 - **Forecasting** — inherit `ForecastingUnivariateModel`; snake_case public methods; tool docstrings are the orchestrator contract.
 - **Planner** — never names orchestrator tools in todo text; outcomes only (`write_todo` / `ask_user`).
 - **Entry points** — main graph: `graph/graph.py`; sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`.
 - **Diagrams** — `python scripts/generate_artifact_plot.py` → `artifact/*.png`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

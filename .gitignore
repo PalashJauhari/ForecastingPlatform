@@ -27,11 +27,17 @@ dist/
 build/
 *.egg-info/
 *.egg
+*.pem
 
-# --- Testing ---
+# --- Testing / type / lint caches ---
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
 
 # --- Office / docs (local guides) ---
 *.docx
