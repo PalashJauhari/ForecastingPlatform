@@ -44,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from graph.graph import ERROR_ANSWER_NODE_NAME
+from graph.graph import ERROR_ANSWER_NODE_NAME, AnalysisGraph
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,

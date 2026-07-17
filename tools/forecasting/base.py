@@ -277,6 +277,8 @@ class ForecastingUnivariateModel(ABC):
         ) as tool_span:
             warnings_out: list = []
             try:
+                # 1) Load session file, check columns/frequency/min obs.
+                #    Out: df with columns ds/y; freq = pandas inferred frequency string.
                 df, freq = self.validate_data(
                     self.session_id,
                     params.file_name,
@@ -286,32 +288,49 @@ class ForecastingUnivariateModel(ABC):
                 self.inferred_freq = freq
                 n_obs = int(len(df))
 
+                # 2) Model-specific fit (subclass).
+                #    Out: fitted model object; model_spec (hyperparams); fit_quality (metrics);
+                #    fit_warnings (list of warning dicts).
                 model, model_spec, fit_quality, fit_warnings = self.fit(df, params)
                 self.fitted_model_spec = model_spec
                 warnings_out.extend(fit_warnings)
 
+                # 3) In-sample fitted values (subclass).
+                #    Out: DataFrame with calendar_date, fitted.
                 fitted_table = self.build_fitted_table(df, model)
+                # Align actuals to same date key as fitted_table for residual merge.
                 actuals = df[["ds", "y"]].copy()
                 actuals = actuals.rename(columns={"ds": "calendar_date", "y": "actual"})
                 actuals["calendar_date"] = actuals["calendar_date"].dt.date.astype(str)
+                # 4) Merge fitted + actual → residual = actual - fitted.
+                #    Out: DataFrame calendar_date, actual, fitted, residual.
                 residual_table = self.build_residual_table(fitted_table, actuals)
 
+                # 5) Residual diagnostics (subclass); then strip heavy fields (e.g. definitions).
+                #    Out: residual_lean dict for JSON (status + diagnostic fields).
                 residual_raw = self.analyze_residuals(residual_table)
                 residual_lean = self.lean_residual_output(residual_raw)
                 for w in residual_raw.get("warnings", []) or []:
                     warnings_out.append({"code": "residual_assumption", "message": str(w)})
 
+                # 6) Out-of-sample forecast (subclass).
+                #    Out: DataFrame calendar_date, forecast (+ intervals when model provides them).
                 horizon = int(params.horizon)
                 forecast_table = self.build_forecast_table(model, horizon, freq)
+                # 7) Optional decompositions (subclass; default None → skipped below).
+                #    Out: DataFrame or None.
                 fitted_decomp = self.build_fitted_decomposition(df, model)
                 forecast_decomp = self.build_forecast_decomposition(model, horizon, freq)
 
+                # 8) Persist residual (fitted) and forecast tables under session root.
+                #    Out: basename strings only (e.g. experiment_fitted.csv).
                 fitted_csv = self.artifact_basename(experiment_name, "fitted", "csv")
                 forecast_csv = self.artifact_basename(experiment_name, "forecast", "csv")
 
                 self.save_table(residual_table, self.session_id, fitted_csv, "save_fitted")
                 self.save_table(forecast_table, self.session_id, forecast_csv, "save_forecast")
 
+                # 9) Assemble lean pipeline JSON stages for the orchestrator/LLM.
                 pipeline: dict[str, Any] = {
                     "data_validation": {
                         "description": "Loaded and checked regular time series.",
@@ -349,6 +368,7 @@ class ForecastingUnivariateModel(ABC):
                     },
                 }
 
+                # Optional: save + attach in-sample decomposition if subclass returned one.
                 if fitted_decomp is not None:
                     fitted_decomp_csv = self.artifact_basename(experiment_name, "fitted_decomposition", "csv")
                     self.save_table(fitted_decomp, self.session_id, fitted_decomp_csv, "save_fitted_decomposition")
@@ -361,6 +381,7 @@ class ForecastingUnivariateModel(ABC):
                         },
                     }
 
+                # Optional: save + attach forecast-period decomposition if subclass returned one.
                 if forecast_decomp is not None:
                     forecast_decomp_csv = self.artifact_basename(experiment_name, "forecast_decomposition", "csv")
                     self.save_table(
@@ -375,6 +396,7 @@ class ForecastingUnivariateModel(ABC):
                         },
                     }
 
+                # 10) Flatten warnings → top-level strings; return success JSON.
                 warn_msgs = self.warning_messages(warnings_out)
                 response: dict[str, Any] = {
                     "status": "success_with_warnings" if warn_msgs else "success",
@@ -389,11 +411,13 @@ class ForecastingUnivariateModel(ABC):
                 return json.dumps(response, default=str)
 
             except ForecastingToolError as exc:
+                # Domain failure from a pipeline stage → structured error JSON.
                 err = self.error_dict(exc)
                 if tool_span is not None:
                     tool_span.update(output=err)
                 return json.dumps(err, default=str)
             except Exception as exc:
+                # Unexpected failure → generic internal_error JSON.
                 err = self.error_dict_unknown(exc)
                 if tool_span is not None:
                     tool_span.update(output=err)
