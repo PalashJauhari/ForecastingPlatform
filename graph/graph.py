@@ -191,15 +191,6 @@ async def error_answer_node(state: AgentState, config: RunnableConfig) -> Dict[s
     return result
 
 
-def fresh_turn_invoke_input(user_query: str) -> Dict[str, Any]:
-    """Input for a new user turn; clears per-turn failure state."""
-    return {
-        "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
-        "todos": [],
-        "graph_failure": {},
-    }
-
-
 # ---------------------------------------------------------------------------
 # Tools and LLM (module-level, built once)
 # ---------------------------------------------------------------------------
@@ -526,25 +517,25 @@ class AnalysisGraph:
         """Return the compiled main graph."""
         return self.graph
 
-    def thread_config(self, session_id: str, trace_context: Any | None = None) -> Dict[str, Any]:
-        """Runnable config aligned with ``run_graph`` / ``resume``."""
+    async def stream_graph(self, session_id: str, user_query: str) -> AsyncIterator[Dict[str, Any]]:
+        """Yield graph progress as ``updates`` payloads."""
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+            "todos": [],
+            "graph_failure": {},
+        }
         config = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "max_concurrency": GRAPH_MAX_CONCURRENCY,
         }
-        return add_trace_context_to_config(config, trace_context)
-
-    async def stream_graph(self, session_id: str, user_query: str) -> AsyncIterator[Dict[str, Any]]:
-        """Yield graph progress as ``updates`` payloads."""
-        invoke_input = fresh_turn_invoke_input(user_query)
         if not is_tracing_enabled():
-            async for update in self.graph.astream(invoke_input, config=self.thread_config(session_id), stream_mode="updates"):
+            async for update in self.graph.astream(invoke_input, config=config, stream_mode="updates"):
                 yield update
             return
         try:
             with tracing_root("stream_run", metadata={"session_id": session_id}) as trace_context:
-                config = self.thread_config(session_id, trace_context=trace_context)
+                config = add_trace_context_to_config(config, trace_context)
                 async for update in self.graph.astream(invoke_input, config=config, stream_mode="updates"):
                     yield update
         finally:
@@ -552,25 +543,39 @@ class AnalysisGraph:
 
     async def stream_resume(self, session_id: str, value: Any) -> AsyncIterator[Dict[str, Any]]:
         """Stream after an ``interrupt``, using ``Command(resume=…)``."""
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+            "max_concurrency": GRAPH_MAX_CONCURRENCY,
+        }
         if not is_tracing_enabled():
-            async for update in self.graph.astream(Command(resume=value), config=self.thread_config(session_id), stream_mode="updates"):
+            async for update in self.graph.astream(Command(resume=value), config=config, stream_mode="updates"):
                 yield update
             return
         try:
             with tracing_root("resume", metadata={"session_id": session_id}) as trace_context:
-                config = self.thread_config(session_id, trace_context=trace_context)
+                config = add_trace_context_to_config(config, trace_context)
                 async for update in self.graph.astream(Command(resume=value), config=config, stream_mode="updates"):
                     yield update
         finally:
             flush_langfuse()
 
     async def run_graph(self, session_id: str, user_query: str) -> Dict[str, Any]:
-        invoke_input = fresh_turn_invoke_input(user_query)
+        invoke_input = {
+            "messages": [HumanMessage(content=user_query, id=f"user_input-{uuid.uuid4().hex}")],
+            "todos": [],
+            "graph_failure": {},
+        }
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+            "max_concurrency": GRAPH_MAX_CONCURRENCY,
+        }
         if not is_tracing_enabled():
-            return await self.graph.ainvoke(invoke_input, config=self.thread_config(session_id))
+            return await self.graph.ainvoke(invoke_input, config=config)
         try:
             with tracing_root("run", metadata={"session_id": session_id}) as trace_context:
-                config = self.thread_config(session_id, trace_context=trace_context)
+                config = add_trace_context_to_config(config, trace_context)
                 with propagate_attributes(session_id=session_id):
                     return await self.graph.ainvoke(invoke_input, config=config)
         finally:
@@ -578,16 +583,17 @@ class AnalysisGraph:
 
     async def resume(self, session_id: str, value: Any) -> Dict[str, Any]:
         """Resume after planner ``ask_user`` interrupt; same ``thread_id`` as ``run_graph``."""
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+            "max_concurrency": GRAPH_MAX_CONCURRENCY,
+        }
         if not is_tracing_enabled():
-            return await self.graph.ainvoke(Command(resume=value), config=self.thread_config(session_id))
+            return await self.graph.ainvoke(Command(resume=value), config=config)
         try:
             with tracing_root("resume", metadata={"session_id": session_id}) as trace_context:
-                config = self.thread_config(session_id, trace_context=trace_context)
+                config = add_trace_context_to_config(config, trace_context)
                 with propagate_attributes(session_id=session_id):
                     return await self.graph.ainvoke(Command(resume=value), config=config)
         finally:
             flush_langfuse()
-
-    async def get_state(self, session_id: str) -> Any:
-        """Return the current state snapshot for *session_id*."""
-        return await self.graph.aget_state({"configurable": {"thread_id": session_id}})

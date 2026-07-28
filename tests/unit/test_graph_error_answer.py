@@ -11,7 +11,6 @@ from graph.graph import (
     ERROR_ANSWER_USER_MESSAGE,
     build_error_answer_message,
     error_answer_node,
-    fresh_turn_invoke_input,
     handle_node_failure,
 )
 from output_validation.error_answer import ErrorAnswerOutput
@@ -36,13 +35,6 @@ def test_build_error_answer_message_json_shape():
     assert payload["answer"] == ERROR_ANSWER_USER_MESSAGE
     assert payload["confidence"] == "low"
     assert payload["sources"] == []
-
-
-def test_fresh_turn_invoke_input_clears_graph_failure():
-    body = fresh_turn_invoke_input("forecast sales")
-    assert body["graph_failure"] == {}
-    assert body["todos"] == []
-    assert len(body["messages"]) == 1
 
 
 def test_user_facing_answer_from_error_answer_node():
