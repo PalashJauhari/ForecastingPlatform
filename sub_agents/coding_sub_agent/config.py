@@ -15,15 +15,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 E2B_API_KEY = (os.environ.get("CODING_E2B_API_KEY") or "").strip()
 E2B_TEMPLATE_NAME = (os.environ.get("CODING_E2B_TEMPLATE_NAME") or "").strip()
-E2B_TEMPLATE_ID = (os.environ.get("CODING_E2B_TEMPLATE_ID") or "").strip()
 CODING_MODEL = (os.environ.get("CODING_MODEL") or "").strip() or "gpt-4o-mini"
 # Stronger model for the last CodeGen only (``codegen_node`` when attempt count == MAX_CODEGEN_ATTEMPTS). Empty = always CODING_MODEL.
 CODING_MODEL_LAST_ATTEMPT = (os.environ.get("CODING_MODEL_LAST_ATTEMPT") or "").strip()
-CODE_JUDGE_MODEL = (os.environ.get("CODING_CODE_JUDGE_MODEL") or "").strip() or CODING_MODEL
-IO_JUDGE_MODEL = (os.environ.get("CODING_IO_JUDGE_MODEL") or "").strip() or CODE_JUDGE_MODEL
 
 
 def _parse_max_codegen_attempts() -> int:
@@ -82,4 +78,3 @@ else:
     E2B_KILL_SANDBOX = _kill_raw in {"1", "true", "yes", "on"}
 
 PLOT_FILE_EXTENSIONS = frozenset({".png", ".svg"})
-TABULAR_OUTPUT_EXTENSIONS = frozenset({".csv", ".xlsx"})

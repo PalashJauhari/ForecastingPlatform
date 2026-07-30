@@ -45,7 +45,6 @@ from observability.langfuse_handler import (
     tracing_root,
     update_llm_generation,
 )
-from output_validation.error_answer import ErrorAnswerOutput
 from output_validation.planning_gate import PlanningGateOutput
 from prompts.graph_prompts import FINAL_ANSWER_PROMPT, PLANNING_GATE_SYSTEM_PROMPT, SYSTEM_PROMPT
 from session_paths import session_id_from_config
@@ -141,23 +140,7 @@ class AgentState(TypedDict):
 
 ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
 ERROR_ANSWER_NODE_NAME = "error_answer_node"
-
-
-def build_error_answer_message(
-    *,
-    payload: dict[str, Any] | None = None,
-) -> AIMessage:
-    """Build an AIMessage storing ErrorAnswer JSON for API/UI parsing."""
-    body = payload or ErrorAnswerOutput(
-        answer=ERROR_ANSWER_USER_MESSAGE,
-        sources=[],
-        confidence="low",
-    ).model_dump()
-    return AIMessage(
-        content=json.dumps(body, ensure_ascii=False),
-        name=ERROR_ANSWER_NODE_NAME,
-        additional_kwargs={"node": ERROR_ANSWER_NODE_NAME},
-    )
+FINAL_ANSWER_NODE_NAME = "final_answer_node"
 
 
 def handle_node_failure(state: AgentState, error: NodeError) -> Command:
@@ -174,17 +157,13 @@ def handle_node_failure(state: AgentState, error: NodeError) -> Command:
 async def error_answer_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Emit deterministic user-facing fallback after main-graph LLM retries are exhausted."""
     trace_context = trace_context_from_runnable_config(config)
-    payload = ErrorAnswerOutput(
-        answer=ERROR_ANSWER_USER_MESSAGE,
-        sources=[],
-        confidence="low",
-    ).model_dump()
-    result = {"messages": [build_error_answer_message(payload=payload)]}
+    message = AIMessage(content=ERROR_ANSWER_USER_MESSAGE, name=ERROR_ANSWER_NODE_NAME)
+    result = {"messages": [message]}
     with traced_span("error_answer", trace_context=trace_context) as span:
         if span is not None:
             span.update(
                 output={
-                    "answer_preview": payload["answer"][:200],
+                    "answer_preview": ERROR_ANSWER_USER_MESSAGE[:200],
                     "graph_failure": state.get("graph_failure") or {},
                 }
             )
@@ -386,11 +365,11 @@ async def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, A
             response = await llm.ainvoke(final_messages, config=config)
             if gen is not None:
                 update_llm_generation(gen, model=model, raw=response)
+        reply = response.content if isinstance(response.content, str) else str(response.content or "")
         if node_span is not None:
-            reply = response.content if isinstance(response.content, str) else str(response.content or "")
             node_span.update(output={"reply_preview": reply, "had_summary_context": bool(summary)})
 
-    return {"messages": [response]}
+    return {"messages": [AIMessage(content=reply, name=FINAL_ANSWER_NODE_NAME)]}
 
 
 def route_after_orchestrator(state: AgentState) -> str:
@@ -444,32 +423,12 @@ class AnalysisGraph:
 
         builder.add_node("ProfileSavedData", profile_saved_data)
         builder.add_node("ProfileSavedData_PostTools", profile_saved_data_post_tools)
-        builder.add_node(
-            "SummariseConversationalSummary",
-            summarise_conversational_summary,
-            retry_policy=node_retry,
-            error_handler=handle_node_failure,
-        )
-        builder.add_node(
-            "IsPlanningRequired",
-            is_planning_required,
-            retry_policy=node_retry,
-            error_handler=handle_node_failure,
-        )
+        builder.add_node("SummariseConversationalSummary", summarise_conversational_summary, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("IsPlanningRequired", is_planning_required, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("Planner", get_planner_graph())
-        builder.add_node(
-            "Orchestrator",
-            orchestrator,
-            retry_policy=node_retry,
-            error_handler=handle_node_failure,
-        )
+        builder.add_node("Orchestrator", orchestrator, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("RunTools", tool_node)
-        builder.add_node(
-            "FinalAnswer",
-            final_answer,
-            retry_policy=node_retry,
-            error_handler=handle_node_failure,
-        )
+        builder.add_node("FinalAnswer", final_answer, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("error_answer", error_answer_node)
 
         builder.set_entry_point("ProfileSavedData")
@@ -512,10 +471,6 @@ class AnalysisGraph:
         await checkpointer.setup()
         print("GaussianBlurr checkpointer: Postgres (Neon / DATABASE_URL)", flush=True)
         return cls(checkpointer, pg_conn)
-
-    def build_graph(self) -> Any:
-        """Return the compiled main graph."""
-        return self.graph
 
     async def stream_graph(self, session_id: str, user_query: str) -> AsyncIterator[Dict[str, Any]]:
         """Yield graph progress as ``updates`` payloads."""

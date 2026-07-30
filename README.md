@@ -145,8 +145,6 @@ make test
 # or: pytest
 ```
 
-CI runs the same suite on push/PR (see `.github/workflows/ci.yml`).
-
 ---
 
 ## API overview
@@ -200,7 +198,6 @@ Generate code → Semgrep scan → Run in E2B sandbox (internet-off)
 | `CODING_MODEL` | Model for code generation on attempts 1 … (MAX − 1) |
 | `CODING_MODEL_LAST_ATTEMPT` | Optional stronger model **only** on the last permitted attempt (when attempt count equals `CODING_MAX_CODEGEN_ATTEMPTS`). Leave empty to always use `CODING_MODEL`. |
 | `CODING_MAX_CODEGEN_ATTEMPTS` | How many times the pipeline may **regenerate** code after a gate or sandbox failure (default `3`) |
-| `CODING_CODE_JUDGE_MODEL` / `CODING_IO_JUDGE_MODEL` | Reserved for LLM judges (currently disabled; Semgrep-only pipeline) |
 
 Example: with `CODING_MAX_CODEGEN_ATTEMPTS=3`, attempts 1–2 use `CODING_MODEL`; attempt 3 can use `CODING_MODEL_LAST_ATTEMPT` (e.g. a larger model) if you set it.
 

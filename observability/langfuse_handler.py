@@ -21,8 +21,6 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langfuse import get_client
 from langfuse.types import TraceContext
 
-MAX_METADATA_VALUE_LEN = 200
-_TRACE_PREVIEW_LEN = 120
 LANGFUSE_TRACE_CONTEXT_CONFIG_KEY = "langfuse_trace_context"
 
 # Snapshot ``run`` / ``stream_run`` / ``resume`` trace id + root span id for LangGraph node/tool spans.
@@ -183,14 +181,6 @@ def should_skip_orphan_observation(parent_ctx: TraceContext | None) -> bool:
     return is_tracing_enabled() and parent_ctx is None and not _otel_has_active_observation()
 
 
-def truncate_preview(text: str, limit: int = _TRACE_PREVIEW_LEN) -> str:
-    """Truncate span payload strings (coding code/stderr previews)."""
-    s = (text or "").strip()
-    if len(s) <= limit:
-        return s
-    return s[: max(0, limit - 1)] + "…"
-
-
 @contextmanager
 def traced_span(name: str, *, trace_context: TraceContext | None = None, **kwargs: Any) -> Iterator[Any]:
     """Gated ``start_as_current_observation(as_type=\"span\")``; yields ``None`` when tracing is off."""
@@ -252,24 +242,6 @@ def tracing_root(name: str, *, metadata: dict[str, Any] | None = None) -> Iterat
             yield root_context
         finally:
             safe_reset_contextvar(_run_trace_ctx, token)
-
-
-def short_text(value: Any, max_len: int = MAX_METADATA_VALUE_LEN) -> str:
-    """Convert a value to a small ASCII-only string suitable for propagated metadata."""
-    text = str(value)
-    text = text.encode("ascii", errors="ignore").decode("ascii")
-    if len(text) > max_len:
-        return text[: max_len - 3] + "..."
-    return text
-
-
-def build_request_metadata(*, endpoint: str, interface: str, query: str | None = None) -> dict[str, str]:
-    """Create small, filterable request metadata for ``propagate_attributes()``."""
-    metadata = {"endpoint": short_text(endpoint), "interface": short_text(interface)}
-    if query is not None:
-        metadata["query_length"] = short_text(len(query))
-        metadata["query_preview"] = short_text(query[:120])
-    return metadata
 
 
 def serialize_message(message: BaseMessage) -> dict[str, Any]:

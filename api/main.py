@@ -44,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from graph.graph import ERROR_ANSWER_NODE_NAME, AnalysisGraph
+from graph.graph import AnalysisGraph
 from session_paths import (
     ensure_session_dirs,
     logical_input_file,
@@ -207,35 +207,15 @@ def _images_for_turn(session_id: str, tool_call_ids: list[str]) -> list[str]:
     return images
 
 
-def _message_name(message: Any) -> str | None:
-    name = getattr(message, "name", None)
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-    additional = getattr(message, "additional_kwargs", None) or {}
-    if isinstance(additional, dict):
-        node = additional.get("node")
-        if isinstance(node, str) and node.strip():
-            return node.strip()
-    return None
-
-
 def user_facing_answer_from_messages(messages: list[Any]) -> str:
-    """Prefer ``error_answer_node`` JSON; otherwise last AI message text."""
+    """Return text from the last non-empty AIMessage."""
     for message in reversed(messages or []):
         if not isinstance(message, AIMessage):
             continue
         content = message.content
         if not content:
             continue
-        text = content if isinstance(content, str) else str(content)
-        if _message_name(message) == ERROR_ANSWER_NODE_NAME or text.lstrip().startswith("{"):
-            try:
-                payload = json.loads(text)
-                if isinstance(payload, dict) and payload.get("answer"):
-                    return str(payload["answer"])
-            except json.JSONDecodeError:
-                pass
-        return text
+        return content if isinstance(content, str) else str(content)
     return ""
 
 
@@ -472,11 +452,6 @@ def stream_event_single_node(session_id: str, node_name: str, payload: Any) -> D
     elif node_name == "ProfileSavedData":
         rows = payload.get("data_profile") or []
         event["label"] = "Profiling workspace inputs"
-        event["profile_entries"] = len(rows)
-
-    elif node_name == "ProfileSavedData_PostTools":
-        rows = payload.get("data_profile") or []
-        event["label"] = "Re-profile after tools"
         event["profile_entries"] = len(rows)
 
     elif node_name == "SummariseConversationalSummary":

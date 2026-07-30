@@ -139,10 +139,6 @@ class PlannerGraph:
         )
         self.graph = builder.compile()
 
-    def build_graph(self) -> Any:
-        """Return the compiled planner graph (delegate for callers that build explicitly)."""
-        return self.graph
-
 
 planner_graph_instance: PlannerGraph | None = None
 
@@ -153,6 +149,3 @@ def get_planner_graph() -> Any:
     if planner_graph_instance is None:
         planner_graph_instance = PlannerGraph()
     return planner_graph_instance.graph
-
-
-get_graph = get_planner_graph
