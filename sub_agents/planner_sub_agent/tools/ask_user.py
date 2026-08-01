@@ -23,7 +23,9 @@ def ask_user_impl(clarification_required: str, runtime: ToolRuntime) -> str:
     return response
 
 
-@tool(args_schema=PlannerAskUserInput)
+ASK_USER_DESCRIPTION = """Ask the user for clarification before finishing the plan. May be called multiple times."""
+
+
+@tool(description=ASK_USER_DESCRIPTION, args_schema=PlannerAskUserInput)
 def ask_user(clarification_required: str, runtime: ToolRuntime) -> str:
-    """Ask the user for clarification before finishing the plan. May be called multiple times."""
     return ask_user_impl(clarification_required=clarification_required, runtime=runtime)

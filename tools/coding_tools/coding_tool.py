@@ -28,15 +28,7 @@ from sub_agents.coding_sub_agent.validation import (
 
 coding_graph = CodingGraph()
 
-
-@tool(args_schema=CodingToolInput)
-def coding_tool(
-    requirements: str,
-    input_files: list[str],
-    output_files: list[str],
-    runtime: ToolRuntime,
-) -> str:
-    """Flexible Python sandbox for plots, data processing, exploration, and custom analysis.
+CODING_TOOL_DESCRIPTION = """Flexible Python sandbox for plots, data processing, exploration, and custom analysis.
 
     ## Purpose
     This is the **flexible** tool when dedicated forecast or read tools are not enough.
@@ -82,21 +74,24 @@ def coding_tool(
     - ``artifacts`` — saved filenames only: ``outputs`` (tabular), ``plots`` (images).
     - ``code`` — generated source (especially useful on failure).
     On ``missing_inputs``: fix files or ``input_files``; do not retry with same inputs.
-    On ``semgrep`` / ``io_allowlist`` / ``e2b``: refine ``requirements`` and retry.
-    """
-    validated = CodingToolInput(
-        requirements=requirements,
-        input_files=input_files,
-        output_files=output_files,
-    )
+    On ``semgrep`` / ``io_allowlist`` / ``e2b``: refine ``requirements`` and retry."""
+
+
+@tool(description=CODING_TOOL_DESCRIPTION, args_schema=CodingToolInput)
+def coding_tool(
+    requirements: str,
+    input_files: list[str],
+    output_files: list[str],
+    runtime: ToolRuntime,
+) -> str:
     session_id = session_id_from_config(runtime.config)
     tool_call_id = getattr(runtime, "tool_call_id", "") or ""
     state = runtime.state or {}
     data_profile = state.get("data_profile") or []
     trace_context = trace_context_for_nested_invoke() or trace_context_from_runnable_config(runtime.config)
 
-    if validated.input_files:
-        missing = find_missing_input_files(session_id, list(validated.input_files))
+    if input_files:
+        missing = find_missing_input_files(session_id, list(input_files))
         if missing:
             body = build_coding_tool_response(
                 violation={
@@ -109,9 +104,9 @@ def coding_tool(
     body = coding_graph.run(
         session_id=session_id,
         tool_call_id=tool_call_id,
-        requirements=validated.requirements,
-        input_files=list(validated.input_files),
-        output_files=list(validated.output_files),
+        requirements=requirements,
+        input_files=list(input_files),
+        output_files=list(output_files),
         data_profile=list(data_profile),
         trace_context=trace_context,
     )

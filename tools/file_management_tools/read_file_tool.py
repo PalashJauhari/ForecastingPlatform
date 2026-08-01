@@ -62,13 +62,7 @@ def read_tabular_file(path: Path) -> pd.DataFrame:
     return pd.read_excel(path)
 
 
-@tool(args_schema=ReadFileToolInput)
-def read_file_tool(
-    file_name: str,
-    columns: list[str],
-    runtime: ToolRuntime,
-) -> str:
-    """Read rows from a session CSV/XLSX file; return JSON table preview.
+READ_FILE_TOOL_DESCRIPTION = """Read rows from a session CSV/XLSX file; return JSON table preview.
 
     ## Purpose
     Return actual cell values from one uploaded file for inspection before forecasting
@@ -90,8 +84,15 @@ def read_file_tool(
     ## Output (JSON string)
     On success: ``status``, ``file``, ``columns``, ``rows_total``, ``rows_returned``,
     ``truncated``, ``data`` (list of row dicts).
-    On error: ``status`` ``error``, ``stage``, ``error`` with ``code`` and ``message``.
-    """
+    On error: ``status`` ``error``, ``stage``, ``error`` with ``code`` and ``message``."""
+
+
+@tool(description=READ_FILE_TOOL_DESCRIPTION, args_schema=ReadFileToolInput)
+def read_file_tool(
+    file_name: str,
+    columns: list[str],
+    runtime: ToolRuntime,
+) -> str:
     params = ReadFileToolInput(file_name=file_name, columns=columns)
     session_id = session_id_from_config(runtime.config)
     basename = Path(params.file_name).name

@@ -1,7 +1,4 @@
-"""Validate ``update_todo`` tool arguments.
-
-``tool_description()`` is consumed by graph prompt / tool doc generation — keep in sync with Field text.
-"""
+"""Validate ``update_todo`` tool arguments."""
 
 from __future__ import annotations
 
@@ -19,12 +16,3 @@ class UpdateTodoInput(BaseModel):
         description='Must match ``id`` from Current Todo List — sequential strings "1", "2", "3", … from Planner.',
     )
     status: TodoStatus = Field(description='New status: "pending", "in_progress", or "completed".')
-
-    @staticmethod
-    def tool_description() -> str:
-        return (
-            "Update the **status** of **one** todo by its ``todo_id`` from **Current Todo List**. "
-            "Planner ids are sequential strings like ``\"1\"``, ``\"2\"``. "
-            "Call whenever you complete meaningful work on an item or start it (`in_progress`). "
-            "Skipping updates breaks downstream completion checks and forces extra turns."
-        )

@@ -10,21 +10,7 @@ from langchain_core.tools import tool
 from output_validation.holt_winters_tool import HoltWintersToolInput
 from tools.forecasting.holt_winters_model import HoltWintersModel
 
-
-@tool(args_schema=HoltWintersToolInput)
-def holt_winters_tool(
-    runtime: ToolRuntime,
-    experiment_name: str,
-    file_name: str,
-    date_column: str,
-    target_column: str,
-    horizon: int,
-    seasonal_period: Optional[int],
-    trend: str,
-    seasonal: str,
-    damped_trend: bool = False,
-) -> str:
-    """Fit Holt-Winters / exponential smoothing; return lean pipeline JSON with CSV basenames.
+HOLT_WINTERS_TOOL_DESCRIPTION = """Fit Holt-Winters / exponential smoothing; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
     Deterministic Holt-Winters pipeline (validate → fit → residuals → forecast with 95% intervals → decomposition → summary).
@@ -71,8 +57,22 @@ def holt_winters_tool(
       file_name="sales.csv", date_column="month", target_column="revenue", horizon=6,
       trend="add", seasonal="add", seasonal_period=12, damped_trend=false
     )
-    ```
-    """
+    ```"""
+
+
+@tool(description=HOLT_WINTERS_TOOL_DESCRIPTION, args_schema=HoltWintersToolInput)
+def holt_winters_tool(
+    runtime: ToolRuntime,
+    experiment_name: str,
+    file_name: str,
+    date_column: str,
+    target_column: str,
+    horizon: int,
+    seasonal_period: Optional[int],
+    trend: str,
+    seasonal: str,
+    damped_trend: bool = False,
+) -> str:
     params = HoltWintersToolInput(
         experiment_name=experiment_name,
         file_name=file_name,

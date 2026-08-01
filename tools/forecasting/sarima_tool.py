@@ -10,21 +10,7 @@ from langchain_core.tools import tool
 from output_validation.sarima_tool import SarimaToolInput
 from tools.forecasting.sarima_model import SarimaModel
 
-
-@tool(args_schema=SarimaToolInput)
-def sarima_tool(
-    runtime: ToolRuntime,
-    experiment_name: str,
-    file_name: str,
-    date_column: str,
-    target_column: str,
-    horizon: int,
-    seasonal_period: Optional[int],
-    use_auto_arima: bool = False,
-    order: Optional[list[int]] = None,
-    seasonal_order: Optional[list[int]] = None,
-) -> str:
-    """Fit ARIMA/SARIMA on one univariate time series; return lean pipeline JSON with CSV basenames.
+SARIMA_TOOL_DESCRIPTION = """Fit ARIMA/SARIMA on one univariate time series; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
     Deterministic SARIMAX pipeline (validate → order selection → fit → residuals → forecast with 95% intervals → summary).
@@ -70,8 +56,22 @@ def sarima_tool(
       file_name="sales.csv", date_column="month", target_column="revenue", horizon=12,
       seasonal_period=12, use_auto_arima=true
     )
-    ```
-    """
+    ```"""
+
+
+@tool(description=SARIMA_TOOL_DESCRIPTION, args_schema=SarimaToolInput)
+def sarima_tool(
+    runtime: ToolRuntime,
+    experiment_name: str,
+    file_name: str,
+    date_column: str,
+    target_column: str,
+    horizon: int,
+    seasonal_period: Optional[int],
+    use_auto_arima: bool = False,
+    order: Optional[list[int]] = None,
+    seasonal_order: Optional[list[int]] = None,
+) -> str:
     params = SarimaToolInput(
         experiment_name=experiment_name,
         file_name=file_name,

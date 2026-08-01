@@ -14,9 +14,11 @@ from observability.langfuse_handler import trace_context_from_runnable_config, t
 from sub_agents.planner_sub_agent.validation import WriteTodoInput
 
 
-@tool(args_schema=WriteTodoInput)
+WRITE_TODO_DESCRIPTION = """Full replacement checklist for this turn; pass the entire list when revising."""
+
+
+@tool(description=WRITE_TODO_DESCRIPTION, args_schema=WriteTodoInput)
 def write_todo(todos: list, runtime: ToolRuntime) -> Command:
-    """Full replacement checklist for this turn; pass the entire list when revising."""
     trace_context = trace_context_from_runnable_config(runtime.config)
     # Raises ValidationError on bad input; ToolNode surfaces error to PlannerOrchestrator.
     validated = WriteTodoInput(todos=todos)

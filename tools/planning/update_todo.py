@@ -107,7 +107,8 @@ def update_todo_impl(todo_id: str, status: str, runtime: ToolRuntime) -> Command
         return Command(update=update)
 
 
-@tool(args_schema=UpdateTodoInput)
+UPDATE_TODO_DESCRIPTION = """Update one todo status by planner-assigned ``todo_id`` (``"1"``, ``"2"``, …) from Current Todo List."""
+
+@tool(description=UPDATE_TODO_DESCRIPTION, args_schema=UpdateTodoInput)
 def update_todo(runtime: ToolRuntime, todo_id: str, status: str) -> Command:
-    """Update one todo status by planner-assigned ``todo_id`` (``\"1\"``, ``\"2\"``, …) from Current Todo List."""
     return update_todo_impl(todo_id=todo_id, status=status, runtime=runtime)

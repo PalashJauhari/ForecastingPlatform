@@ -8,22 +8,7 @@ from langchain_core.tools import tool
 from output_validation.prophet_tool import ProphetToolInput
 from tools.forecasting.prophet_model import ProphetModel
 
-
-@tool(args_schema=ProphetToolInput)
-def prophet_tool(
-    runtime: ToolRuntime,
-    experiment_name: str,
-    file_name: str,
-    date_column: str,
-    target_column: str,
-    horizon: int,
-    changepoint_prior_scale: float,
-    seasonality_mode: str,
-    weekly_seasonality: bool,
-    monthly_seasonality: bool,
-    yearly_seasonality: bool,
-) -> str:
-    """Fit Facebook Prophet on one univariate time series; return lean pipeline JSON with CSV basenames.
+PROPHET_TOOL_DESCRIPTION = """Fit Facebook Prophet on one univariate time series; return lean pipeline JSON with CSV basenames.
 
     ## Purpose
     Deterministic Prophet pipeline (validate → fit → residuals → forecast → decomposition → summary).
@@ -71,8 +56,23 @@ def prophet_tool(
       changepoint_prior_scale=0.05, seasonality_mode="multiplicative",
       weekly_seasonality=false, monthly_seasonality=true, yearly_seasonality=true
     )
-    ```
-    """
+    ```"""
+
+
+@tool(description=PROPHET_TOOL_DESCRIPTION, args_schema=ProphetToolInput)
+def prophet_tool(
+    runtime: ToolRuntime,
+    experiment_name: str,
+    file_name: str,
+    date_column: str,
+    target_column: str,
+    horizon: int,
+    changepoint_prior_scale: float,
+    seasonality_mode: str,
+    weekly_seasonality: bool,
+    monthly_seasonality: bool,
+    yearly_seasonality: bool,
+) -> str:
     params = ProphetToolInput(
         experiment_name=experiment_name,
         file_name=file_name,
