@@ -18,6 +18,11 @@ def make_runtime(state_todos: list | None = None) -> SimpleNamespace:
     )
 
 
+def invoke_write_todo(todos: list, runtime: SimpleNamespace | None = None):
+    """Call through StructuredTool so args_schema validation runs."""
+    return write_todo.invoke({"todos": todos, "runtime": runtime or make_runtime()})
+
+
 def test_merge_todos_right_none_keeps_left():
     """When right is None, keep a copy of the existing todo list."""
     left = [{"id": "1", "content": "A", "status": "pending"}]
@@ -40,11 +45,7 @@ def test_merge_todos_right_replaces_left():
 
 def test_write_todo_assigns_sequential_ids():
     """Assigns string ids '1', '2', … in list order with task text as content."""
-    runtime = make_runtime()
-    cmd = write_todo.func(
-        todos=[{"task": "Load data"}, {"task": "Forecast"}],
-        runtime=runtime,
-    )
+    cmd = invoke_write_todo([{"task": "Load data"}, {"task": "Forecast"}])
     assert cmd.update["todos"] == [
         {"id": "1", "content": "Load data", "status": "pending"},
         {"id": "2", "content": "Forecast", "status": "pending"},
@@ -53,15 +54,13 @@ def test_write_todo_assigns_sequential_ids():
 
 def test_write_todo_all_pending():
     """Every row written by the planner starts with status pending."""
-    runtime = make_runtime()
-    cmd = write_todo.func(todos=[{"task": "Run model"}], runtime=runtime)
+    cmd = invoke_write_todo([{"task": "Run model"}])
     assert all(row["status"] == "pending" for row in cmd.update["todos"])
 
 
 def test_write_todo_ack_message():
     """Returns a short ToolMessage ack; authoritative list is in todos state."""
-    runtime = make_runtime()
-    cmd = write_todo.func(todos=[{"task": "Load data"}], runtime=runtime)
+    cmd = invoke_write_todo([{"task": "Load data"}])
     assert "full list replaced" in cmd.update["messages"][0].content
 
 
@@ -70,34 +69,30 @@ def test_write_todo_overwrites_old_state():
     runtime = make_runtime(
         [{"id": "1", "content": "Old task", "status": "pending"}],
     )
-    cmd = write_todo.func(todos=[{"task": "New only"}], runtime=runtime)
+    cmd = invoke_write_todo([{"task": "New only"}], runtime=runtime)
     assert len(cmd.update["todos"]) == 1
     assert cmd.update["todos"][0]["content"] == "New only"
 
 
 def test_write_todo_empty_list_raises():
     """Rejects empty todos list (at least one task required)."""
-    runtime = make_runtime()
     with pytest.raises(ValidationError):
-        write_todo.func(todos=[], runtime=runtime)
+        invoke_write_todo([])
 
 
 def test_write_todo_empty_task_raises():
     """Rejects tasks with empty string content."""
-    runtime = make_runtime()
     with pytest.raises(ValidationError):
-        write_todo.func(todos=[{"task": ""}], runtime=runtime)
+        invoke_write_todo([{"task": ""}])
 
 
 def test_write_todo_missing_task_raises():
     """Rejects todo items missing the required task field."""
-    runtime = make_runtime()
     with pytest.raises(ValidationError):
-        write_todo.func(todos=[{"wrong": "field"}], runtime=runtime)
+        invoke_write_todo([{"wrong": "field"}])
 
 
 def test_write_todo_task_too_long_raises():
     """Rejects tasks longer than 2000 characters."""
-    runtime = make_runtime()
     with pytest.raises(ValidationError):
-        write_todo.func(todos=[{"task": "x" * 2001}], runtime=runtime)
+        invoke_write_todo([{"task": "x" * 2001}])

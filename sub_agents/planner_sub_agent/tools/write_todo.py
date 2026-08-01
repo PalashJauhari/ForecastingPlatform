@@ -20,11 +20,10 @@ WRITE_TODO_DESCRIPTION = """Full replacement checklist for this turn; pass the e
 @tool(description=WRITE_TODO_DESCRIPTION, args_schema=WriteTodoInput)
 def write_todo(todos: list, runtime: ToolRuntime) -> Command:
     trace_context = trace_context_from_runnable_config(runtime.config)
-    # Raises ValidationError on bad input; ToolNode surfaces error to PlannerOrchestrator.
-    validated = WriteTodoInput(todos=todos)
     # Full replace: sequential ids and all rows start pending (planner never sets status).
+    # ``todos`` already validated by args_schema=WriteTodoInput before this body runs.
     rows: list[dict[str, str]] = []
-    for index, item in enumerate(validated.todos, start=1):
+    for index, item in enumerate(todos, start=1):
         rows.append({"id": str(index), "content": item.task.strip(), "status": "pending"})
     with traced_span("write_todo", trace_context=trace_context) as span:
         if span is not None:

@@ -12,8 +12,11 @@ from langgraph.types import interrupt
 from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 from sub_agents.planner_sub_agent.validation import PlannerAskUserInput
 
+ASK_USER_DESCRIPTION = """Ask the user for clarification before finishing the plan. May be called multiple times."""
 
-def ask_user_impl(clarification_required: str, runtime: ToolRuntime) -> str:
+
+@tool(description=ASK_USER_DESCRIPTION, args_schema=PlannerAskUserInput)
+def ask_user(clarification_required: str, runtime: ToolRuntime) -> str:
     """Pause planning until the user answers the clarification question."""
     trace_context = trace_context_from_runnable_config(runtime.config)
     with traced_span("ask_user", trace_context=trace_context, metadata={"phase": "planner"}) as span:
@@ -21,11 +24,3 @@ def ask_user_impl(clarification_required: str, runtime: ToolRuntime) -> str:
         if span is not None:
             span.update(output={"phase": "planner", "question_preview": clarification_required[:120]})
     return response
-
-
-ASK_USER_DESCRIPTION = """Ask the user for clarification before finishing the plan. May be called multiple times."""
-
-
-@tool(description=ASK_USER_DESCRIPTION, args_schema=PlannerAskUserInput)
-def ask_user(clarification_required: str, runtime: ToolRuntime) -> str:
-    return ask_user_impl(clarification_required=clarification_required, runtime=runtime)
