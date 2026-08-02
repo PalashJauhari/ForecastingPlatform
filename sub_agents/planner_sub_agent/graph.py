@@ -15,7 +15,13 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 
-from observability.langfuse_handler import trace_context_from_runnable_config, traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import (
+    serialize_messages,
+    trace_context_from_runnable_config,
+    traced_generation,
+    traced_span,
+    update_llm_generation,
+)
 from tools.planning.update_todo import merge_todos
 from tools.tool_catalog import TOOL_CATALOG_TEXT
 from sub_agents.planner_sub_agent.config import PLANNER_MODEL
@@ -75,14 +81,22 @@ async def planner_orchestrator(state: PlannerAgentState, config: RunnableConfig)
         HumanMessage(content=context_content),
     ]
     trace_context = trace_context_from_runnable_config(config)
-    with traced_span("PlannerOrchestrator", trace_context=trace_context) as node_span:
-        with traced_generation("PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
+    with traced_span("PlannerSubAgent - PlannerOrchestrator", trace_context=trace_context) as node_span:
+        with traced_generation("PlannerSubAgent - PlannerOrchestrator-llm", model=PLANNER_MODEL) as gen:
             response = await llm_with_tools.ainvoke(planner_messages, config=config)
             if gen is not None:
                 update_llm_generation(gen, model=PLANNER_MODEL, raw=response)
         tool_calls = response.tool_calls or []
         if node_span is not None:
-            node_span.update(output={"tool_calls": [tc["name"] for tc in tool_calls]})
+            node_span.update(
+                input={
+                    "messages": serialize_messages(state["messages"]),
+                    "message_summary": summary,
+                    "data_profile": state.get("data_profile") or [],
+                    "tool_catalog": TOOL_CATALOG_TEXT,
+                },
+                output={"tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls]},
+            )
     return {"messages": [response]}
 
 

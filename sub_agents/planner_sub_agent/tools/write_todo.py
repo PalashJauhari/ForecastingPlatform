@@ -25,18 +25,17 @@ def write_todo(todos: list, runtime: ToolRuntime) -> Command:
     rows: list[dict[str, str]] = []
     for index, item in enumerate(todos, start=1):
         rows.append({"id": str(index), "content": item.task.strip(), "status": "pending"})
-    with traced_span("write_todo", trace_context=trace_context) as span:
+    ack = "Todos updated for this turn (full list replaced in state)."
+    with traced_span("PlannerSubAgent - write_todo", trace_context=trace_context) as span:
         if span is not None:
-            span.update(output={"todos": rows, "todo_count": len(rows)})
+            span.update(
+                input={"todos": [{"task": item.task} for item in todos]},
+                output={"todos": rows, "ack": ack},
+            )
     # ``todos`` in state is source of truth; ToolMessage is ack only (see planner prompt).
     return Command(
         update={
             "todos": rows,
-            "messages": [
-                ToolMessage(
-                    content="Todos updated for this turn (full list replaced in state).",
-                    tool_call_id=runtime.tool_call_id,
-                )
-            ],
+            "messages": [ToolMessage(content=ack, tool_call_id=runtime.tool_call_id)],
         },
     )

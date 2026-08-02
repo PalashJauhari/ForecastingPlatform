@@ -23,7 +23,6 @@ from observability.langfuse_handler import (
     add_trace_context_to_config,
     current_trace_context,
     safe_reset_contextvar,
-    serialize_messages,
     trace_context_from_runnable_config,
     traced_generation,
     traced_span,
@@ -141,18 +140,25 @@ def codegen_node(state: CodingAgentState, config: RunnableConfig) -> Dict[str, A
         HumanMessage(content=context_content),
     ]
     with traced_span("CodeGen", trace_context=ctx, metadata={"codegen_count": codegen_count, "model": model}) as node_span:
-        with traced_generation("CodeGen-llm", model=model, trace_context=ctx) as gen:
+        # No token counts here: structured output is returned without ``include_raw``,
+        # so ``usage_metadata`` is not available on this call.
+        with traced_generation("CodeGen-llm", model=model, trace_context=ctx):
             parsed: CodeGenerationOutput = llm.invoke(prompt_messages, config=config)
             code = (parsed.code or "").strip()
-            if gen is not None:
-                gen.update(
-                    model=model,
-                    input=serialize_messages(prompt_messages),
-                    output={"filename": parsed.filename, "code": code},
-                )
             result = {"codegen_count": codegen_count, "code": code}
             if node_span is not None:
-                node_span.update(output=result)
+                node_span.update(
+                    input={
+                        "requirements": state["requirements"],
+                        "input_files": state["input_files"],
+                        "output_files": state["output_files"],
+                        "data_profile": state["data_profile"],
+                        "pipeline_violation": violation,
+                        "codegen_count": codegen_count,
+                        "model": model,
+                    },
+                    output={"filename": parsed.filename, "code": code},
+                )
     return result
 
 
@@ -161,6 +167,8 @@ def semgrep_scan_node(state: CodingAgentState, config: RunnableConfig) -> Dict[s
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     with traced_span("SemgrepScan", trace_context=ctx) as span:
         code = (state.get("code") or "").strip()
+        if span is not None:
+            span.update(input={"code": code})
         if not code:
             detail = "No code to scan."
             if span is not None:
@@ -184,6 +192,14 @@ def io_allowlist_scan_node(state: CodingAgentState, config: RunnableConfig) -> D
     ctx = trace_context_from_runnable_config(config) or get_coding_trace_context()
     with traced_span("IOAllowlistScan", trace_context=ctx) as span:
         code = (state.get("code") or "").strip()
+        if span is not None:
+            span.update(
+                input={
+                    "code": code,
+                    "input_files": state.get("input_files") or [],
+                    "output_files": state.get("output_files") or [],
+                }
+            )
         if not code:
             detail = "No code to scan."
             if span is not None:
@@ -242,6 +258,8 @@ def e2b_execute_node(state: CodingAgentState, config: RunnableConfig) -> Dict[st
     plots: list[str] = []
 
     with traced_span("E2BExecute", trace_context=ctx) as span:
+        if span is not None:
+            span.update(input={"code": code, "input_files": input_files, "output_files": output_files})
         try:
             sandbox = Sandbox.create(
                 template=E2B_TEMPLATE_NAME,
@@ -328,7 +346,7 @@ def codegen_exhausted_node(state: CodingAgentState, config: RunnableConfig) -> D
     }
     with traced_span("CodegenExhausted", trace_context=ctx) as span:
         if span is not None:
-            span.update(output=result)
+            span.update(input={"codegen_count": state.get("codegen_count") or 0}, output=result)
     return result
 
 
@@ -345,7 +363,10 @@ def prepare_response_node(state: CodingAgentState, config: RunnableConfig) -> Di
     result = {"tool_response": tool_response}
     with traced_span("PrepareResponse", trace_context=ctx) as span:
         if span is not None:
-            span.update(output=result)
+            span.update(
+                input={"pipeline_violation": violation, "code_execution_result": exec_result},
+                output=result,
+            )
     return result
 
 
@@ -455,12 +476,21 @@ class CodingGraph:
             "recursion_limit": CODING_GRAPH_RECURSION_LIMIT,
         }
         meta = {"session_id": session_id, "tool_call_id": tool_call_id}
+        span_input = {
+            "requirements": requirements,
+            "input_files": input_files,
+            "output_files": output_files,
+            "data_profile": data_profile,
+        }
         token = coding_trace_ctx.set(trace_context)
         try:
-            with traced_span("coding_pipeline", trace_context=trace_context, metadata=meta):
+            with traced_span("coding_pipeline", trace_context=trace_context, input=span_input, metadata=meta) as span:
                 config = add_trace_context_to_config(config, current_trace_context())
                 result = self.graph.invoke(initial, config=config)
+                tool_response = result.get("tool_response") or {}
+                if span is not None:
+                    span.update(output=tool_response)
         finally:
             safe_reset_contextvar(coding_trace_ctx, token)
 
-        return result.get("tool_response") or {}
+        return tool_response

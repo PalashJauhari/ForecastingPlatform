@@ -22,7 +22,12 @@ from langchain_core.messages import (
 )
 
 from middleware.llm_client import make_llm
-from observability.langfuse_handler import traced_generation, traced_span, update_llm_generation
+from observability.langfuse_handler import (
+    serialize_messages,
+    traced_generation,
+    traced_span,
+    update_llm_generation,
+)
 
 # Prefer explicit summary model; fall back to orchestrator model when unset.
 SUMMARY_MODEL = (
@@ -132,11 +137,16 @@ async def truncate_and_summarize(
     del runnable_config
 
     with traced_span("context.truncate_and_summarize", metadata={"token_threshold": token_threshold, "keep": keep}) as span:
+        if span is not None:
+            span.update(input={"messages": serialize_messages(messages), "message_summary": previous_summary})
         token_estimate = estimate_tokens(messages)
         human_count = count_human_messages(messages)
         if token_estimate <= token_threshold or human_count <= keep:
             if span is not None:
-                span.update(metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "false"})
+                span.update(
+                    metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "false"},
+                    output={"messages": serialize_messages(messages), "message_summary": previous_summary},
+                )
             return previous_summary, messages, []
 
         cut = find_human_turn_cut(messages, keep)
@@ -148,15 +158,24 @@ async def truncate_and_summarize(
                         "human_count": human_count,
                         "truncated": "false",
                         "truncate_skip": "not_enough_human_turns",
-                    }
+                    },
+                    output={"messages": serialize_messages(messages), "message_summary": previous_summary},
                 )
             return previous_summary, messages, []
 
         to_evict = messages[:cut]
         remove_ops = [RemoveMessage(id=m.id) for m in to_evict]
-        with traced_span("context.summarize_evicted", metadata={"evicted_count": len(to_evict)}):
+        with traced_span("context.summarize_evicted", metadata={"evicted_count": len(to_evict)}) as evict_span:
             updated_summary = await summarize_evicted(previous_summary, to_evict)
-        if span is not None:
-            span.update(metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "true", "evicted_count": len(to_evict)})
+            if evict_span is not None:
+                evict_span.update(
+                    input={"messages": serialize_messages(to_evict), "message_summary": previous_summary},
+                    output={"message_summary": updated_summary},
+                )
         kept_messages = messages[cut:]
+        if span is not None:
+            span.update(
+                metadata={"token_estimate": token_estimate, "human_count": human_count, "truncated": "true", "evicted_count": len(to_evict)},
+                output={"messages": serialize_messages(kept_messages), "message_summary": updated_summary},
+            )
         return updated_summary, kept_messages, remove_ops

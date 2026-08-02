@@ -17,6 +17,7 @@ import pandas as pd
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
+from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 from output_validation.read_file_tool import ReadFileToolInput
 from session_paths import session_root, session_id_from_config
 
@@ -97,63 +98,69 @@ def read_file_tool(
     session_id = session_id_from_config(runtime.config)
     basename = Path(params.file_name).name
     path = session_root(session_id) / basename
+    trace_context = trace_context_from_runnable_config(runtime.config)
 
-    if not path.exists() or not path.is_file():
-        return json.dumps(
-            {
+    with traced_span(
+        "read_file_tool",
+        trace_context=trace_context,
+        input={"file_name": file_name, "columns": columns},
+        metadata={"session_id": session_id},
+    ) as span:
+        if not path.exists() or not path.is_file():
+            body = {
                 "status": "error",
                 "stage": "data_validation",
                 "error": {
                     "code": "file_not_found",
                     "message": f"File '{basename}' was not found in the session workspace.",
                 },
-            },
-            default=str,
-        )
+            }
+            if span is not None:
+                span.update(output=body)
+            return json.dumps(body, default=str)
 
-    try:
-        df = read_tabular_file(path)
-    except Exception as exc:
-        return json.dumps(
-            {
+        try:
+            df = read_tabular_file(path)
+        except Exception as exc:
+            body = {
                 "status": "error",
                 "stage": "data_validation",
                 "error": {"code": "read_failed", "message": str(exc)[:500]},
-            },
-            default=str,
-        )
+            }
+            if span is not None:
+                span.update(output=body)
+            return json.dumps(body, default=str)
 
-    requested = list(params.columns)
-    if requested:
-        missing = [c for c in requested if c not in df.columns]
-        if missing:
-            return json.dumps(
-                {
+        requested = list(params.columns)
+        if requested:
+            missing = [c for c in requested if c not in df.columns]
+            if missing:
+                body = {
                     "status": "error",
                     "stage": "data_validation",
                     "error": {
                         "code": "missing_required_columns",
                         "message": f"Columns not found in '{basename}': {missing}.",
                     },
-                },
-                default=str,
-            )
-        df = df[requested]
-        out_columns = requested
-    else:
-        out_columns = [str(c) for c in df.columns]
+                }
+                if span is not None:
+                    span.update(output=body)
+                return json.dumps(body, default=str)
+            df = df[requested]
+            out_columns = requested
+        else:
+            out_columns = [str(c) for c in df.columns]
 
-    rows_total = int(len(df))
-    max_rows = read_file_max_rows()
-    truncated = rows_total > max_rows
-    slice_df = df.head(max_rows)
-    records = [
-        {str(col): to_json_value(row[col]) for col in slice_df.columns}
-        for row in slice_df.to_dict(orient="records")
-    ]
+        rows_total = int(len(df))
+        max_rows = read_file_max_rows()
+        truncated = rows_total > max_rows
+        slice_df = df.head(max_rows)
+        records = [
+            {str(col): to_json_value(row[col]) for col in slice_df.columns}
+            for row in slice_df.to_dict(orient="records")
+        ]
 
-    return json.dumps(
-        {
+        body = {
             "status": "success",
             "file": basename,
             "columns": out_columns,
@@ -161,6 +168,7 @@ def read_file_tool(
             "rows_returned": len(records),
             "truncated": truncated,
             "data": records,
-        },
-        default=str,
-    )
+        }
+        if span is not None:
+            span.update(output=body)
+        return json.dumps(body, default=str)

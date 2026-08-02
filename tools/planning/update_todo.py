@@ -17,7 +17,6 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from observability.langfuse_handler import trace_context_from_runnable_config, traced_span
 from output_validation.update_todo import UpdateTodoInput
 from output_validation.write_todos import TodoStatus
 
@@ -55,56 +54,45 @@ def normalize_todo_row(row: object) -> dict | None:
 
 
 def update_todo_impl(todo_id: str, status: str, runtime: ToolRuntime) -> Command:
-    trace_context = trace_context_from_runnable_config(runtime.config)
-    with traced_span("update_todo", trace_context=trace_context, input={"todo_id": todo_id, "status": status}) as outer_span:
-        validated = UpdateTodoInput(todo_id=todo_id, status=status)  # type: ignore[arg-type]
-        state = runtime.state or {}
-        raw_todos = list(state.get("todos") or [])
-        # Match ``todo_id`` exactly (planner ids may include spaces; no strip on target).
-        target_todo_id = validated.todo_id
-        matched = False
-        new_rows: list[dict] = []
-        for raw_row in raw_todos:
-            todo_row = normalize_todo_row(raw_row)
-            if todo_row is None:
-                continue  # Drop malformed rows; they are not echoed back.
-            if todo_row["id"] == target_todo_id:
-                new_rows.append({**todo_row, "status": validated.status})
-                matched = True
-            else:
-                new_rows.append(todo_row)
-
-        if matched:
-            update: dict[str, Any] = {
-                "todos": new_rows,
-                "messages": [
-                    ToolMessage(
-                        content=f"Updated todo `{target_todo_id}` to status `{validated.status}`.",
-                        tool_call_id=runtime.tool_call_id,
-                    )
-                ],
-            }
-            span_output: dict[str, Any] = {
-                "matched": True,
-                "todo_id": target_todo_id,
-                "status": validated.status,
-            }
+    validated = UpdateTodoInput(todo_id=todo_id, status=status)  # type: ignore[arg-type]
+    state = runtime.state or {}
+    raw_todos = list(state.get("todos") or [])
+    # Match ``todo_id`` exactly (planner ids may include spaces; no strip on target).
+    target_todo_id = validated.todo_id
+    matched = False
+    new_rows: list[dict] = []
+    for raw_row in raw_todos:
+        todo_row = normalize_todo_row(raw_row)
+        if todo_row is None:
+            continue  # Drop malformed rows; they are not echoed back.
+        if todo_row["id"] == target_todo_id:
+            new_rows.append({**todo_row, "status": validated.status})
+            matched = True
         else:
-            # Omit ``todos`` so a failed patch does not wipe state (e.g. all rows were malformed).
-            update = {
-                "messages": [
-                    ToolMessage(
-                        content=f"No todo with id `{target_todo_id}`.",
-                        tool_call_id=runtime.tool_call_id,
-                    )
-                ],
-            }
-            span_output = {"matched": False, "todo_id": target_todo_id}
+            new_rows.append(todo_row)
 
-        if outer_span is not None:
-            outer_span.update(output=span_output)
+    if matched:
+        update: dict[str, Any] = {
+            "todos": new_rows,
+            "messages": [
+                ToolMessage(
+                    content=f"Updated todo `{target_todo_id}` to status `{validated.status}`.",
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+        }
+    else:
+        # Omit ``todos`` so a failed patch does not wipe state (e.g. all rows were malformed).
+        update = {
+            "messages": [
+                ToolMessage(
+                    content=f"No todo with id `{target_todo_id}`.",
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+        }
 
-        return Command(update=update)
+    return Command(update=update)
 
 
 UPDATE_TODO_DESCRIPTION = """Update one todo status by planner-assigned ``todo_id`` (``"1"``, ``"2"``, …) from Current Todo List."""

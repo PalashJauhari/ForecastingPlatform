@@ -162,10 +162,8 @@ async def error_answer_node(state: AgentState, config: RunnableConfig) -> Dict[s
     with traced_span("error_answer", trace_context=trace_context) as span:
         if span is not None:
             span.update(
-                output={
-                    "answer_preview": ERROR_ANSWER_USER_MESSAGE[:200],
-                    "graph_failure": state.get("graph_failure") or {},
-                }
+                input={"graph_failure": state.get("graph_failure") or {}},
+                output={"answer": ERROR_ANSWER_USER_MESSAGE},
             )
     return result
 
@@ -204,11 +202,11 @@ async def profile_saved_data(state: AgentState, config: RunnableConfig) -> Dict[
     trace_context = trace_context_from_runnable_config(config)
     with traced_span("ProfileSavedData", trace_context=trace_context, metadata={"session_id": session_id}) as span:
         rows: List[Any] = await asyncio.to_thread(profile_session_workspace, session_id)
-        if span is not None:
-            span.update(output={"profile_entries": len(rows), "session_id": session_id})
         update: Dict[str, Any] = {"data_profile": rows}
         if "todos" not in state:
             update["todos"] = []
+        if span is not None:
+            span.update(output=update)
         return update
 
 
@@ -219,7 +217,7 @@ async def profile_saved_data_post_tools(state: AgentState, config: RunnableConfi
     with traced_span("ProfileSavedData_PostTools", trace_context=trace_context, metadata={"session_id": session_id}) as span:
         rows: List[Any] = await asyncio.to_thread(profile_session_workspace, session_id)
         if span is not None:
-            span.update(output={"profile_entries": len(rows), "session_id": session_id})
+            span.update(output={"data_profile": rows})
         return {"data_profile": rows}
 
 
@@ -231,14 +229,23 @@ async def summarise_conversational_summary(state: AgentState, config: RunnableCo
     previous_summary = state.get("message_summary", "")
 
     with traced_span("SummariseConversationalSummary", trace_context=trace_context, metadata={"session_id": session_id}) as span:
-        updated_summary, _kept_messages, remove_ops = await truncate_and_summarize(
+        updated_summary, kept_messages, remove_ops = await truncate_and_summarize(
             messages,
             previous_summary,
             CONTEXT_KEEP_RECENT_HUMAN_MESSAGES,
             CONTEXT_SUMMARY_TOKEN_THRESHOLD,
         )
         if span is not None:
-            span.update(output={"evicted_count": len(remove_ops), "truncated": bool(remove_ops)})
+            span.update(
+                input={
+                    "messages": serialize_messages(messages),
+                    "data_profile": state.get("data_profile") or [],
+                },
+                output={
+                    "messages": serialize_messages(kept_messages),
+                    "message_summary": updated_summary,
+                },
+            )
 
     if not remove_ops:
         return {}
@@ -273,23 +280,30 @@ async def is_planning_required(state: AgentState, config: RunnableConfig) -> Dic
             if gen is not None:
                 update_llm_generation(gen, model=model, raw=raw)
         decision = parsed.decision if parsed is not None else "plan"
-        reason = parsed.reason if parsed is not None else ""
-        if node_span is not None:
-            node_span.update(output={"decision": decision, "reason": reason})
 
-    if decision == "skip":
-        latest_human_text = ""
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                content = msg.content
-                if isinstance(content, str) and content.strip():
-                    latest_human_text = content.strip()
-                    break
-        if latest_human_text:
-            return {
-                "todos": [{"id": "1", "content": latest_human_text, "status": "pending"}],
-            }
-    return {}
+        update: Dict[str, Any] = {}
+        if decision == "skip":
+            latest_human_text = ""
+            for msg in reversed(messages):
+                if isinstance(msg, HumanMessage):
+                    content = msg.content
+                    if isinstance(content, str) and content.strip():
+                        latest_human_text = content.strip()
+                        break
+            if latest_human_text:
+                update = {"todos": [{"id": "1", "content": latest_human_text, "status": "pending"}]}
+
+        if node_span is not None:
+            node_span.update(
+                input={
+                    "messages": serialize_messages(messages),
+                    "message_summary": summary,
+                    "data_profile": data_profile_rows,
+                },
+                output={"decision": decision, "todos": update.get("todos") or []},
+            )
+
+    return update
 
 
 def route_after_planning_gate(state: AgentState) -> str:
@@ -329,7 +343,15 @@ async def orchestrator(state: AgentState, config: RunnableConfig) -> Dict[str, A
                 update_llm_generation(gen, model=model, raw=response)
         tool_calls = list(getattr(response, "tool_calls", None) or [])
         if node_span is not None:
-            node_span.update(output={"tool_calls_this_step": len(tool_calls), "had_summary_context": bool(summary)})
+            node_span.update(
+                input={
+                    "messages": serialize_messages(messages),
+                    "message_summary": summary,
+                    "todos": raw_todos,
+                    "data_profile": data_profile_rows,
+                },
+                output={"tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls]},
+            )
 
     return {"messages": [response]}
 
@@ -367,7 +389,15 @@ async def final_answer(state: AgentState, config: RunnableConfig) -> Dict[str, A
                 update_llm_generation(gen, model=model, raw=response)
         reply = response.content if isinstance(response.content, str) else str(response.content or "")
         if node_span is not None:
-            node_span.update(output={"reply_preview": reply, "had_summary_context": bool(summary)})
+            node_span.update(
+                input={
+                    "messages": serialize_messages(messages),
+                    "message_summary": summary,
+                    "todos": raw_todos,
+                    "data_profile": data_profile_rows,
+                },
+                output={"answer": reply},
+            )
 
     return {"messages": [AIMessage(content=reply, name=FINAL_ANSWER_NODE_NAME)]}
 
@@ -491,8 +521,9 @@ class AnalysisGraph:
         try:
             with tracing_root("stream_run", metadata={"session_id": session_id}) as trace_context:
                 config = add_trace_context_to_config(config, trace_context)
-                async for update in self.graph.astream(invoke_input, config=config, stream_mode="updates"):
-                    yield update
+                with propagate_attributes(session_id=session_id):
+                    async for update in self.graph.astream(invoke_input, config=config, stream_mode="updates"):
+                        yield update
         finally:
             flush_langfuse()
 
@@ -510,8 +541,9 @@ class AnalysisGraph:
         try:
             with tracing_root("resume", metadata={"session_id": session_id}) as trace_context:
                 config = add_trace_context_to_config(config, trace_context)
-                async for update in self.graph.astream(Command(resume=value), config=config, stream_mode="updates"):
-                    yield update
+                with propagate_attributes(session_id=session_id):
+                    async for update in self.graph.astream(Command(resume=value), config=config, stream_mode="updates"):
+                        yield update
         finally:
             flush_langfuse()
 

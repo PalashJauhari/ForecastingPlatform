@@ -261,13 +261,8 @@ def serialize_message(message: BaseMessage) -> dict[str, Any]:
             payload["tool_call_id"] = message.tool_call_id
     else:
         payload["role"] = payload["type"]
+    # Match chat fields the LLM sees: no response_metadata / usage_metadata.
     payload["content"] = normalize_content(getattr(message, "content", ""))
-    response_metadata = getattr(message, "response_metadata", None)
-    if response_metadata:
-        payload["response_metadata"] = response_metadata
-    usage_metadata = getattr(message, "usage_metadata", None)
-    if usage_metadata:
-        payload["usage_metadata"] = usage_metadata
     return payload
 
 

@@ -19,8 +19,14 @@ ASK_USER_DESCRIPTION = """Ask the user for clarification before finishing the pl
 def ask_user(clarification_required: str, runtime: ToolRuntime) -> str:
     """Pause planning until the user answers the clarification question."""
     trace_context = trace_context_from_runnable_config(runtime.config)
-    with traced_span("ask_user", trace_context=trace_context, metadata={"phase": "planner"}) as span:
+    # Input is set at span creation so the span paused on ``interrupt`` still shows the question.
+    with traced_span(
+        "PlannerSubAgent - ask_user",
+        trace_context=trace_context,
+        input={"clarification_required": clarification_required},
+        metadata={"phase": "planner"},
+    ) as span:
         response = interrupt({"phase": "planner", "question": clarification_required})
         if span is not None:
-            span.update(output={"phase": "planner", "question_preview": clarification_required[:120]})
+            span.update(output={"response": response})
     return response

@@ -16,7 +16,12 @@ import json
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-from observability.langfuse_handler import trace_context_for_nested_invoke, trace_context_from_runnable_config
+from observability.langfuse_handler import (
+    current_trace_context,
+    trace_context_for_nested_invoke,
+    trace_context_from_runnable_config,
+    traced_span,
+)
 from session_paths import session_id_from_config
 from sub_agents.coding_sub_agent.graph import CodingGraph
 from sub_agents.coding_sub_agent.validation import (
@@ -90,24 +95,35 @@ def coding_tool(
     data_profile = state.get("data_profile") or []
     trace_context = trace_context_for_nested_invoke() or trace_context_from_runnable_config(runtime.config)
 
-    if input_files:
-        missing = find_missing_input_files(session_id, list(input_files))
-        if missing:
-            body = build_coding_tool_response(
-                violation={
-                    "stage": "missing_inputs",
-                    "message": build_missing_inputs_message(missing),
-                },
-            )
-            return json.dumps(body, default=str)
-
-    body = coding_graph.run(
-        session_id=session_id,
-        tool_call_id=tool_call_id,
-        requirements=requirements,
-        input_files=list(input_files),
-        output_files=list(output_files),
-        data_profile=list(data_profile),
+    with traced_span(
+        "coding_tool",
         trace_context=trace_context,
-    )
-    return json.dumps(body, default=str)
+        input={"requirements": requirements, "input_files": input_files, "output_files": output_files},
+        metadata={"session_id": session_id},
+    ) as span:
+        if input_files:
+            missing = find_missing_input_files(session_id, list(input_files))
+            if missing:
+                body = build_coding_tool_response(
+                    violation={
+                        "stage": "missing_inputs",
+                        "message": build_missing_inputs_message(missing),
+                    },
+                )
+                if span is not None:
+                    span.update(output=body)
+                return json.dumps(body, default=str)
+
+        body = coding_graph.run(
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            requirements=requirements,
+            input_files=list(input_files),
+            output_files=list(output_files),
+            data_profile=list(data_profile),
+            # Nest ``coding_pipeline`` under this tool span, not beside it.
+            trace_context=current_trace_context() or trace_context,
+        )
+        if span is not None:
+            span.update(output=body)
+        return json.dumps(body, default=str)
