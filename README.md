@@ -1,320 +1,194 @@
-# GaussianBlurr — Agentic Forecasting Platform
+<div align="center">
 
-Upload a spreadsheet, ask a question in everyday language, and get forecasts, analysis, and charts back in a chat-style interface—with live progress as the system works.
+# GaussianBlurr
 
----
+### An agentic forecasting workspace for real-world data
 
-## What you can do (no jargon)
+Upload a spreadsheet, ask a question in plain English, and receive forecasts, analysis, downloadable data, and charts—without building a notebook first.
 
-- **Upload** CSV or Excel files for one conversation (a “session”).
-- **Ask** things like *“Forecast next year’s sales”* or *“Plot revenue by month.”*
-- **Get** written answers, forecast tables (CSV), and charts shown inline in the chat.
-- **Stay in control** — the assistant can ask a clarifying question before continuing; you answer in the same chat and it resumes.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C)](https://github.com/langchain-ai/langgraph)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Behind the scenes, an AI planner breaks your request into steps, specialized tools run forecasts or custom analysis, and any generated code runs in a **locked-down cloud sandbox** (no open internet) before results are saved to your session folder.
-
----
-
-## 30-second overview
-
-GaussianBlurr is a full-stack **agentic data-analysis platform**—not a static notebook. It wires together:
-
-- A **LangGraph** orchestration layer (multi-step AI workflow),
-- **Deterministic forecasting** (SARIMA, Prophet, Holt-Winters),
-- **Sandboxed Python** when you need custom analysis or charts,
-- **Session-scoped files** (uploads and outputs per chat),
-- A **streaming Dash UI** fed by a FastAPI backend.
-
-It is built to show solid product UX, safe automation, and optional operational tracing (Langfuse).
+</div>
 
 ---
 
-## Example: one request end to end
+## What is GaussianBlurr?
 
-1. Upload `sales.csv` in the sidebar.
-2. Ask: *“Forecast the next 12 months of revenue and show a trend chart.”*
-3. The **planner** writes a short task checklist; the **orchestrator** picks forecasting and/or coding tools.
-4. You see progress stream in chat; forecast CSVs land in your session; the chart appears in the reply.
+GaussianBlurr turns conversational requests into complete forecasting and data-analysis workflows.
 
----
+Instead of choosing a model, preparing scripts, and manually moving results between tools, you can upload a CSV or Excel file and describe the outcome you need:
 
-## Why this project
+> Forecast monthly revenue for the next 12 months, explain the result, and create a trend chart.
 
-| For everyone | For builders |
-|--------------|--------------|
-| Plans and tracks tasks automatically instead of one long prompt | LangGraph main graph + planner and coding sub-graphs |
-| One folder per chat for uploads and outputs | Basename-only file contracts and path containment |
-| Trusted forecast models when you want structure | Shared `ForecastingUnivariateModel` pipeline + three `@tool` wrappers |
-| Custom code only after Semgrep scan, then E2B sandbox | Semgrep static scan + internet-off E2B + optional Langfuse spans |
-| Live progress in the UI | FastAPI SSE (`/run/stream`) + Dash client |
+The platform profiles the data, plans the work when needed, selects the appropriate tools, streams progress to the browser, and returns the results in the same conversation.
 
----
+## Highlights
 
-## Features
+- **Natural-language analysis** — ask questions without writing Python or SQL.
+- **Built-in forecasting** — SARIMA, Prophet, and Holt-Winters workflows with validation, diagnostics, forecasts, and downloadable CSVs.
+- **Adaptive planning** — simple requests run directly; multi-step requests are broken into a tracked plan.
+- **Custom analysis and visualization** — generated Python can handle transformations and charts beyond the built-in forecasting tools.
+- **Live progress** — follow planning, tool execution, and completion events as they happen.
+- **Session-based workspace** — every conversation keeps its uploads and generated artifacts isolated.
+- **Human-in-the-loop** — the planner can pause for clarification and resume from the same conversation.
+- **Layered code safety** — generated code is statically checked, restricted to declared files, and executed in an isolated E2B sandbox without internet access.
+- **Optional observability** — inspect application and agent traces with Langfuse.
 
-- Natural-language Q&A over uploaded CSV/XLSX
-- Automatic **data profiling** (columns, samples, basic stats) at the start of each turn—and again after tools run
-- **Todo planning** at the start of each user message
-- Custom Python analysis and charts via the **coding tool** (entry precheck for declared inputs; clearer JSON with `report` / `artifacts`)
-- **`read_file_tool`** — row preview from session CSV/XLSX (capped by `READ_FILE_MAX_ROWS`)
-- SARIMA / Prophet / Holt-Winters forecasting with structured JSON for the orchestrator
-- FastAPI backend with SSE streaming; Plotly Dash frontend
+## Example workflows
 
----
-
-## How it works
-
-**Simple picture**
+Upload a file such as `sales.csv`, then try:
 
 ```text
-You (browser)  →  Dash UI  →  FastAPI  →  AI agent  →  tools
-                                              ↓
-                                    files & charts in your session folder
+Forecast monthly revenue for the next 12 months. Choose a suitable model,
+summarize the forecast, and show the result as a chart.
 ```
-
-**Each new message**
-
-1. Profile files in the session workspace.  
-2. Summarize older conversation context when needed.  
-3. A **planning gate** decides whether to plan this turn or go straight to the orchestrator.  
-4. **Planner** (when required) replaces the todo list (and may **ask you** a question—execution pauses until you resume).  
-5. **Orchestrator** calls tools until work is done; after tools, data is re-profiled.  
-6. **Final answer** writes the user-facing reply (transient node failures route to `error_answer`).
-
-Technical readers: main graph is `AnalysisGraph` in `graph/graph.py`:
 
 ```text
-ProfileSavedData
-  → SummariseConversationalSummary
-  → IsPlanningRequired → Planner? → Orchestrator
-                              ↘─────────────┘
-  Orchestrator ↔ RunTools → ProfileSavedData_PostTools → Orchestrator
-  Orchestrator → FinalAnswer | error_answer → END
+Compare SARIMA, Prophet, and Holt-Winters for this time series.
+Explain which result is strongest and why.
 ```
 
----
+```text
+Check the data quality, clean any obvious issues, analyze the trend and
+seasonality, then produce a forecast and downloadable output files.
+```
 
-## Quickstart
+## Quick start
 
-**Requires Python 3.10+** (3.12 recommended). LangChain 1.x / Langfuse 4.x need 3.10+.
+### Prerequisites
 
-### 1. Clone and install
+- Python 3.10 or newer
+- An OpenAI API key
+- An E2B account only if you want generated Python analysis and custom charts
+
+### 1. Install
 
 ```bash
 git clone https://github.com/PalashJauhari/ForecastingPlatform.git
 cd ForecastingPlatform
+
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Or: `make install`.
-
-### 2. Configure environment
+### 2. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-| Location | What to set |
-|----------|-------------|
-| Repo root `.env` | `OPENAI_API_KEY`, `MAIN_*`, `PLANNER_*`, `CODING_*`, optional `DATABASE_URL`, optional Langfuse keys |
+Open `.env` and add your OpenAI key:
 
-Full knob list: [`.env.example`](.env.example). Secrets stay in `.env` only (never commit them).
+```dotenv
+OPENAI_API_KEY="your-key"
+```
 
-For **custom Python analysis**, build the E2B sandbox template once (see [E2B template](#e2b-template-one-time-setup) below).
+All available settings are documented in [`.env.example`](.env.example). The `.env` file is ignored by Git and should never be committed.
 
 ### 3. Run
 
 ```bash
 ./start.sh
-# stop: ./kill.sh   (or: make kill)
 ```
 
-- **API:** http://127.0.0.1:8000  
-- **UI:** http://127.0.0.1:8501  
+Then open:
 
-### 4. Use it
+- UI: http://127.0.0.1:8501
+- API: http://127.0.0.1:8000
 
-Upload a CSV in the sidebar, ask a forecasting or analysis question, and watch progress in the chat.
-
-### 5. Tests
+Stop both services with:
 
 ```bash
-make test
-# or: pytest
+./kill.sh
 ```
 
----
+## Enable custom Python analysis
 
-## API overview
+Built-in forecasting works without E2B. Custom transformations and visualizations use an isolated E2B environment.
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/upload-data` | Upload CSV/XLSX into a session |
-| POST | `/run` | Run agent (blocking JSON) |
-| POST | `/run/stream` | Run agent (SSE progress + final `done` payload) |
-| POST | `/resume` | Continue after a clarification interrupt |
-| POST | `/resume/stream` | Same as resume, with SSE |
-| GET | `/artifact/{session_id}/{path}` | Download a session file or plot image |
-
-**Session id** — passed as `session_id` (same value LangGraph uses as `thread_id`). The Dash UI generates one per browser session.
-
----
-
-## Code execution and safety
-
-When the orchestrator needs **custom Python** (charts, transforms, etc.), it calls the **coding tool**, which runs an internal pipeline:
-
-```text
-Generate code → Semgrep scan → Run in E2B sandbox (internet-off)
-         ↑________________________________|
-              retry up to CODING_MAX_CODEGEN_ATTEMPTS (default 3)
-```
-
-**In plain terms**
-
-1. The system writes Python for your task and the file names it may read or write.  
-2. **Semgrep** static rules must pass (blocks OS APIs, network, subprocess, raw file I/O, etc.) before anything runs.  
-3. Approved scripts run in a **fresh, internet-off cloud sandbox** (`allow_internet_access=False`); outputs are copied back to your session.  
-4. If something fails (unsafe code, runtime error), it **tries again** with feedback—up to a configured limit—then reports failure clearly.
-
-**Defense in depth**
-
-| Layer | What it enforces |
-|-------|------------------|
-| Semgrep (pre-run) | No `import os`, `socket`, `subprocess`, `open()`, network clients, etc. |
-| E2B (at run time) | Sandbox has **no internet access**, even if generated code evades static checks |
-
-**Where files go**
-
-- Tables (CSV/XLSX) → session root (same folder as uploads).  
-- Plots (PNG/SVG) → `run_<tool_call_id>/` so the UI can show them inline.
-
-**Coding models and retries** (root `.env`)
-
-| Variable | Meaning |
-|----------|---------|
-| `CODING_MODEL` | Model for code generation on attempts 1 … (MAX − 1) |
-| `CODING_MODEL_LAST_ATTEMPT` | Optional stronger model **only** on the last permitted attempt (when attempt count equals `CODING_MAX_CODEGEN_ATTEMPTS`). Leave empty to always use `CODING_MODEL`. |
-| `CODING_MAX_CODEGEN_ATTEMPTS` | How many times the pipeline may **regenerate** code after a gate or sandbox failure (default `3`) |
-
-Example: with `CODING_MAX_CODEGEN_ATTEMPTS=3`, attempts 1–2 use `CODING_MODEL`; attempt 3 can use `CODING_MODEL_LAST_ATTEMPT` (e.g. a larger model) if you set it.
-
-Guardrails include **basename-only** paths (no folder prefixes in tool args), allowed extensions, blocked dangerous patterns, and session path containment.
-
-### E2B template (one-time setup)
-
-Build the sandbox image manually (not on app startup). From the repo root with your venv active:
+Add `CODING_E2B_API_KEY` to `.env`, then build the template once:
 
 ```bash
-pip install 'e2b>=2.3.0'
 python sub_agents/coding_sub_agent/e2b/build_e2b_template.py --write-env
 ```
 
-Set `CODING_E2B_API_KEY` in root `.env` before building. After build, ensure `CODING_E2B_TEMPLATE_NAME` (and optional `CODING_E2B_TEMPLATE_ID`) are in root `.env`.
+The command records the template configuration in your local `.env`. See the [E2B setup guide](sub_agents/coding_sub_agent/e2b/README.md) for details.
 
-Runtime defaults: `allow_internet_access=False`, sandbox timeout 120s (`CODING_E2B_SANDBOX_TIMEOUT_SECONDS`). By default `CODING_E2B_KILL_SANDBOX=false` so runs stay visible in the E2B dashboard for debugging; set `true` in production to destroy sandboxes after each run.
+## How it works
 
-Requires `e2b-code-interpreter>=2.7.0` (supports `lifecycle` on `Sandbox.create`).
+```text
+Upload data
+    ↓
+Profile the session workspace
+    ↓
+Decide whether a plan is needed
+    ↓
+Run forecasting, file, or coding tools
+    ↓
+Validate and save generated artifacts
+    ↓
+Stream the final answer, files, and charts to the UI
+```
 
----
+GaussianBlurr uses a main LangGraph workflow with two focused sub-agents:
 
-## Forecasting tools
+- The **planner** converts larger requests into a sequence of outcomes and can ask for clarification.
+- The **coding agent** generates Python for custom work, validates it, and executes approved code in a sandbox.
 
-All three tools share the same pipeline: validate → fit → fitted/residuals → forecast → save CSV/PNG → lean JSON (`ForecastingUnivariateModel` in `tools/forecasting/base.py`).
+The orchestrator coordinates these capabilities and produces the final user-facing response.
 
-| Tool | Best for |
-|------|----------|
-| **SARIMA** (`sarima_tool`) | Classical ARIMA/SARIMAX; strict (no missing target values); diagnostics (Ljung-Box, Jarque-Bera) |
-| **Prophet** (`prophet_tool`) | Trend + seasonality; tolerates missing targets; decomposition outputs |
-| **Holt-Winters** (`holt_winters_tool`) | Exponential smoothing; trend/seasonality options; decomposition |
+## Safety by design
 
-**`experiment_name`** (required) — unique label for one run. Artifacts look like `{experiment_name}_fitted.csv`, `_forecast.csv`, optional `_decomposition.csv`, plus PNG plots. JSON returned to the agent uses **filenames only**, not full disk paths.
+Custom code is never executed directly by the web application.
 
-**Response shape:** `status`, `model_type`, `experiment_name`, `frequency`, `warnings`, and `pipeline` (per-stage status, metrics, previews, plot basenames).
+Before execution, the coding pipeline:
 
-**Data expectations:** regular date frequency (inferred), basename-only `file_name`, at least 10 rows. Upload data to the session before calling a tool.
+1. Confirms that requested inputs exist in the current session.
+2. Restricts inputs and outputs to supported, directory-free filenames.
+3. Scans generated Python with Semgrep.
+4. Verifies that code accesses only the files declared by the tool call.
+5. Executes approved code in a fresh E2B sandbox with internet access disabled.
+6. Copies back only the declared output files.
 
----
-
-## Configuration
-
-**Main app + sub-agents** — root `.env` only: orchestrator model, graph limits, planner/coding models, E2B keys, optional Postgres checkpointing (`MAIN_CHECKPOINTER_USE_NEON` + `DATABASE_URL`).
-
-**Runtime data** — `agent_filesystem/` (gitignored): one directory per session id.
-
----
-
-## Observability
-
-Set `LANGFUSE_TRACING_ENABLED=true` and Langfuse keys in the root `.env` for traces on `POST /run`, `/run/stream`, `/resume`, and `/resume/stream`.
-
-- One root trace per API call; nested spans for graph nodes, planner, forecasting pipelines, and coding sub-agent (linked under `coding_tool`).  
-- Planner `ask_user` → a **resume** call gets its own root span (expected for one logical turn).  
-- Coding traces may include generated code and stderr; artifacts remain on disk either way.  
-- Parallel tools (`max_concurrency: 2`) can flatten nesting in Langfuse when multiple tools finish in one step.
-
-The chat UI does not expose trace IDs—tracing is for operators and developers.
-
----
+Uploads, generated files, logs, and local environment variables are excluded from version control.
 
 ## Project structure
 
 ```text
-api/                   FastAPI service and SSE streaming
-graph/                 Main LangGraph agent (AnalysisGraph)
-sub_agents/
-  planner_sub_agent/     PlannerGraph — todos, ask_user interrupt
-  coding_sub_agent/      CodingGraph — codegen, Semgrep scan, E2B
-    e2b/                 Template build + sandbox requirements
-    code_scan/           Semgrep rules + static scan
-tools/                 Main-graph tools only
-  coding_tools/          coding_tool → CodingGraph
-  file_management_tools/ read_file_tool, profiling
-  planning/              update_todo (orchestrator)
-  forecasting/           SARIMA / Prophet / Holt-Winters
-output_validation/     Pydantic schemas for tool / gate inputs
-observability/         Langfuse helpers
-ui/                    Dash chat application
-prompts/               Orchestrator system prompt
-middleware/            LLM clients, rate limiting, context editing
-tests/unit/            Pytest suite
-scripts/               Dev helpers (e.g. graph diagrams)
-session_paths.py       Session filesystem layout
-start.sh / kill.sh     Local run / stop
+ForecastingPlatform/
+├── api/                 Backend application and streaming endpoints
+├── graph/               Main agent workflow
+├── middleware/          LLM clients, rate limiting, and context handling
+├── observability/       Optional Langfuse tracing
+├── output_validation/   Structured tool and agent schemas
+├── prompts/             Main orchestration prompts
+├── sub_agents/
+│   ├── planner_sub_agent/
+│   └── coding_sub_agent/
+├── tools/
+│   ├── forecasting/
+│   ├── file_management_tools/
+│   └── coding_tools/
+├── ui/                  Plotly Dash chat interface
+└── tests/unit/          Unit test suite
 ```
 
-**Tool placement:** main-graph tools register on `graph/graph.py`. Planner-only tools (`write_todo`, `ask_user`) live under `sub_agents/planner_sub_agent/tools/`.
+## Observability
 
-**Graph classes:** `AnalysisGraph` (main), `PlannerGraph` (mounted subgraph; interrupts use parent checkpointer), `CodingGraph` (invoked inside `coding_tool`). Resume after planner clarification: `POST /resume` with the same `session_id`.
+Langfuse tracing is optional. To enable it, configure the following values in `.env`:
 
----
+```dotenv
+LANGFUSE_TRACING_ENABLED=true
+LANGFUSE_SECRET_KEY="..."
+LANGFUSE_PUBLIC_KEY="..."
+LANGFUSE_HOST="https://cloud.langfuse.com"
+```
 
-## Glossary (quick)
-
-| Term | Meaning |
-|------|---------|
-| **Session** | One chat’s workspace (uploads + generated files); identified by `session_id`. |
-| **Planner** | Sub-agent that builds/replaces the todo list and may ask clarifying questions. |
-| **Orchestrator** | Main agent that picks tools and drives work to completion. |
-| **Coding tool** | Generates, reviews, and runs Python in E2B; retries on failure. |
-| **SSE** | Server-Sent Events—live progress stream from API to browser. |
-| **E2B** | Third-party isolated cloud environment where generated code runs. |
-| **LangGraph** | Framework used to define the agent workflow as a graph of steps. |
-
----
-
-## For contributors
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Short notes:
-
-- **Prompts** (`prompts/`, `sub_agents/*/prompts.py`) hold LLM instructions; **code comments** explain graph wiring—invariants, not duplicated prompt text.
-- **Forecasting** — inherit `ForecastingUnivariateModel`; snake_case public methods; tool docstrings are the orchestrator contract.
-- **Planner** — never names orchestrator tools in todo text; outcomes only (`write_todo` / `ask_user`).
-- **Entry points** — main graph: `graph/graph.py`; sub-agents: `sub_agents/planner_sub_agent/`, `sub_agents/coding_sub_agent/`.
-- **Diagrams** — `python scripts/generate_artifact_plot.py` → `artifact/*.png`.
+Traces cover API requests, graph nodes, planning, forecasting pipelines, and sandboxed coding runs.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GaussianBlurr is available under the [MIT License](LICENSE).
