@@ -49,6 +49,9 @@ htmlcov/
 *.swo
 .DS_Store
 
+# --- Local interview revision notes ---
+interview-revision.html
+
 # --- Semgrep local cache (coding sub-agent) ---
 .semgrep/
 
